@@ -1,0 +1,266 @@
+/* Font integrations */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Design Tokens & Theme Variables */
+:root {
+  --bg-dark: #0a0b0d;
+  --bg-card: rgba(22, 24, 30, 0.65);
+  --bg-hover: rgba(35, 38, 48, 0.75);
+  
+  --accent-color: #6366f1; /* Indigo */
+  --accent-gradient: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+  
+  --color-positive: #10b981; /* Emerald */
+  --color-negative: #f43f5e; /* Rose */
+  --color-warning: #f59e0b; /* Amber */
+  --color-text-primary: #f3f4f6;
+  --color-text-secondary: #9ca3af;
+  
+  --border-color: rgba(255, 255, 255, 0.08);
+  --glow-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+  --glass-blur: blur(12px);
+}
+
+/* Reset & Base HTML Styles */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background-color: var(--bg-dark);
+  color: var(--color-text-primary);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow-x: hidden;
+}
+
+/* Scrollbars styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Custom Component Layouts */
+.app-header {
+  height: 70px;
+  border-bottom: 1px solid var(--border-color);
+  background: rgba(13, 14, 18, 0.85);
+  backdrop-filter: var(--glass-blur);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 24px;
+  z-index: 100;
+  position: sticky;
+  top: 0;
+}
+
+.logo-circle {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--accent-gradient);
+  color: white;
+  font-weight: 700;
+  font-family: 'Outfit', sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 15px rgba(99, 102, 241, 0.4);
+}
+
+.positive { color: var(--color-positive); }
+.negative { color: var(--color-negative); }
+.warning { color: var(--color-warning); }
+
+/* Sidebar Watchlist */
+.sidebar {
+  width: 300px;
+  border-right: 1px solid var(--border-color);
+  background: rgba(13, 14, 18, 0.4);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.watchlist-item {
+  padding: 14px 18px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.watchlist-item:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+}
+
+.watchlist-item.active {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: rgba(99, 102, 241, 0.25);
+}
+
+/* Tab controls */
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 8px 16px;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--bg-hover);
+}
+
+.tab-btn.active {
+  color: var(--color-text-primary);
+  background: var(--accent-gradient);
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+}
+
+/* Glassmorphic cards */
+.card {
+  background: var(--bg-card);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  box-shadow: var(--glow-shadow);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.3s ease;
+}
+
+.card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Candlestick chart container */
+#candlestick-chart {
+  background: #0f1015;
+  border-radius: 12px;
+}
+
+/* Advisory Signal Box styles */
+.signal-direction-box {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed var(--border-color);
+  border-radius: 16px;
+  height: 140px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+  transition: all 0.3s ease;
+}
+
+.signal-direction-box.call-buy {
+  background: rgba(16, 185, 129, 0.05);
+  border-color: var(--color-positive);
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.1) inset;
+}
+
+.signal-direction-box.put-buy {
+  background: rgba(244, 63, 94, 0.05);
+  border-color: var(--color-negative);
+  box-shadow: 0 0 20px rgba(244, 63, 94, 0.1) inset;
+}
+
+/* Logging console styling */
+.logs-console {
+  background: #07080a;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 16px;
+  height: 180px;
+  overflow-y: auto;
+  font-family: 'Consolas', monospace;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.log-line {
+  line-height: 1.4;
+}
+
+.log-line.system {
+  color: var(--color-text-secondary);
+}
+
+.log-line.warning-alert {
+  color: var(--color-warning);
+}
+
+.log-line.error-alert {
+  color: var(--color-negative);
+}
+
+.log-line.success-alert {
+  color: var(--color-positive);
+}
+
+/* Badges */
+.badge-neutral {
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  padding: 2px 10px;
+  border-radius: 12px;
+  color: var(--color-text-secondary);
+  font-weight: 600;
+}
+
+.badge-call {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid var(--color-positive);
+  color: var(--color-positive);
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.badge-put {
+  background: rgba(244, 63, 94, 0.15);
+  border: 1px solid var(--color-negative);
+  color: var(--color-negative);
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+}

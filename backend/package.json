@@ -1,0 +1,33 @@
+{
+  "name": "nifty50-advisory-backend",
+  "version": "1.0.0",
+  "description": "Advisory and quantitative analysis engine backend for Nifty 50 options",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "nodemon",
+    "dev:simple": "ts-node src/index.ts",
+    "test:advisory": "ts-node src/scratch/mockAdvisoryTest.ts",
+    "generate:token": "ts-node src/scratch/generateToken.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.1.2",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "fyers-api-v3": "^2.1.0",
+    "kiteconnect": "^4.0.1",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^20.14.9",
+    "@types/ws": "^8.18.1",
+    "nodemon": "^3.1.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.2"
+  }
+}

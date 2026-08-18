@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment Variables & API Secrets
+.env
+.env*.local
+**/.env
+**/.env*.local
+
+# Next.js Build Outputs
+web/.next/
+web/out/
+
+# TypeScript & Production Builds
+dist/
+**/dist/
+build/
+**/build/
+
+# Local SQLite Databases & Logs
+*.db
+*.db-wal
+*.db-shm
+**/data/*.db*
+logs/
+**/logs/
+
+# Local Paper-Trading Ledger Outputs
+Stock Mock/
+**/Stock Mock/
+
+# Debug Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# OS Files
+.DS_Store
+Thumbs.db
