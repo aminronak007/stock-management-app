@@ -8,6 +8,7 @@ export class FyersAdapter implements IBrokerAdapter {
   private tickCallbacks: ((tick: CompactTick) => void)[] = [];
   private subscribedSymbols: Set<string> = new Set();
   private latestTicks: { [symbol: string]: number } = {};
+  private optionChainCache: { [symbol: string]: { data: OptionChainItem[]; expiryTime: number } } = {};
   
   // Real Fyers API clients
   private fyersClient: any = null;
@@ -307,8 +308,7 @@ export class FyersAdapter implements IBrokerAdapter {
     toDate: string
   ): Promise<Candle[]> {
     if (this.useLiveApi && this.fyersClient) {
-      try {
-        console.log(`[FyersAdapter] Fetching real historical data for: ${symbol}`);
+      const fetchFromFyers = async (): Promise<Candle[] | null> => {
         const params = {
           symbol: symbol,
           resolution: resolution,
@@ -317,21 +317,33 @@ export class FyersAdapter implements IBrokerAdapter {
           range_to: toDate,
           cont_flag: "1"
         };
-        
         const res = await this.fyersClient.getHistory(params);
         if (res && res.s === "ok" && Array.isArray(res.candles)) {
           return res.candles.map((c: any) => ({
-            timestamp: c[0] * 1000, // convert epoch to ms
+            timestamp: c[0] * 1000,
             open: c[1],
             high: c[2],
             low: c[3],
             close: c[4],
             volume: c[5]
           }));
-        } else {
-          console.warn(`[FyersAdapter] History query for ${symbol} returned non-ok status:`, res?.message || res);
         }
+        return null;
+      };
+
+      try {
+        console.log(`[FyersAdapter] Fetching real historical data for: ${symbol}`);
+        const candles = await fetchFromFyers();
+        if (candles) return candles;
       } catch (err: any) {
+        if (err?.message?.includes("limit") || typeof err === "string" && err.includes("limit")) {
+          // Rate limit backoff: wait 400ms and retry once
+          await new Promise(r => setTimeout(r, 400));
+          try {
+            const retryCandles = await fetchFromFyers();
+            if (retryCandles) return retryCandles;
+          } catch {}
+        }
         console.warn(`[FyersAdapter] Historical data query rejected for ${symbol}:`, err?.message || err);
       }
     }
@@ -378,6 +390,12 @@ export class FyersAdapter implements IBrokerAdapter {
   }
 
   public async getOptionChain(underlying: string): Promise<OptionChainItem[]> {
+    const cached = this.optionChainCache[underlying];
+    const now = Date.now();
+    if (cached && cached.expiryTime > now && cached.data.length > 0) {
+      return cached.data;
+    }
+
     if (this.useLiveApi && this.fyersClient) {
       try {
         console.log(`[FyersAdapter] Fetching real Option Chain for: ${underlying}`);
@@ -389,7 +407,7 @@ export class FyersAdapter implements IBrokerAdapter {
         const res = await this.fyersClient.getOptionChain(params);
         if (res && res.s === "ok" && res.data && Array.isArray(res.data.optionsChain)) {
           const expiry = res.data.expiry;
-          return res.data.optionsChain.map((opt: any) => ({
+          const chain = res.data.optionsChain.map((opt: any) => ({
             strikePrice: opt.strikePrice,
             expiryDate: expiry,
             underlyingSymbol: underlying,
@@ -410,6 +428,13 @@ export class FyersAdapter implements IBrokerAdapter {
               impliedVolatility: opt.putIv
             }
           }));
+
+          // Cache for 3 seconds to prevent rate limiting
+          this.optionChainCache[underlying] = {
+            data: chain,
+            expiryTime: now + 3000
+          };
+          return chain;
         }
       } catch (err: any) {
         console.warn(`[FyersAdapter] Option chain query rejected for ${underlying}:`, err?.message || err);

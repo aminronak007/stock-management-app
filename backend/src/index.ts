@@ -510,6 +510,8 @@ async function main() {
         console.warn(`[Broker] Error fetching close for ${m.symbol}: ${err.message}. Using fallback base: ₹${m.base}`);
         brokerTickCache[m.symbol] = { ltp: m.base, change: 0.0 };
       }
+      // 350ms throttle delay between symbols to prevent Fyers rate limit
+      await new Promise(r => setTimeout(r, 350));
     }
   }
 
