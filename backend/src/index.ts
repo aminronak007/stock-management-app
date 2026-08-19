@@ -246,7 +246,7 @@ async function main() {
     try {
       if (broker.generateSessionFromAuthCode) {
         await broker.generateSessionFromAuthCode(authCode);
-        
+
         // Re-resolve real closing prices and broadcast to all clients immediately
         await resolveHistoricalClosePrices();
         await advisory.initialize();
