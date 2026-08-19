@@ -76,7 +76,7 @@ export class FyersAdapter implements IBrokerAdapter {
       this.dataSocket = fyers.fyersDataSocket.getInstance(
         `${clientId}:${this.accessToken}`,
         "./",
-        true
+        false
       );
 
       this.dataSocket.on("connect", () => {
@@ -167,52 +167,9 @@ export class FyersAdapter implements IBrokerAdapter {
           this.dataSocket.autoreconnect();
         }
       } catch {}
-
-      // Start fallback quotes polling loop
-      this.startQuotesPolling();
     } catch (e) {
       console.error("[FyersAdapter] WebSocket client failed to launch.", e);
     }
-  }
-
-  private quotesPollingTimer: NodeJS.Timeout | null = null;
-  private startQuotesPolling(): void {
-    if (this.quotesPollingTimer) return;
-
-    this.quotesPollingTimer = setInterval(async () => {
-      if (!this.useLiveApi || !this.fyersClient || this.subscribedSymbols.size === 0) return;
-      try {
-        const symbolsArray = Array.from(this.subscribedSymbols);
-        const res = await this.fyersClient.getQuotes({ symbols: symbolsArray.join(",") });
-        if (res && res.s === "ok" && Array.isArray(res.d)) {
-          res.d.forEach((item: any) => {
-            const rawSym = item.n || item.name || item.symbol || item.v?.symbol;
-            if (!rawSym) return;
-            const symbol = this.normalizeFyersSymbol(rawSym);
-            const ltp = item.v?.lp ?? item.v?.last_price ?? item.lp ?? 0;
-            const chp = item.v?.chp ?? item.chp ?? 0;
-            const volume = item.v?.volume ?? item.v?.vol ?? 0;
-            const bid = item.v?.bid ?? ltp;
-            const ask = item.v?.ask ?? ltp;
-
-            if (ltp > 0) {
-              const tick: CompactTick = {
-                symbol,
-                ltp: Number(ltp),
-                netChangePercent: Number(chp),
-                volume: Number(volume),
-                bidPrice: Number(bid),
-                askPrice: Number(ask),
-                timestamp: Date.now()
-              };
-              this.tickCallbacks.forEach(cb => cb(tick));
-            }
-          });
-        }
-      } catch (err: any) {
-        // Silent catch
-      }
-    }, 2500);
   }
 
   // Normalize human-friendly Fyers/HSM symbols into internal symbol keys used by the app
@@ -253,10 +210,6 @@ export class FyersAdapter implements IBrokerAdapter {
       try {
         this.dataSocket.close();
       } catch {}
-    }
-    if (this.quotesPollingTimer) {
-      clearInterval(this.quotesPollingTimer);
-      this.quotesPollingTimer = null;
     }
     DatabaseService.clearSession("FYERS");
     console.log("[FyersAdapter] User session cleared and broker disconnected.");
