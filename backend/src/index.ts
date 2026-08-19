@@ -332,9 +332,13 @@ async function main() {
   app.get("/api/database/overview", (req, res) => {
     try {
       const db = DatabaseService.initialize();
-      const signals = db.prepare("SELECT * FROM advisory_signals ORDER BY id DESC LIMIT 100").all();
-      const paperTrades = DatabaseService.getPaperTrades(150);
-      const analytics = DatabaseService.getTradeAnalytics();
+      const tierParam = (req.query.tier as string) || "ALL";
+      const signals = (tierParam !== "ALL")
+        ? db.prepare("SELECT * FROM advisory_signals WHERE tier = ? ORDER BY id DESC LIMIT 100").all(tierParam)
+        : db.prepare("SELECT * FROM advisory_signals ORDER BY id DESC LIMIT 100").all();
+      const paperTrades = DatabaseService.getPaperTrades(200, tierParam);
+      const analytics = DatabaseService.getTradeAnalytics(tierParam);
+      const tierAnalytics = DatabaseService.getTierOverviewAnalytics();
       const sessions = db.prepare("SELECT * FROM sessions").all();
       const settings = db.prepare("SELECT * FROM settings").all();
       const stats = {
@@ -345,7 +349,7 @@ async function main() {
         dbPath: path.join(__dirname, "../data/state.db"),
         engineTime: Date.now()
       };
-      res.json({ stats, signals, paperTrades, analytics, sessions, settings });
+      res.json({ stats, signals, paperTrades, analytics, tierAnalytics, sessions, settings });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -353,7 +357,8 @@ async function main() {
 
   app.get("/api/paper-trades", (req, res) => {
     try {
-      const trades = DatabaseService.getPaperTrades(100);
+      const tier = req.query.tier as string | undefined;
+      const trades = DatabaseService.getPaperTrades(150, tier);
       res.json(trades);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -362,7 +367,8 @@ async function main() {
 
   app.get("/api/paper-trades/analytics", (req, res) => {
     try {
-      const analytics = DatabaseService.getTradeAnalytics();
+      const tier = req.query.tier as string | undefined;
+      const analytics = DatabaseService.getTradeAnalytics(tier);
       res.json(analytics);
     } catch (e: any) {
       res.status(500).json({ error: e.message });

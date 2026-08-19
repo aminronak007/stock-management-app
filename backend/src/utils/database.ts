@@ -2,11 +2,14 @@ import Database from "better-sqlite3";
 import * as path from "path";
 import * as fs from "fs";
 
+export type SignalTier = "SNIPER" | "BALANCED" | "EXPLORATORY";
+
 export interface PaperTradeRecord {
   id: number;
   timestamp: number;
   datetime: string;
   type: string;
+  tier?: SignalTier;
   symbol: string;
   strike?: string;
   qty: number;
@@ -24,6 +27,7 @@ export interface PaperTradeRecord {
 }
 
 export interface TradeAnalytics {
+  tier?: string;
   totalTrades: number;
   winningTrades: number;
   losingTrades: number;
@@ -91,6 +95,7 @@ export class DatabaseService {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp INTEGER NOT NULL,
         type TEXT NOT NULL,
+        tier TEXT DEFAULT 'SNIPER',
         strike_price REAL,
         entry_price REAL,
         stop_loss_price REAL,
@@ -107,6 +112,7 @@ export class DatabaseService {
         timestamp INTEGER NOT NULL,
         datetime TEXT NOT NULL,
         type TEXT NOT NULL,
+        tier TEXT DEFAULT 'SNIPER',
         symbol TEXT NOT NULL,
         strike TEXT,
         qty INTEGER NOT NULL,
@@ -124,7 +130,15 @@ export class DatabaseService {
       )
     `);
 
-    console.log("[Database] Database tables verified/created successfully.");
+    // Column migrations for existing tables
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN tier TEXT DEFAULT 'SNIPER'");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE advisory_signals ADD COLUMN tier TEXT DEFAULT 'SNIPER'");
+    } catch {}
+
+    console.log("[Database] Database tables and tier schema verified/created successfully.");
   }
 
   public static saveSession(provider: string, token: string, expiresAt: number): void {
@@ -157,18 +171,20 @@ export class DatabaseService {
     sl: number | undefined,
     t1: number | undefined,
     t2: number | undefined,
-    reasoning: string
+    reasoning: string,
+    tier: SignalTier = "SNIPER"
   ): void {
     const db = this.initialize();
     const stmt = db.prepare(`
-      INSERT INTO advisory_signals (timestamp, type, strike_price, entry_price, stop_loss_price, target_price1, target_price2, reasoning)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO advisory_signals (timestamp, type, tier, strike_price, entry_price, stop_loss_price, target_price1, target_price2, reasoning)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(Date.now(), type, strike ?? null, entry ?? null, sl ?? null, t1 ?? null, t2 ?? null, reasoning);
+    stmt.run(Date.now(), type, tier, strike ?? null, entry ?? null, sl ?? null, t1 ?? null, t2 ?? null, reasoning);
   }
 
   public static logPaperTrade(data: {
     type: string;
+    tier?: SignalTier;
     symbol: string;
     strike?: number | string;
     qty: number;
@@ -185,6 +201,7 @@ export class DatabaseService {
     const timestamp = Date.now();
     const datetime = new Date().toLocaleString("en-IN");
     const investedCapital = data.price * data.qty;
+    const tier = data.tier || "SNIPER";
     
     // Calculate PnL percentage if PnL is present
     let pnlPercent: number | null = null;
@@ -194,16 +211,17 @@ export class DatabaseService {
 
     const stmt = db.prepare(`
       INSERT INTO paper_trades (
-        timestamp, datetime, type, symbol, strike, qty, price,
+        timestamp, datetime, type, tier, symbol, strike, qty, price,
         stop_loss, target1, target2, invested_capital, pnl, pnl_percent,
         reasoning, market_regime, confluence_score, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
       timestamp,
       datetime,
       data.type,
+      tier,
       data.symbol,
       data.strike ? String(data.strike) : null,
       data.qty,
@@ -221,8 +239,11 @@ export class DatabaseService {
     );
   }
 
-  public static getPaperTrades(limit: number = 100): PaperTradeRecord[] {
+  public static getPaperTrades(limit: number = 150, tier?: string): PaperTradeRecord[] {
     const db = this.initialize();
+    if (tier && tier !== "ALL") {
+      return db.prepare("SELECT * FROM paper_trades WHERE tier = ? ORDER BY id DESC LIMIT ?").all(tier, limit) as PaperTradeRecord[];
+    }
     return db.prepare("SELECT * FROM paper_trades ORDER BY id DESC LIMIT ?").all(limit) as PaperTradeRecord[];
   }
 
@@ -230,9 +251,11 @@ export class DatabaseService {
    * Evaluates historical paper trade statistics to feed back into QuantitativeEngine
    * for adaptive target scaling and higher probability accuracy.
    */
-  public static getTradeAnalytics(): TradeAnalytics {
+  public static getTradeAnalytics(tier?: string): TradeAnalytics {
     const db = this.initialize();
-    const trades = db.prepare("SELECT * FROM paper_trades WHERE pnl IS NOT NULL").all() as PaperTradeRecord[];
+    const trades = (tier && tier !== "ALL")
+      ? (db.prepare("SELECT * FROM paper_trades WHERE pnl IS NOT NULL AND tier = ?").all(tier) as PaperTradeRecord[])
+      : (db.prepare("SELECT * FROM paper_trades WHERE pnl IS NOT NULL").all() as PaperTradeRecord[]);
 
     let totalPnl = 0;
     let winningTrades = 0;
@@ -289,22 +312,21 @@ export class DatabaseService {
     const putWinRate = putTrades > 0 ? (putWins / putTrades) * 100 : 50;
 
     // Adaptive Machine Learning calibration:
-    // If win rate is > 65%, expand target multiplier slightly to capture bigger runners (e.g. 1.1x).
-    // If win rate is lower (< 45%), contract targets to lock in conservative profits faster (e.g. 0.85x).
     let suggestedTargetMultiplier = 1.0;
     let suggestedScoreBias = 0;
 
     if (totalCount >= 5) {
       if (winRatePercent >= 65) {
         suggestedTargetMultiplier = 1.15;
-        suggestedScoreBias = 5; // boost score
+        suggestedScoreBias = 5;
       } else if (winRatePercent < 45) {
-        suggestedTargetMultiplier = 0.85; // take quicker conservative target
-        suggestedScoreBias = -5; // require higher confluence
+        suggestedTargetMultiplier = 0.85;
+        suggestedScoreBias = -5;
       }
     }
 
     return {
+      tier: tier || "ALL",
       totalTrades: totalCount,
       winningTrades,
       losingTrades,
@@ -322,6 +344,20 @@ export class DatabaseService {
       putWinRate,
       suggestedTargetMultiplier,
       suggestedScoreBias
+    };
+  }
+
+  public static getTierOverviewAnalytics(): {
+    overall: TradeAnalytics;
+    sniper: TradeAnalytics;
+    balanced: TradeAnalytics;
+    exploratory: TradeAnalytics;
+  } {
+    return {
+      overall: this.getTradeAnalytics("ALL"),
+      sniper: this.getTradeAnalytics("SNIPER"),
+      balanced: this.getTradeAnalytics("BALANCED"),
+      exploratory: this.getTradeAnalytics("EXPLORATORY")
     };
   }
 }

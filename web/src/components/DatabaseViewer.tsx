@@ -6,6 +6,7 @@ interface DatabaseSignal {
   id: number;
   timestamp: number;
   type: string;
+  tier?: string;
   strike_price?: number;
   entry_price?: number;
   stop_loss_price?: number;
@@ -19,6 +20,7 @@ interface PaperTrade {
   timestamp: number;
   datetime: string;
   type: string;
+  tier?: string;
   symbol: string;
   strike?: string;
   qty: number;
@@ -36,6 +38,7 @@ interface PaperTrade {
 }
 
 interface TradeAnalytics {
+  tier?: string;
   totalTrades: number;
   winningTrades: number;
   losingTrades: number;
@@ -53,6 +56,13 @@ interface TradeAnalytics {
   putWinRate: number;
   suggestedTargetMultiplier: number;
   suggestedScoreBias: number;
+}
+
+interface TierOverviewAnalytics {
+  overall: TradeAnalytics;
+  sniper: TradeAnalytics;
+  balanced: TradeAnalytics;
+  exploratory: TradeAnalytics;
 }
 
 interface DatabaseSession {
@@ -77,9 +87,11 @@ interface DatabaseStats {
 
 export const DatabaseViewer: React.FC = () => {
   const [activeSubTab, setActiveSubTab] = useState<"trades" | "signals" | "sessions" | "settings">("trades");
+  const [selectedTier, setSelectedTier] = useState<"ALL" | "SNIPER" | "BALANCED" | "EXPLORATORY">("ALL");
   const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([]);
   const [signals, setSignals] = useState<DatabaseSignal[]>([]);
   const [analytics, setAnalytics] = useState<TradeAnalytics | null>(null);
+  const [tierAnalytics, setTierAnalytics] = useState<TierOverviewAnalytics | null>(null);
   const [sessions, setSessions] = useState<DatabaseSession[]>([]);
   const [settings, setSettings] = useState<DatabaseSetting[]>([]);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
@@ -99,6 +111,7 @@ export const DatabaseViewer: React.FC = () => {
         setPaperTrades(data.paperTrades || []);
         setSignals(data.signals || []);
         setAnalytics(data.analytics || null);
+        setTierAnalytics(data.tierAnalytics || null);
         setSessions(data.sessions || []);
         setSettings(data.settings || []);
         setStats(data.stats || null);
@@ -121,16 +134,25 @@ export const DatabaseViewer: React.FC = () => {
     return () => clearInterval(interval);
   }, [autoRefresh]);
 
-  // Filter paper trades
+  // Filter paper trades by Search, Type, and Tier
   const filteredPaperTrades = useMemo(() => {
     return paperTrades.filter(trade => {
+      // 1. Tier filter
+      const tradeTier = trade.tier || "SNIPER";
+      if (selectedTier !== "ALL" && tradeTier !== selectedTier) {
+        return false;
+      }
+
+      // 2. Search query
       const q = searchQuery.toLowerCase();
       const matchesSearch = 
         (trade.reasoning && trade.reasoning.toLowerCase().includes(q)) ||
         (trade.symbol && trade.symbol.toLowerCase().includes(q)) ||
         (trade.strike && trade.strike.toLowerCase().includes(q)) ||
-        (trade.type && trade.type.toLowerCase().includes(q));
+        (trade.type && trade.type.toLowerCase().includes(q)) ||
+        (trade.tier && trade.tier.toLowerCase().includes(q));
 
+      // 3. Type filter
       let matchesFilter = true;
       if (filterType === "PROFIT") matchesFilter = (trade.pnl || 0) > 0;
       else if (filterType === "LOSS") matchesFilter = (trade.pnl || 0) < 0;
@@ -141,7 +163,7 @@ export const DatabaseViewer: React.FC = () => {
 
       return matchesSearch && matchesFilter;
     });
-  }, [paperTrades, searchQuery, filterType]);
+  }, [paperTrades, searchQuery, filterType, selectedTier]);
 
   // Filter advisory signals
   const filteredSignals = useMemo(() => {
@@ -185,10 +207,11 @@ export const DatabaseViewer: React.FC = () => {
 
   const handleExportTradesCSV = () => {
     if (paperTrades.length === 0) return;
-    const headers = ["Timestamp", "Type", "Symbol", "Strike", "Qty", "Price", "StopLoss", "Target1", "Target2", "InvestedCapital", "PnL", "PnL_Percent", "Regime", "Reasoning"];
-    const rows = paperTrades.map(t => [
+    const headers = ["Timestamp", "Type", "Tier", "Symbol", "Strike", "Qty", "Price", "StopLoss", "Target1", "Target2", "InvestedCapital", "PnL", "PnL_Percent", "Regime", "Reasoning"];
+    const rows = filteredPaperTrades.map(t => [
       `"${t.datetime || new Date(t.timestamp).toLocaleString()}"`,
       t.type,
+      t.tier || "SNIPER",
       t.symbol,
       t.strike || "",
       t.qty,
@@ -206,7 +229,7 @@ export const DatabaseViewer: React.FC = () => {
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `paper_trades_db_${new Date().toISOString().split("T")[0]}.csv`);
+    link.setAttribute("download", `paper_trades_${selectedTier.toLowerCase()}_${new Date().toISOString().split("T")[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -221,11 +244,144 @@ export const DatabaseViewer: React.FC = () => {
     return "bg-indigo-500/15 border-indigo-500/30 text-indigo-400";
   };
 
-  const netPnl = analytics?.totalPnl || 0;
+  const getTierBadge = (tier?: string) => {
+    const t = tier || "SNIPER";
+    if (t === "SNIPER") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 shadow-sm shadow-emerald-500/20">
+          <span>🎯</span> SNIPER (≥75%)
+        </span>
+      );
+    }
+    if (t === "BALANCED") {
+      return (
+        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/15 border border-blue-500/30 text-blue-400">
+          <span>⚖️</span> BALANCED (60-74%)
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 border border-amber-500/30 text-amber-400">
+        <span>⚡</span> EXPLORATORY (&lt;60%)
+      </span>
+    );
+  };
+
+  // Active tier stats calculation
+  const activeAnalytics = useMemo(() => {
+    if (!tierAnalytics) return analytics;
+    if (selectedTier === "SNIPER") return tierAnalytics.sniper;
+    if (selectedTier === "BALANCED") return tierAnalytics.balanced;
+    if (selectedTier === "EXPLORATORY") return tierAnalytics.exploratory;
+    return tierAnalytics.overall;
+  }, [tierAnalytics, analytics, selectedTier]);
+
+  const netPnl = activeAnalytics?.totalPnl || 0;
   const isNetProfit = netPnl >= 0;
 
   return (
     <div className="database-viewer flex flex-col gap-6 w-full pb-10">
+      
+      {/* 3-Tier Multi-Track Performance Comparison Bar */}
+      <div className="p-4 rounded-2xl bg-gradient-to-r from-white/[0.04] via-white/[0.02] to-white/[0.04] border border-white/10 flex flex-col gap-3">
+        <div className="flex justify-between items-center">
+          <div className="flex items-center gap-2">
+            <span className="text-base">📊</span>
+            <span className="text-xs font-bold text-white uppercase tracking-wider">3-Tier Multi-Track Strategy Engine</span>
+            <span className="text-[11px] text-gray-400">— Real-time Paper Trading comparison by Confluence Score</span>
+          </div>
+          <div className="text-[11px] text-emerald-400 font-mono flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            Independent Multi-Track Simulator Active
+          </div>
+        </div>
+
+        {/* Tier Selector Buttons */}
+        <div className="grid grid-cols-4 gap-3 pt-1">
+          <button
+            onClick={() => setSelectedTier("ALL")}
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
+              selectedTier === "ALL"
+                ? "bg-white/10 border-white/30 shadow-lg"
+                : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-white"
+            }`}
+          >
+            <div className="flex justify-between items-center text-xs font-bold">
+              <span>🌐 All Tiers Combined</span>
+              <span className="text-[10px] text-gray-400 font-mono">{tierAnalytics?.overall.totalTrades || paperTrades.length} Trades</span>
+            </div>
+            <div className="text-lg font-bold font-outfit text-white mt-1">
+              {tierAnalytics?.overall.winRatePercent ? `${tierAnalytics.overall.winRatePercent.toFixed(1)}%` : "0.0%"} WR
+              <span className={`text-xs ml-2 font-mono ${(tierAnalytics?.overall.totalPnl || 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {(tierAnalytics?.overall.totalPnl || 0) >= 0 ? "+" : ""}₹{(tierAnalytics?.overall.totalPnl || 0).toFixed(2)}
+              </span>
+            </div>
+          </button>
+
+          <button
+            onClick={() => setSelectedTier("SNIPER")}
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
+              selectedTier === "SNIPER"
+                ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 shadow-lg shadow-emerald-500/10"
+                : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-emerald-300"
+            }`}
+          >
+            <div className="flex justify-between items-center text-xs font-bold">
+              <span className="flex items-center gap-1.5">🎯 Sniper Mode (≥75%)</span>
+              <span className="text-[10px] text-emerald-400 font-mono">{tierAnalytics?.sniper.totalTrades || 0} Trades</span>
+            </div>
+            <div className="text-lg font-bold font-outfit text-emerald-400 mt-1">
+              {tierAnalytics?.sniper.winRatePercent ? `${tierAnalytics.sniper.winRatePercent.toFixed(1)}%` : "0.0%"} WR
+              <span className="text-xs ml-2 font-mono text-emerald-400">
+                {(tierAnalytics?.sniper.totalPnl || 0) >= 0 ? "+" : ""}₹{(tierAnalytics?.sniper.totalPnl || 0).toFixed(2)}
+              </span>
+            </div>
+            <div className="text-[10px] text-emerald-400/70 mt-0.5">Official UI Alert Signals</div>
+          </button>
+
+          <button
+            onClick={() => setSelectedTier("BALANCED")}
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
+              selectedTier === "BALANCED"
+                ? "bg-blue-500/15 border-blue-500/40 text-blue-300 shadow-lg shadow-blue-500/10"
+                : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-blue-300"
+            }`}
+          >
+            <div className="flex justify-between items-center text-xs font-bold">
+              <span className="flex items-center gap-1.5">⚖️ Balanced (60% - 74%)</span>
+              <span className="text-[10px] text-blue-400 font-mono">{tierAnalytics?.balanced.totalTrades || 0} Trades</span>
+            </div>
+            <div className="text-lg font-bold font-outfit text-blue-400 mt-1">
+              {tierAnalytics?.balanced.winRatePercent ? `${tierAnalytics.balanced.winRatePercent.toFixed(1)}%` : "0.0%"} WR
+              <span className={`text-xs ml-2 font-mono ${(tierAnalytics?.balanced.totalPnl || 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {(tierAnalytics?.balanced.totalPnl || 0) >= 0 ? "+" : ""}₹{(tierAnalytics?.balanced.totalPnl || 0).toFixed(2)}
+              </span>
+            </div>
+            <div className="text-[10px] text-blue-400/70 mt-0.5">Background Paper Trades</div>
+          </button>
+
+          <button
+            onClick={() => setSelectedTier("EXPLORATORY")}
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
+              selectedTier === "EXPLORATORY"
+                ? "bg-amber-500/15 border-amber-500/40 text-amber-300 shadow-lg shadow-amber-500/10"
+                : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-amber-300"
+            }`}
+          >
+            <div className="flex justify-between items-center text-xs font-bold">
+              <span className="flex items-center gap-1.5">⚡ Exploratory (&lt;60%)</span>
+              <span className="text-[10px] text-amber-400 font-mono">{tierAnalytics?.exploratory.totalTrades || 0} Trades</span>
+            </div>
+            <div className="text-lg font-bold font-outfit text-amber-400 mt-1">
+              {tierAnalytics?.exploratory.winRatePercent ? `${tierAnalytics.exploratory.winRatePercent.toFixed(1)}%` : "0.0%"} WR
+              <span className={`text-xs ml-2 font-mono ${(tierAnalytics?.exploratory.totalPnl || 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {(tierAnalytics?.exploratory.totalPnl || 0) >= 0 ? "+" : ""}₹{(tierAnalytics?.exploratory.totalPnl || 0).toFixed(2)}
+              </span>
+            </div>
+            <div className="text-[10px] text-amber-400/70 mt-0.5">High-Risk Paper Trades</div>
+          </button>
+        </div>
+      </div>
       
       {/* Top Header Overview & Adaptive Machine Learning Analytics Cards */}
       <div className="grid grid-cols-4 gap-4">
@@ -233,11 +389,13 @@ export const DatabaseViewer: React.FC = () => {
         {/* Card 1: Total PnL & Win Rate */}
         <div className="card p-4 rounded-xl bg-white/[0.03] border border-white/10 flex items-center justify-between">
           <div>
-            <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Paper Trading Net P&L</div>
+            <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+              {selectedTier === "ALL" ? "Combined" : selectedTier} Net Realized P&L
+            </div>
             <div className={`text-2xl font-bold font-outfit mt-1 flex items-baseline gap-2 ${isNetProfit ? "text-emerald-400" : "text-rose-400"}`}>
               {isNetProfit ? `+₹${netPnl.toFixed(2)}` : `-₹${Math.abs(netPnl).toFixed(2)}`}
               <span className="text-xs font-semibold text-gray-400">
-                ({analytics?.winningTrades || 0}W / {analytics?.losingTrades || 0}L)
+                ({activeAnalytics?.winningTrades || 0}W / {activeAnalytics?.losingTrades || 0}L)
               </span>
             </div>
           </div>
@@ -249,11 +407,13 @@ export const DatabaseViewer: React.FC = () => {
         {/* Card 2: Win Rate & Profit Factor */}
         <div className="card p-4 rounded-xl bg-white/[0.03] border border-white/10 flex items-center justify-between">
           <div>
-            <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Win Rate & Profit Factor</div>
+            <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+              {selectedTier === "ALL" ? "Combined" : selectedTier} Win Rate
+            </div>
             <div className="text-2xl font-bold font-outfit text-white mt-1 flex items-baseline gap-2">
-              {analytics?.winRatePercent ? `${analytics.winRatePercent.toFixed(1)}%` : "0.0%"}
+              {activeAnalytics?.winRatePercent ? `${activeAnalytics.winRatePercent.toFixed(1)}%` : "0.0%"}
               <span className="text-xs font-semibold text-indigo-400">
-                PF: {analytics?.profitFactor ? analytics.profitFactor.toFixed(2) : "1.00"}
+                PF: {activeAnalytics?.profitFactor ? activeAnalytics.profitFactor.toFixed(2) : "1.00"}
               </span>
             </div>
           </div>
@@ -265,13 +425,13 @@ export const DatabaseViewer: React.FC = () => {
         {/* Card 3: Adaptive Target Calibration AI */}
         <div className="card p-4 rounded-xl bg-white/[0.03] border border-white/10 flex items-center justify-between">
           <div>
-            <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Adaptive Target AI</div>
+            <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">Target 1 & 2 Accuracy</div>
             <div className="text-xs font-bold font-outfit text-emerald-400 mt-1 flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              Multiplier: {analytics?.suggestedTargetMultiplier ? `${analytics.suggestedTargetMultiplier.toFixed(2)}x` : "1.00x"}
+              T1 Hit: {activeAnalytics?.target1HitRate ? `${activeAnalytics.target1HitRate.toFixed(0)}%` : "--"} | T2 Hit: {activeAnalytics?.target2HitRate ? `${activeAnalytics.target2HitRate.toFixed(0)}%` : "--"}
             </div>
             <div className="text-[10px] text-gray-500 mt-0.5">
-              T1 Hit: {analytics?.target1HitRate ? `${analytics.target1HitRate.toFixed(0)}%` : "--"} | T2 Hit: {analytics?.target2HitRate ? `${analytics.target2HitRate.toFixed(0)}%` : "--"}
+              Call Win: {activeAnalytics?.callWinRate ? `${activeAnalytics.callWinRate.toFixed(0)}%` : "--"} | Put Win: {activeAnalytics?.putWinRate ? `${activeAnalytics.putWinRate.toFixed(0)}%` : "--"}
             </div>
           </div>
           <div className="w-11 h-11 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-400 text-lg">
@@ -322,7 +482,7 @@ export const DatabaseViewer: React.FC = () => {
                   : "bg-white/5 text-gray-400 hover:text-white hover:bg-white/10"
               }`}
             >
-              <span>💼</span> Paper Trading Ledger ({paperTrades.length})
+              <span>💼</span> Paper Trading Ledger ({filteredPaperTrades.length})
             </button>
             <button
               onClick={() => setActiveSubTab("signals")}
@@ -364,7 +524,7 @@ export const DatabaseViewer: React.FC = () => {
                   onClick={handleExportTradesCSV}
                   className="text-xs font-semibold py-1.5 px-3 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400 transition-all flex items-center gap-1.5 cursor-pointer"
                 >
-                  📥 Export Trades CSV
+                  📥 Export Trades CSV ({selectedTier})
                 </button>
                 <button
                   onClick={handleClearPaperTrades}
@@ -392,7 +552,7 @@ export const DatabaseViewer: React.FC = () => {
               <span className="text-gray-500 text-sm">🔍</span>
               <input
                 type="text"
-                placeholder="Search symbol, strike, reasoning, or type..."
+                placeholder="Search symbol, strike, reasoning, or tier..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"
@@ -442,6 +602,7 @@ export const DatabaseViewer: React.FC = () => {
                 <tr className="border-b border-white/10 bg-white/[0.02] text-[11px] font-semibold text-gray-400 uppercase tracking-wider sticky top-0 backdrop-blur-md">
                   <th className="py-3 px-4"># ID</th>
                   <th className="py-3 px-4">Date & Time</th>
+                  <th className="py-3 px-4">Strategy Tier</th>
                   <th className="py-3 px-4">Action</th>
                   <th className="py-3 px-4">Symbol / Strike</th>
                   <th className="py-3 px-4">Qty</th>
@@ -464,6 +625,9 @@ export const DatabaseViewer: React.FC = () => {
                         <td className="py-3 px-4 text-gray-500 font-mono">#{t.id}</td>
                         <td className="py-3 px-4 text-gray-300 whitespace-nowrap">
                           {t.datetime || new Date(t.timestamp).toLocaleString()}
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          {getTierBadge(t.tier)}
                         </td>
                         <td className="py-3 px-4 whitespace-nowrap">
                           <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(t.type)}`}>
@@ -522,8 +686,8 @@ export const DatabaseViewer: React.FC = () => {
                   })
                 ) : (
                   <tr>
-                    <td colSpan={12} className="py-16 text-center text-gray-500 text-sm font-sans">
-                      {isLoading ? "Loading paper trading ledger from SQLite..." : "No paper trades recorded yet. Ticks will automatically log Buy & Exit transactions here and in CSV."}
+                    <td colSpan={13} className="py-16 text-center text-gray-500 text-sm font-sans">
+                      {isLoading ? "Loading paper trading ledger from SQLite..." : `No ${selectedTier !== "ALL" ? selectedTier : ""} paper trades recorded yet. Ticks will automatically simulate Buy & Exit transactions here and in CSV.`}
                     </td>
                   </tr>
                 )}
@@ -540,6 +704,7 @@ export const DatabaseViewer: React.FC = () => {
                 <tr className="border-b border-white/10 bg-white/[0.02] text-[11px] font-semibold text-gray-400 uppercase tracking-wider sticky top-0 backdrop-blur-md">
                   <th className="py-3 px-4"># ID</th>
                   <th className="py-3 px-4">Date & Time</th>
+                  <th className="py-3 px-4">Tier</th>
                   <th className="py-3 px-4">Signal Type</th>
                   <th className="py-3 px-4">Strike</th>
                   <th className="py-3 px-4">Entry</th>
@@ -551,42 +716,44 @@ export const DatabaseViewer: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-white/5 text-xs font-outfit">
                 {filteredSignals.length > 0 ? (
-                  filteredSignals.map((sig) => (
-                    <tr key={sig.id} className="hover:bg-white/[0.03] transition-colors">
-                      <td className="py-3 px-4 text-gray-500 font-mono">#{sig.id}</td>
+                  filteredSignals.map((s) => (
+                    <tr key={s.id} className="hover:bg-white/[0.03] transition-colors">
+                      <td className="py-3 px-4 text-gray-500 font-mono">#{s.id}</td>
                       <td className="py-3 px-4 text-gray-300 whitespace-nowrap">
-                        {new Date(sig.timestamp).toLocaleDateString()}{" "}
-                        <span className="text-gray-500 font-mono">{new Date(sig.timestamp).toLocaleTimeString()}</span>
+                        {new Date(s.timestamp).toLocaleString()}
                       </td>
                       <td className="py-3 px-4 whitespace-nowrap">
-                        <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(sig.type)}`}>
-                          {sig.type}
+                        {getTierBadge(s.tier)}
+                      </td>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(s.type)}`}>
+                          {s.type}
                         </span>
                       </td>
                       <td className="py-3 px-4 font-bold text-white whitespace-nowrap">
-                        {sig.strike_price ? `${sig.strike_price} ${sig.type.includes("CALL") ? "CE" : sig.type.includes("PUT") ? "PE" : ""}` : "--"}
+                        {s.strike_price ? `${s.strike_price}` : "--"}
                       </td>
-                      <td className="py-3 px-4 text-emerald-400 font-semibold whitespace-nowrap">
-                        {sig.entry_price ? `₹${sig.entry_price.toFixed(2)}` : "--"}
+                      <td className="py-3 px-4 text-white whitespace-nowrap">
+                        {s.entry_price ? `₹${s.entry_price.toFixed(2)}` : "--"}
                       </td>
                       <td className="py-3 px-4 text-rose-400 font-semibold whitespace-nowrap">
-                        {sig.stop_loss_price ? `₹${sig.stop_loss_price.toFixed(2)}` : "--"}
+                        {s.stop_loss_price ? `₹${s.stop_loss_price.toFixed(2)}` : "--"}
                       </td>
-                      <td className="py-3 px-4 text-emerald-400/90 whitespace-nowrap">
-                        {sig.target_price1 ? `₹${sig.target_price1.toFixed(2)}` : "--"}
+                      <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
+                        {s.target_price1 ? `₹${s.target_price1.toFixed(2)}` : "--"}
                       </td>
-                      <td className="py-3 px-4 text-emerald-400 whitespace-nowrap font-bold">
-                        {sig.target_price2 ? `₹${sig.target_price2.toFixed(2)}` : "--"}
+                      <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
+                        {s.target_price2 ? `₹${s.target_price2.toFixed(2)}` : "--"}
                       </td>
-                      <td className="py-3 px-4 text-gray-400 font-sans text-[11.5px] max-w-md leading-relaxed">
-                        {sig.reasoning || "--"}
+                      <td className="py-3 px-4 text-gray-400 font-sans text-[11.5px] max-w-sm leading-relaxed">
+                        {s.reasoning || "--"}
                       </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={9} className="py-16 text-center text-gray-500 text-sm font-sans">
-                      {isLoading ? "Fetching data from SQLite database..." : "No advisory signals recorded yet."}
+                    <td colSpan={10} className="py-16 text-center text-gray-500 text-sm font-sans">
+                      {isLoading ? "Loading advisory signals..." : "No advisory signals logged yet."}
                     </td>
                   </tr>
                 )}

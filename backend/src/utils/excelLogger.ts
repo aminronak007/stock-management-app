@@ -27,6 +27,7 @@ export class ExcelLogger {
     price: number,
     reasoning: string,
     additionalData: {
+      tier?: "SNIPER" | "BALANCED" | "EXPLORATORY";
       sl?: number;
       t1?: number;
       t2?: number;
@@ -39,8 +40,10 @@ export class ExcelLogger {
     const filePath = path.join(dir, "ledger.csv");
     const isNew = !fs.existsSync(filePath);
 
-    // Standard CSV headers supporting Quantity and Invested Capital
-    const headers = "Timestamp,Type,Symbol,Strike,Qty,Price,StopLoss,Target1,Target2,InvestedCapital,PnL,Reasoning\n";
+    const tier = additionalData.tier || "SNIPER";
+
+    // Standard CSV headers supporting Tier, Quantity and Invested Capital
+    const headers = "Timestamp,Type,Tier,Symbol,Strike,Qty,Price,StopLoss,Target1,Target2,InvestedCapital,PnL,Reasoning\n";
     const timestamp = new Date().toLocaleString("en-IN");
     
     // Calculate Invested Capital (Premium Price * Lot Quantity)
@@ -51,7 +54,7 @@ export class ExcelLogger {
     const pnlVal = additionalData.pnl !== undefined ? (additionalData.pnl * qty) : undefined; // scale pnl by quantity traded
     const pnlStr = pnlVal !== undefined ? pnlVal.toFixed(2) : "";
     
-    const row = `"${timestamp}","${type}","${symbol}","${strike}",${qty},${price.toFixed(2)},${additionalData.sl?.toFixed(2) || ""},${additionalData.t1?.toFixed(2) || ""},${additionalData.t2?.toFixed(2) || ""},${investedCapital.toFixed(2)},${pnlStr},"${escapedReasoning}"\n`;
+    const row = `"${timestamp}","${type}","${tier}","${symbol}","${strike}",${qty},${price.toFixed(2)},${additionalData.sl?.toFixed(2) || ""},${additionalData.t1?.toFixed(2) || ""},${additionalData.t2?.toFixed(2) || ""},${investedCapital.toFixed(2)},${pnlStr},"${escapedReasoning}"\n`;
 
     // 1. Write to Excel Ledger CSV File
     try {
@@ -69,6 +72,7 @@ export class ExcelLogger {
     try {
       DatabaseService.logPaperTrade({
         type,
+        tier,
         symbol,
         strike,
         qty,
