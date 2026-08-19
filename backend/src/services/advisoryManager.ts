@@ -263,12 +263,19 @@ export class AdvisoryManager {
       return;
     }
 
-    // Lunch Hour Consolidation Filter: Block signals between 11:30 AM and 1:30 PM
-    const currentHour = new Date(timestamp).getHours();
-    const currentMin = new Date(timestamp).getMinutes();
-    const totalMinutes = currentHour * 60 + currentMin;
-    if (totalMinutes >= 690 && totalMinutes <= 810) {
-      console.log(`[AdvisoryManager] Lunch consolidation filter active (${currentHour}:${currentMin < 10 ? '0' + currentMin : currentMin}). Blocking breakout signals.`);
+    // Lunch Hour Consolidation Filter: Block signals between 11:30 AM and 1:30 PM IST
+    const istStr = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date(timestamp));
+    const [hStr, mStr] = istStr.split(":");
+    const istH = parseInt(hStr, 10);
+    const istM = parseInt(mStr, 10);
+    const istTotalMinutes = istH * 60 + istM;
+    if (istTotalMinutes >= 690 && istTotalMinutes <= 810) {
+      console.log(`[AdvisoryManager] Lunch consolidation filter active (${istH}:${istM < 10 ? '0' + istM : istM} IST). Blocking breakout signals.`);
       return;
     }
 
