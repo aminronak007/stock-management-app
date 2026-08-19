@@ -6,6 +6,7 @@ import { CandlestickChart } from "../components/CandlestickChart";
 import { AdvisoryPanel } from "../components/AdvisoryPanel";
 import { SimulatorSandbox } from "../components/SimulatorSandbox";
 import { QuantitativePanels } from "../components/QuantitativePanels";
+import { DatabaseViewer } from "../components/DatabaseViewer";
 
 interface TickData {
   symbol: string;
@@ -27,7 +28,7 @@ interface SignalData {
 }
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"terminal" | "advisory" | "simulator">("terminal");
+  const [activeTab, setActiveTab] = useState<"terminal" | "advisory" | "database" | "simulator">("terminal");
   const [activeSymbol, setActiveSymbol] = useState("NSE:NIFTY50-INDEX");
   const [ticks, setTicks] = useState<{ [symbol: string]: TickData }>({});
   const [activeSignal, setActiveSignal] = useState<SignalData | null>(null);
@@ -393,6 +394,13 @@ export default function Home() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
                 AI Advisory Engine
               </button>
+              <button 
+                className={`tab-btn flex items-center gap-2 ${activeTab === "database" ? "active" : ""}`}
+                onClick={() => setActiveTab("database")}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+                Database & Trade History
+              </button>
               {enableSimulator && (
                 <button 
                   className={`tab-btn flex items-center gap-2 ${activeTab === "simulator" ? "active" : ""}`}
@@ -531,6 +539,8 @@ export default function Home() {
                   />
                 </div>
               </div>
+            ) : activeTab === "database" ? (
+              <DatabaseViewer />
             ) : (
               <SimulatorSandbox ws={socket} />
             )}

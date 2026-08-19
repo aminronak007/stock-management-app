@@ -128,4 +128,22 @@ export class Indicators {
 
     return atr;
   }
+
+  /**
+   * Calculates Volume Weighted Average Price (VWAP)
+   */
+  public static calculateVWAP(candles: { high: number; low: number; close: number; volume?: number }[]): number {
+    if (candles.length === 0) return 0;
+    let cumulativeTypicalVolume = 0;
+    let cumulativeVolume = 0;
+
+    for (const c of candles) {
+      const typicalPrice = (c.high + c.low + c.close) / 3;
+      const vol = (c.volume && c.volume > 0) ? c.volume : 1;
+      cumulativeTypicalVolume += typicalPrice * vol;
+      cumulativeVolume += vol;
+    }
+
+    return cumulativeVolume > 0 ? (cumulativeTypicalVolume / cumulativeVolume) : (candles[candles.length - 1].close || 0);
+  }
 }

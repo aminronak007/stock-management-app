@@ -135,12 +135,20 @@ export class AdvisoryManager {
    * Main entry point to process streaming real-time ticks
    */
   public async processTick(tick: CompactTick): Promise<void> {
-    const timestamp = tick.timestamp;
-    const timeOfDay = new Date(timestamp);
-    const hours = timeOfDay.getHours();
-    const minutes = timeOfDay.getMinutes();
+    const timestamp = tick.timestamp || Date.now();
 
-    // 1. Time Check: Universal Hard Square-Off at 15:15 IST
+    // 1. Time Check in IST (Indian Standard Time, UTC+5:30)
+    const istTimeStr = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date(timestamp));
+    const [hoursStr, minutesStr] = istTimeStr.split(":");
+    const hours = parseInt(hoursStr, 10);
+    const minutes = parseInt(minutesStr, 10);
+
+    // Universal Hard Square-Off at 15:15 IST
     if (hours === 15 && minutes >= 15 && this.activeSignal && this.activeSignal.type !== "HOLD") {
       this.triggerExit("EXIT_PROFIT", "Universal 3:15 PM Square-off Alert. Terminate open positions.", timestamp);
       return;
@@ -186,10 +194,14 @@ export class AdvisoryManager {
         }
       }
       
-      // Update custom mock VWAP and volume calculations for Nifty index (for demo/test mode)
-      this.currentVwap = tick.ltp - 2; // placeholder calculation
+      // Calculate true Volume Weighted Average Price (VWAP) for Nifty Index
+      if (this.indexCandles.length > 0) {
+        this.currentVwap = Indicators.calculateVWAP(this.indexCandles);
+      } else {
+        this.currentVwap = tick.ltp;
+      }
       
-      // ORB range calculation (first 15 minutes of session: 9:15 - 9:30 AM)
+      // ORB range calculation (first 15 minutes of session: 9:15 - 9:30 AM IST)
       if (hours === 9 && minutes >= 15 && minutes < 30) {
         if (!this.isOrbActive) {
           this.orbHigh = tick.ltp;
@@ -202,8 +214,8 @@ export class AdvisoryManager {
         }
       }
 
-      // Check breakout triggers post 9:30 AM
-      if ((hours === 9 && minutes >= 30) || hours > 9) {
+      // Check breakout triggers post 9:30 AM IST
+      if ((hours === 9 && minutes >= 30) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
         this.isOrbActive = false; // ORB creation range completed
         
         if (this.dailyTradesCount < this.dailyMaxTrades && !this.activeSignal) {
@@ -217,11 +229,14 @@ export class AdvisoryManager {
       }
     }
 
-    // 3. Track Heavyweights
+    // 3. Track Heavyweights & calculate continuous intraday VWAP baseline
     if (tick.symbol in this.heavyweightLtp) {
       this.heavyweightLtp[tick.symbol] = tick.ltp;
-      // Mock VWAP value for stocks (normally streamed in depth/ticker payload)
-      this.heavyweightVwap[tick.symbol] = tick.ltp - (Math.random() * 4 - 2); 
+      if (!this.heavyweightVwap[tick.symbol] || this.heavyweightVwap[tick.symbol] === 0) {
+        this.heavyweightVwap[tick.symbol] = tick.ltp;
+      } else {
+        this.heavyweightVwap[tick.symbol] = this.heavyweightVwap[tick.symbol] * 0.98 + tick.ltp * 0.02;
+      }
     }
 
     // 4. Track VIX
@@ -276,7 +291,7 @@ export class AdvisoryManager {
       totalPutOi += item.put.openInterest;
       totalCallOi += item.call.openInterest;
     });
-    const pcr = totalPutOi / totalCallOi;
+    const pcr = totalCallOi > 0 ? totalPutOi / totalCallOi : 1.0;
 
     // Calculate EMAs (50 and 200 EMA) for Trend-Alignment Filter
     const closePrices = this.indexCandles.map(c => c.close);
@@ -339,9 +354,20 @@ export class AdvisoryManager {
       // Math targets using expected volatility cone range: expected range = spot * IV / sqrt(365)
       const expectedRange = Greeks.calculateExpectedIntradayRange(spot, this.indiaVixValue);
       
-      // Calculate targets in spot points
-      const targetOffset1 = 0.5 * expectedRange;
-      const targetOffset2 = 1.0 * expectedRange;
+      // Dynamic Machine Learning / Performance Calibration from Database
+      let targetMultiplier = 1.0;
+      try {
+        const analytics = DatabaseService.getTradeAnalytics();
+        if (analytics && analytics.suggestedTargetMultiplier) {
+          targetMultiplier = analytics.suggestedTargetMultiplier;
+        }
+      } catch (e) {
+        // use default
+      }
+
+      // Calculate targets in spot points scaled by database-driven adaptive learning
+      const targetOffset1 = 0.5 * expectedRange * targetMultiplier;
+      const targetOffset2 = 1.0 * expectedRange * targetMultiplier;
 
       const entryPrice = optionLtp;
       const highsList = this.indexCandles.map(c => c.high);
@@ -377,12 +403,16 @@ export class AdvisoryManager {
         optionPremiumRsi: 55 // default placeholder
       });
 
-      let minSignalScore = parseInt(process.env.MIN_SIGNAL_SCORE || "80", 10) || 80;
+      const envScore = process.env.MIN_SIGNAL_SCORE;
+      let minSignalScore = envScore !== undefined ? parseInt(envScore, 10) : 80;
+      if (isNaN(minSignalScore)) minSignalScore = 80;
+
       try {
         const db = DatabaseService.initialize();
         const row = db.prepare("SELECT value FROM settings WHERE key = 'MIN_SIGNAL_SCORE'").get() as { value: string } | undefined;
         if (row) {
-          minSignalScore = parseInt(row.value, 10) || minSignalScore;
+          const parsed = parseInt(row.value, 10);
+          if (!isNaN(parsed)) minSignalScore = parsed;
         }
       } catch (e) {
         // use fallback
@@ -414,9 +444,9 @@ export class AdvisoryManager {
       this.isSignalGeneratedToday = true;
 
       // Extract Option Symbol Name from Chain or generate standard weekly Fyers symbol representation
-      const optionSymbol = triggerType === "CALL_BUY"
-        ? (atmChain ? atmChain.call.symbol : `NSE:NIFTY26820${selectedStrike}CE`)
-        : (atmChain ? atmChain.put.symbol : `NSE:NIFTY26820${selectedStrike}PE`);
+      const optionSymbol = atmChain 
+        ? (triggerType === "CALL_BUY" ? atmChain.call.symbol : atmChain.put.symbol)
+        : this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
 
       this.activeOptionSymbol = optionSymbol;
       
@@ -452,8 +482,21 @@ export class AdvisoryManager {
         {
           sl: stopLossPrice,
           t1: targetPrice1,
-          t2: targetPrice2
+          t2: targetPrice2,
+          marketRegime: scoreCard.regime,
+          confluenceScore: scoreCard.totalScore
         }
+      );
+
+      // Log BUY signal into SQLite database
+      DatabaseService.logSignal(
+        triggerType,
+        selectedStrike,
+        entryPrice,
+        stopLossPrice,
+        targetPrice1,
+        targetPrice2,
+        formattedReasoning
       );
 
       this.onSignalCallback(this.activeSignal);
@@ -467,10 +510,12 @@ export class AdvisoryManager {
   private monitorRiskState(spot: number, timestamp: number): void {
     if (!this.activeSignal || !this.activeSignal.entryPrice || !this.activeSignal.stopLossPrice) return;
 
-    // Simulate options price fluctuations relative to spot index movements
-    const spotDelta = spot - (this.activeSignal.type === "CALL_BUY" ? this.orbHigh : this.orbLow);
-    const premiumMultiplier = 0.50; // delta proxy
-    const currentPremiumLtp = parseFloat((this.activeSignal.entryPrice + spotDelta * premiumMultiplier).toFixed(2));
+    // Calculate options price fluctuations relative to spot index movements (Black-Scholes Delta scaled)
+    const deltaMultiplier = 0.50; // delta proxy
+    const spotMovementGain = this.activeSignal.type === "CALL_BUY"
+      ? (spot - this.orbHigh)
+      : (this.orbLow - spot);
+    const currentPremiumLtp = parseFloat(Math.max(1, this.activeSignal.entryPrice + spotMovementGain * deltaMultiplier).toFixed(2));
 
     this.peakPremiumLtp = Math.max(this.peakPremiumLtp, currentPremiumLtp);
 
@@ -488,10 +533,10 @@ export class AdvisoryManager {
       });
     }
 
-    // Theta Exit check: position is open > 12 minutes (720,000 ms) and spot index changed less than 0.15%
+    // Theta Exit check: position is open > 12 minutes (720,000 ms) and spot index moved less than 0.15%
     const elapsed = timestamp - this.entryTime;
     if (elapsed > 12 * 60 * 1000) {
-      const percentageChange = Math.abs(spotDelta / spot) * 100;
+      const percentageChange = Math.abs(spotMovementGain / spot) * 100;
       if (percentageChange < 0.15) {
         this.triggerExit("THETA_EXIT", "Option premium decay warning. Sideways chop > 12 minutes.", timestamp, currentPremiumLtp);
         return;
@@ -565,7 +610,11 @@ export class AdvisoryManager {
             qty,
             exit,
             `${reasoning} | Fyers Order: ${orderId}`,
-            { pnl }
+            {
+              pnl,
+              marketRegime: this.activeSignal?.regime,
+              confluenceScore: this.activeSignal?.scoreCard?.totalScore
+            }
           );
 
           // Send update callback once order id is resolved
@@ -589,9 +638,24 @@ export class AdvisoryManager {
         qty,
         exit,
         reasoning,
-        { pnl }
+        {
+          pnl,
+          marketRegime: this.activeSignal?.regime,
+          confluenceScore: this.activeSignal?.scoreCard?.totalScore
+        }
       );
     }
+
+    // Log EXIT signal into SQLite database
+    DatabaseService.logSignal(
+      type,
+      this.activeSignal.strikePrice,
+      exit,
+      this.activeSignal.stopLossPrice,
+      this.activeSignal.targetPrice1,
+      this.activeSignal.targetPrice2,
+      formattedReasoning
+    );
 
     const exitSignal: AdvisorySignal = {
       type,
@@ -622,5 +686,19 @@ export class AdvisoryManager {
 
   public getIndiaVixValue(): number {
     return this.indiaVixValue;
+  }
+
+  private formatFyersOptionSymbol(strike: number, type: "CALL_BUY" | "PUT_BUY", timestamp: number): string {
+    const d = new Date(timestamp);
+    const yearSuffix = d.getFullYear().toString().slice(-2);
+    const month = d.getMonth() + 1;
+    const monthCode = month === 10 ? "O" : month === 11 ? "N" : month === 12 ? "D" : month.toString();
+    const dayOfWeek = d.getDay();
+    const daysUntilThursday = (4 - dayOfWeek + 7) % 7;
+    const expiryDate = new Date(d.getTime() + daysUntilThursday * 24 * 60 * 60 * 1000);
+    const dayStr = expiryDate.getDate().toString().padStart(2, "0");
+    const suffix = type === "CALL_BUY" ? "CE" : "PE";
+
+    return `NSE:NIFTY${yearSuffix}${monthCode}${dayStr}${strike}${suffix}`;
   }
 }

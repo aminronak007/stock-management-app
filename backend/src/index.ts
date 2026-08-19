@@ -64,12 +64,17 @@ async function main() {
     });
   };
 
-  // Forward all live incoming broker ticks to brokerTickCache and all active UI WebSocket clients
+  // Forward all live incoming broker ticks to brokerTickCache, Advisory Engine, and all active UI WebSocket clients
   broker.onTick((tick) => {
     brokerTickCache[tick.symbol] = {
       ltp: tick.ltp,
       change: tick.netChangePercent
     };
+
+    // Feed real-time ticks to the Advisory Strategy Engine
+    advisory.processTick(tick).catch((err) => {
+      console.error("[AdvisoryManager] Error processing tick:", err);
+    });
 
     broadcast({
       type: "TICK",
@@ -317,8 +322,68 @@ async function main() {
   app.get("/api/signals", (req, res) => {
     try {
       const db = DatabaseService.initialize();
-      const signals = db.prepare("SELECT * FROM advisory_signals ORDER BY id DESC LIMIT 30").all();
+      const signals = db.prepare("SELECT * FROM advisory_signals ORDER BY id DESC LIMIT 100").all();
       res.json(signals);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/database/overview", (req, res) => {
+    try {
+      const db = DatabaseService.initialize();
+      const signals = db.prepare("SELECT * FROM advisory_signals ORDER BY id DESC LIMIT 100").all();
+      const paperTrades = DatabaseService.getPaperTrades(150);
+      const analytics = DatabaseService.getTradeAnalytics();
+      const sessions = db.prepare("SELECT * FROM sessions").all();
+      const settings = db.prepare("SELECT * FROM settings").all();
+      const stats = {
+        totalSignals: (db.prepare("SELECT COUNT(*) as count FROM advisory_signals").get() as any)?.count || 0,
+        totalPaperTrades: (db.prepare("SELECT COUNT(*) as count FROM paper_trades").get() as any)?.count || 0,
+        totalSessions: (db.prepare("SELECT COUNT(*) as count FROM sessions").get() as any)?.count || 0,
+        totalSettings: (db.prepare("SELECT COUNT(*) as count FROM settings").get() as any)?.count || 0,
+        dbPath: path.join(__dirname, "../data/state.db"),
+        engineTime: Date.now()
+      };
+      res.json({ stats, signals, paperTrades, analytics, sessions, settings });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/paper-trades", (req, res) => {
+    try {
+      const trades = DatabaseService.getPaperTrades(100);
+      res.json(trades);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/paper-trades/analytics", (req, res) => {
+    try {
+      const analytics = DatabaseService.getTradeAnalytics();
+      res.json(analytics);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/database/clear-signals", (req, res) => {
+    try {
+      const db = DatabaseService.initialize();
+      db.prepare("DELETE FROM advisory_signals").run();
+      res.json({ success: true, message: "Cleared advisory signals history." });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/database/clear-paper-trades", (req, res) => {
+    try {
+      const db = DatabaseService.initialize();
+      db.prepare("DELETE FROM paper_trades").run();
+      res.json({ success: true, message: "Cleared paper trades ledger." });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

@@ -90,24 +90,26 @@ export class QuantitativeEngine {
     if (triggerType === "CALL_BUY" && spot <= orbHigh) return true;
     if (triggerType === "PUT_BUY" && spot >= orbLow) return true;
 
-    // 2. Heavyweight disagreement: If all 3 major heavyweights are pointing opposite to breakout direction
+    // 2. Heavyweight disagreement: If major active heavyweights point opposite to breakout direction
     let conformingHeavyweights = 0;
+    let validHeavyweightsCount = 0;
     Object.keys(heavyweightsLtp).forEach(sym => {
       const ltp = heavyweightsLtp[sym] || 0;
       const vwap = heavyweightsVwap[sym] || 0;
-      if (vwap > 0) {
+      if (ltp > 0 && vwap > 0) {
+        validHeavyweightsCount++;
         if (triggerType === "CALL_BUY" && ltp > vwap) conformingHeavyweights++;
         if (triggerType === "PUT_BUY" && ltp < vwap) conformingHeavyweights++;
       }
     });
 
-    if (conformingHeavyweights === 0 && Object.keys(heavyweightsLtp).length > 0) {
-      // 100% disagreement from HDFC Bank, Reliance, ICICI Bank
+    if (validHeavyweightsCount >= 2 && conformingHeavyweights === 0) {
+      // 100% active heavyweight disagreement
       return true;
     }
 
     // 3. Volumeless breakout: volume is less than 0.7x average previous volume
-    if (avgVolume5 > 0 && currentVolume < 0.7 * avgVolume5) {
+    if (avgVolume5 > 0 && currentVolume > 0 && currentVolume < 0.7 * avgVolume5) {
       return true;
     }
 
@@ -234,28 +236,31 @@ export class QuantitativeEngine {
 
     // 3. Heavyweights Confirmation (15 Points)
     let heavyweightAlignsCount = 0;
+    let validActiveCount = 0;
     const trackedKeys = Object.keys(heavyweightsLtp);
     trackedKeys.forEach(sym => {
       const ltp = heavyweightsLtp[sym] || 0;
       const vwap = heavyweightsVwap[sym] || 0;
-      if (vwap > 0) {
+      if (ltp > 0 && vwap > 0) {
+        validActiveCount++;
         if (triggerType === "CALL_BUY" && ltp > vwap) heavyweightAlignsCount++;
         if (triggerType === "PUT_BUY" && ltp < vwap) heavyweightAlignsCount++;
       }
     });
 
-    if (trackedKeys.length > 0) {
-      const ratio = heavyweightAlignsCount / trackedKeys.length;
-      if (ratio >= 0.9) {
+    if (validActiveCount > 0) {
+      const ratio = heavyweightAlignsCount / validActiveCount;
+      if (ratio >= 0.8) {
         factors.heavyweights.score += 15;
-        factors.heavyweights.factors.push("All tracked heavyweight stocks confirm trend");
-      } else if (ratio >= 0.6) {
+        factors.heavyweights.factors.push("All active heavyweight stocks confirm trend");
+      } else if (ratio >= 0.5) {
         factors.heavyweights.score += 10;
         factors.heavyweights.factors.push("Majority heavyweight alignment confirmed");
       }
     } else {
       // Fallback if index-based trading is running
       factors.heavyweights.score += 10;
+      factors.heavyweights.factors.push("Index-based momentum alignment active");
     }
 
     // 4. Options Market Structure / PCR (15 Points)

@@ -7,6 +7,7 @@ export class FyersAdapter implements IBrokerAdapter {
   private accessToken: string | null = null;
   private tickCallbacks: ((tick: CompactTick) => void)[] = [];
   private subscribedSymbols: Set<string> = new Set();
+  private latestTicks: { [symbol: string]: number } = {};
   
   // Real Fyers API clients
   private fyersClient: any = null;
@@ -139,6 +140,7 @@ export class FyersAdapter implements IBrokerAdapter {
           };
 
           if (tick.ltp > 0) {
+            this.latestTicks[tick.symbol] = tick.ltp;
             this.tickCallbacks.forEach(cb => cb(tick));
           }
         };
@@ -414,16 +416,17 @@ export class FyersAdapter implements IBrokerAdapter {
       }
     }
 
-    // Mock Fallback
-    const spot = 24000;
-    const baseStrike = Math.round(spot / 50) * 50;
+    // Option Chain Fallback centered around current live spot price
+    const spot = this.latestTicks[underlying] || (underlying.includes("BANK") ? 57200 : 24250);
+    const strikeInterval = underlying.includes("BANK") ? 100 : 50;
+    const baseStrike = Math.round(spot / strikeInterval) * strikeInterval;
     const options: OptionChainItem[] = [];
     const expiry = "2026-08-20";
 
-    for (let strike = baseStrike - 300; strike <= baseStrike + 300; strike += 50) {
+    for (let strike = baseStrike - (strikeInterval * 6); strike <= baseStrike + (strikeInterval * 6); strike += strikeInterval) {
       const distanceFromSpot = strike - spot;
-      const callLtp = Math.max(5, 150 - distanceFromSpot * 0.8 + (Math.random() - 0.5) * 5);
-      const putLtp = Math.max(5, 150 + distanceFromSpot * 0.8 + (Math.random() - 0.5) * 5);
+      const callLtp = Math.max(5, 140 - distanceFromSpot * 0.55 + (Math.random() - 0.5) * 5);
+      const putLtp = Math.max(5, 140 + distanceFromSpot * 0.55 + (Math.random() - 0.5) * 5);
       options.push({
         strikePrice: strike,
         expiryDate: expiry,

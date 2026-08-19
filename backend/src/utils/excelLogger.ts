@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { DatabaseService } from "./database";
 
 export class ExcelLogger {
   private static getLogDirectory(): string {
@@ -9,7 +10,7 @@ export class ExcelLogger {
     const dateStr = today.toISOString().split("T")[0]; // YYYY-MM-DD
     
     // Path: workspace_root/Stock Mock/Day_YYYY-MM-DD (outside backend folder)
-    const rootPath = "d:/Web Development/My Projects/stock-management-app";
+    const rootPath = path.join(__dirname, "../../../");
     const dirPath = path.join(rootPath, "Stock Mock", `${dayName}_${dateStr}`);
     
     if (!fs.existsSync(dirPath)) {
@@ -30,6 +31,8 @@ export class ExcelLogger {
       t1?: number;
       t2?: number;
       pnl?: number;
+      marketRegime?: string;
+      confluenceScore?: number;
     } = {}
   ): void {
     const dir = this.getLogDirectory();
@@ -50,15 +53,37 @@ export class ExcelLogger {
     
     const row = `"${timestamp}","${type}","${symbol}","${strike}",${qty},${price.toFixed(2)},${additionalData.sl?.toFixed(2) || ""},${additionalData.t1?.toFixed(2) || ""},${additionalData.t2?.toFixed(2) || ""},${investedCapital.toFixed(2)},${pnlStr},"${escapedReasoning}"\n`;
 
+    // 1. Write to Excel Ledger CSV File
     try {
       if (isNew) {
         fs.writeFileSync(filePath, headers + row, "utf8");
       } else {
         fs.appendFileSync(filePath, row, "utf8");
       }
-      console.log(`[ExcelLogger] Trade logs logged successfully to: ${filePath}`);
+      console.log(`[ExcelLogger] Trade logs logged successfully to CSV: ${filePath}`);
     } catch (e: any) {
       console.error("[ExcelLogger] Failed to write trade log to excel ledger:", e.message);
+    }
+
+    // 2. ALSO Persist simultaneously into SQLite Database (paper_trades table)
+    try {
+      DatabaseService.logPaperTrade({
+        type,
+        symbol,
+        strike,
+        qty,
+        price,
+        stopLoss: additionalData.sl,
+        target1: additionalData.t1,
+        target2: additionalData.t2,
+        pnl: pnlVal,
+        reasoning,
+        marketRegime: additionalData.marketRegime,
+        confluenceScore: additionalData.confluenceScore
+      });
+      console.log(`[ExcelLogger] Trade logged successfully into SQLite Database (paper_trades table).`);
+    } catch (e: any) {
+      console.error("[ExcelLogger] Failed to log paper trade to database:", e.message);
     }
   }
 }
