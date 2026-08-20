@@ -214,8 +214,8 @@ export class AdvisoryManager {
     // Universal Hard Square-Off at 15:15 IST across all tiers
     if (hours === 15 && minutes >= 15) {
       for (const t of allTiers) {
-        if (this.tierPositions[t].activeSignal && this.tierPositions[t].activeSignal!.type !== "HOLD") {
-          this.triggerTierExit(t, "EXIT_PROFIT", "Universal 3:15 PM Square-off Alert. Terminate open positions.", timestamp);
+        if (this.tierPositions[t].activeSignal) {
+          this.triggerTierExit(t, "SQUARE_OFF", "Universal 3:15 PM Square-off Alert. Terminate open positions.", timestamp);
         }
       }
       return;
@@ -747,9 +747,12 @@ export class AdvisoryManager {
       pos.dailyProfitLoss += ratio;
       pos.stoppedCooldownUntil = timestamp + 5 * 60 * 1000;
       console.log(`[Risk Engine] [${tier}] Take-profit achieved (+${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
-    } else if (type === "THETA_EXIT") {
+    } else if (type === "THETA_EXIT" || type === "SQUARE_OFF") {
+      const initialRisk = entry - (pos.activeSignal.stopLossPrice || 0);
+      const ratio = initialRisk > 0 ? (pnl / initialRisk) : 0;
+      pos.dailyProfitLoss += ratio;
       pos.stoppedCooldownUntil = timestamp + 5 * 60 * 1000;
-      console.log(`[Risk Engine] [${tier}] Theta-exit triggered. Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}.`);
+      console.log(`[Risk Engine] [${tier}] ${type} triggered (${ratio >= 0 ? '+' : ''}${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}.`);
     }
 
     const qtyStr = process.env.ORDER_QTY || "25";

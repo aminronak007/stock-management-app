@@ -1,69 +1,78 @@
 # Options Advisory Terminal - Daily Operational Guide
 
-Follow this checklist **every morning** between **9:00 AM and 9:15 AM IST** (before the market opens) to authenticate your broker session and prepare the automated strategy engine.
+Follow this operational checklist **every morning** between **9:00 AM and 9:15 AM IST** (before the market opens) to authenticate your broker session and start your automated trading terminal.
 
 ---
 
 ## 🛠️ Step 1: Generate Daily Fyers Token (9:00 AM - 9:10 AM)
-Fyers API security guidelines expire all authentication tokens daily. You must generate a fresh token before starting:
+Fyers API access tokens are valid for 24 hours per SEBI security guidelines. Generate a fresh token before market open:
 
-1. Open your terminal window and navigate to the `backend` folder.
-2. Execute the token generator script:
+1. Open your terminal in the `backend` folder.
+2. Run the interactive token generator:
    ```bash
    npm run generate:token
    ```
 3. Open the printed authorization link in your web browser.
-4. Log in with your **Fyers client ID, Password, TOTP (authenticator code), and PIN**.
-5. Once redirected, look at your browser's address bar. **Copy the entire URL** (or the authorization code after `auth_code=`).
+4. Log in with your **Fyers Client ID, Password, TOTP (authenticator code), and PIN**.
+5. Once redirected, **copy the entire redirect URL** (or the authorization code after `auth_code=`).
 6. Paste it back into your terminal and hit **Enter**.
-7. Confirm that the terminal displays: 
+7. Confirm the terminal displays: 
    `✔ SUCCESS: Daily Access Token generated and saved successfully to database cache!`
 
 ---
 
-## ⚙️ Step 2: Set Trade Execution Mode
-Verify how you want the terminal to behave today by checking `backend/.env`:
+## ⚙️ Step 2: Verify Execution Mode & Alerts in `backend/.env`
+Check your `backend/.env` settings:
 
-* **Virtual Paper Trading (Recommended to start)**
-  Keep the safety switch set to `false`. The terminal will generate signals and record simulated trades in your spreadsheet ledger **without using real money**:
-  ```env
-  AUTO_ORDER_EXECUTION=false
-  ORDER_QTY=25
-  ```
-* **Auto-Live Execution**
-  Set to `true` to route actual orders automatically to your Fyers account as soon as signals confirm:
-  ```env
-  AUTO_ORDER_EXECUTION=true
-  ORDER_QTY=25
-  ```
+```ini
+# Real Market Paper-Trading Mode (Zero Capital Risk)
+AUTO_ORDER_EXECUTION=false
+ORDER_QTY=25
+MIN_SIGNAL_SCORE=80
+
+# Cloud Ledger (Google Drive > Stock Mock > Year > Month > Date Tab)
+GOOGLE_SHEETS_WEBHOOK_URL=https://script.google.com/macros/s/.../exec
+
+# Real-Time Mobile Push Alerts (< 300ms latency)
+TELEGRAM_BOT_TOKEN=8811629603:AAHvJltYcKyWUO-DT1ch2wDltsRpQCmj5QE
+TELEGRAM_CHAT_ID=7134217382
+```
 
 ---
 
-## 🚀 Step 3: Launch the Services (9:10 AM)
-Start both terminal components. 
+## 🚀 Step 3: Launch Terminal Services (9:10 AM)
 
 1. **Start Backend Server**:
-   In your `backend` terminal, execute:
    ```bash
+   cd backend
    npm run dev
    ```
-   *(Verify it prints: `Live API Connected. User Name: RONAK HARESHBHAI AMIN` & `Daily CPR calculated`)*.
+   *(Verify it prints: `Live API Connected`, `Daily CPR calculated`, `Telegram Real-Time Alert Gateway active`)*.
 
-2. **Start Frontend Client**:
-   In your `web` terminal, execute:
+2. **Start Frontend Dashboard**:
    ```bash
+   cd web
    npm run dev
    ```
 
 3. **Open Dashboard**:
-   Open your web browser and navigate to: **[http://localhost:3000](http://localhost:3000)**.
-   * Verify the **ROUTING** card matches your mode (`AUTO-LIVE` or `PAPER-ONLY`).
-   * Verify **SYSTEM STATE** reads `ACTIVE` (which confirms successful WebSocket connection).
+   Navigate to **[http://localhost:3000](http://localhost:3000)** (or port 5173/3000):
+   * Verify **SYSTEM STATE** reads `ACTIVE` (WebSocket streaming live ticks).
+   * Verify **ROUTING** displays `PAPER-ONLY` with real market tick evaluation.
 
 ---
 
-## 📊 Step 4: End-of-Day Journal Review (3:35 PM)
-At the end of the trading session, review your trades inside your auto-generated spreadsheet:
-* Navigate to the project root directory: `stock-management-app/Stock Mock/`
-* Open the daily folder (e.g. `Monday_YYYY-MM-DD/`) and double-click **`ledger.csv`**.
-* The sheet logs your entry and exit times, strike contracts, capital invested, and realized profits/losses.
+## 📱 Step 4: During the Trading Session (9:15 AM - 3:30 PM)
+
+* **Telegram Push Alerts**: You will receive instant phone notifications when:
+  * 🎯 **Entry Triggered**: Strike, Entry Price, Stop Loss, Target 1, Target 2, Confluence Score.
+  * 🔒 **Breakeven Locked**: Stop Loss moves to Entry Price (+1R gain) $\rightarrow$ Risk becomes ₹0.00.
+  * 💰 **Target Achieved / Exit**: Target 1/2 hit, Theta exit (>12m chop), or Stop Loss.
+* **3:15 PM Universal Square-Off**: The terminal automatically closes any open paper position before market close.
+
+---
+
+## 📊 Step 5: End-of-Day Journal Review (3:35 PM)
+All trades are logged **100% directly to your Google Drive**:
+* Open Google Drive $\rightarrow$ `Stock Mock` $\rightarrow$ `2026` $\rightarrow$ `August` $\rightarrow$ Select today's tab (e.g. `21 Aug`).
+* Review your trades with **custom column widths, auto-filters, gross P&L, statutory taxes & brokerage deductions (~₹54.60/lot), and net realized returns**.

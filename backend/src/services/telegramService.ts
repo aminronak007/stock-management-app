@@ -98,6 +98,11 @@ export class TelegramService {
 
     let msg = "";
 
+    const escapeHtml = (str?: string) => {
+      if (!str) return "";
+      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    };
+
     if (signal.type === "CALL_BUY" || signal.type === "PUT_BUY") {
       const actionEmoji = signal.type === "CALL_BUY" ? "🟢 <b>BUY CALL (CE)</b>" : "🔴 <b>BUY PUT (PE)</b>";
       const strikeName = signal.type === "CALL_BUY" ? `${signal.strikePrice} CE` : `${signal.strikePrice} PE`;
@@ -127,7 +132,7 @@ export class TelegramService {
       msg = `🔒 <b>POSITION UPDATE [SNIPER]</b>\n` +
             `━━━━━━━━━━━━━━━━━━━━\n` +
             `📊 <b>Strike:</b> <code>${signal.strikePrice}</code>\n` +
-            `🛡️ <b>Status:</b> ${signal.reasoning}\n` +
+            `🛡️ <b>Status:</b> ${escapeHtml(signal.reasoning)}\n` +
             `🛑 <b>New Stop Loss:</b> ₹${signal.stopLossPrice?.toFixed(2)}\n` +
             `🕒 <b>Time:</b> ${timeStr}\n` +
             `━━━━━━━━━━━━━━━━━━━━\n` +
@@ -144,7 +149,7 @@ export class TelegramService {
             `━━━━━━━━━━━━━━━━━━━━\n` +
             `📊 <b>Strike:</b> <code>${signal.strikePrice}</code>\n` +
             `💵 <b>Exit Price:</b> ₹${signal.entryPrice?.toFixed(2)}\n` +
-            `📝 <b>Reason:</b> ${signal.reasoning}\n` +
+            `📝 <b>Reason:</b> ${escapeHtml(signal.reasoning)}\n` +
             `🕒 <b>Time:</b> ${timeStr}\n` +
             `━━━━━━━━━━━━━━━━━━━━\n` +
             `<i>Net Realized P&L logged to Google Sheets.</i>`;
