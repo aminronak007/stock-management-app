@@ -18,18 +18,6 @@ dist/
 build/
 **/build/
 
-# Local SQLite Databases & Logs
-*.db
-*.db-wal
-*.db-shm
-**/data/*.db*
-logs/
-**/logs/
-
-# Local Paper-Trading Ledger Outputs
-Stock Mock/
-**/Stock Mock/
-
 # Debug Logs
 npm-debug.log*
 yarn-debug.log*
