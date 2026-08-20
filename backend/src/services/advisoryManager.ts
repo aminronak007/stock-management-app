@@ -23,6 +23,7 @@ export interface AdvisorySignal {
 interface TierPositionState {
   activeSignal: AdvisorySignal | null;
   entrySpot: number;
+  liveOptionLtp?: number;
   peakPremiumLtp: number;
   isBreakevenLocked: boolean;
   isTarget1Locked: boolean;
@@ -77,6 +78,7 @@ export class AdvisoryManager {
     SNIPER: {
       activeSignal: null,
       entrySpot: 0,
+      liveOptionLtp: 0,
       peakPremiumLtp: 0,
       isBreakevenLocked: false,
       isTarget1Locked: false,
@@ -91,6 +93,7 @@ export class AdvisoryManager {
     BALANCED: {
       activeSignal: null,
       entrySpot: 0,
+      liveOptionLtp: 0,
       peakPremiumLtp: 0,
       isBreakevenLocked: false,
       isTarget1Locked: false,
@@ -105,6 +108,7 @@ export class AdvisoryManager {
     EXPLORATORY: {
       activeSignal: null,
       entrySpot: 0,
+      liveOptionLtp: 0,
       peakPremiumLtp: 0,
       isBreakevenLocked: false,
       isTarget1Locked: false,
@@ -193,6 +197,7 @@ export class AdvisoryManager {
    */
   public async processTick(tick: CompactTick): Promise<void> {
     const timestamp = tick.timestamp || Date.now();
+    const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
 
     // 1. Time Check in IST (Indian Standard Time, UTC+5:30)
     const istTimeStr = new Intl.DateTimeFormat("en-GB", {
@@ -207,7 +212,6 @@ export class AdvisoryManager {
 
     // Universal Hard Square-Off at 15:15 IST across all tiers
     if (hours === 15 && minutes >= 15) {
-      const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
       for (const t of allTiers) {
         if (this.tierPositions[t].activeSignal && this.tierPositions[t].activeSignal!.type !== "HOLD") {
           this.triggerTierExit(t, "EXIT_PROFIT", "Universal 3:15 PM Square-off Alert. Terminate open positions.", timestamp);
@@ -283,7 +287,6 @@ export class AdvisoryManager {
       }
 
       // Monitor active position risk parameters across all 3 tiers independently
-      const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
       for (const t of allTiers) {
         if (this.tierPositions[t].activeSignal && this.tierPositions[t].activeSignal!.type.includes("BUY")) {
           this.monitorTierRiskState(t, tick.ltp, timestamp);
@@ -304,6 +307,14 @@ export class AdvisoryManager {
     // 4. Track VIX
     if (tick.symbol === "NSE:INDIAVIX-INDEX" && tick.ltp > 0) {
       this.indiaVixValue = tick.ltp;
+    }
+
+    // 5. Track live option ticks for any active tier position
+    for (const t of allTiers) {
+      const p = this.tierPositions[t];
+      if (p.activeSignal && p.activeOptionSymbol && tick.symbol === p.activeOptionSymbol && tick.ltp > 0) {
+        p.liveOptionLtp = tick.ltp;
+      }
     }
   }
 
@@ -549,6 +560,13 @@ export class AdvisoryManager {
         : this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
 
       targetPos.activeOptionSymbol = optionSymbol;
+      targetPos.liveOptionLtp = entryPrice;
+
+      // Dynamically subscribe live option contract to broker WebSocket for real-time tick streaming
+      if (optionSymbol) {
+        console.log(`[AdvisoryManager] [${tier}] Subscribing live WebSocket to active option contract: ${optionSymbol}`);
+        this.broker.subscribeTicks([optionSymbol]);
+      }
       
       // Auto Execution placement only for SNIPER Tier
       if (tier === "SNIPER" && process.env.AUTO_ORDER_EXECUTION === "true") {
@@ -628,7 +646,14 @@ export class AdvisoryManager {
     const elapsed = timestamp - pos.entryTime;
     const elapsedMinutes = Math.max(0, elapsed / (60 * 1000));
     const thetaDecayPoints = (elapsedMinutes / 60) * (pos.activeSignal.entryPrice * 0.025);
-    const currentPremiumLtp = parseFloat(Math.max(0.05, pos.activeSignal.entryPrice + spotMovementGain * deltaMultiplier - thetaDecayPoints).toFixed(2));
+
+    // Prioritize true live streaming option tick LTP if available, fallback seamlessly to delta model
+    let currentPremiumLtp: number;
+    if (pos.liveOptionLtp && pos.liveOptionLtp > 0) {
+      currentPremiumLtp = pos.liveOptionLtp;
+    } else {
+      currentPremiumLtp = parseFloat(Math.max(0.05, pos.activeSignal.entryPrice + spotMovementGain * deltaMultiplier - thetaDecayPoints).toFixed(2));
+    }
 
     pos.peakPremiumLtp = Math.max(pos.peakPremiumLtp, currentPremiumLtp);
 
@@ -657,24 +682,24 @@ export class AdvisoryManager {
       }
     }
 
-    // Stop Loss Trigger
+    // Hard Stop Loss check
     if (currentPremiumLtp <= pos.activeSignal.stopLossPrice) {
-      this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Stop-loss breached at premium price ${currentPremiumLtp.toFixed(2)}.`, timestamp, currentPremiumLtp);
+      this.triggerTierExit(tier, "EXIT_STOP_LOSS", "Stop loss threshold crossed.", timestamp, currentPremiumLtp);
       return;
     }
 
-    // Target 2 Trigger
+    // Full Profit Target 2 check
     if (pos.activeSignal.targetPrice2 && currentPremiumLtp >= pos.activeSignal.targetPrice2) {
-      this.triggerTierExit(tier, "EXIT_PROFIT", `Ultimate Target 2 breached at premium price ${currentPremiumLtp.toFixed(2)}. Booking profits.`, timestamp, currentPremiumLtp);
+      this.triggerTierExit(tier, "EXIT_PROFIT", "Target 2 achieved. Full profit booked.", timestamp, currentPremiumLtp);
       return;
     }
     
-    // Target 1 Trigger - Step-2 Trailing Stop Lock
+    // Target 1 Trail Step-up
     if (pos.activeSignal.targetPrice1 && currentPremiumLtp >= pos.activeSignal.targetPrice1 && !pos.isTarget1Locked) {
       pos.isTarget1Locked = true;
-      const profitLockPrice = parseFloat((pos.activeSignal.entryPrice + 0.5 * (pos.activeSignal.targetPrice1 - pos.activeSignal.entryPrice)).toFixed(2));
-      pos.activeSignal.stopLossPrice = Math.max(pos.activeSignal.stopLossPrice, profitLockPrice);
-      console.log(`[AdvisoryManager] [${tier}] Target 1 reached! Trailing Stop-loss stepped up to ₹${profitLockPrice.toFixed(2)}`);
+      const profitLockPrice = pos.activeSignal.entryPrice + (pos.activeSignal.targetPrice1 - pos.activeSignal.entryPrice) * 0.5;
+      pos.activeSignal.stopLossPrice = parseFloat(profitLockPrice.toFixed(2));
+      console.log(`[AdvisoryManager] [${tier}] Target 1 crossed! Trailing stop stepped up to ₹${profitLockPrice.toFixed(2)}`);
       
       if (tier === "SNIPER") {
         this.onSignalCallback({
@@ -696,6 +721,12 @@ export class AdvisoryManager {
     const entry = pos.activeSignal.entryPrice || 0;
     const exit = exitPrice || entry;
     const pnl = entry > 0 ? (exit - entry) : 0;
+
+    // Unsubscribe option contract from broker WebSocket stream upon exit
+    if (optionSymbol) {
+      console.log(`[AdvisoryManager] [${tier}] Unsubscribing WebSocket from closed option contract: ${optionSymbol}`);
+      this.broker.unsubscribeTicks([optionSymbol]);
+    }
 
     if (type === "EXIT_STOP_LOSS") {
       pos.dailyLossesCount++;
@@ -795,6 +826,7 @@ export class AdvisoryManager {
 
     pos.activeSignal = null;
     pos.entrySpot = 0;
+    pos.liveOptionLtp = 0;
     pos.activeOptionSymbol = "";
     pos.activeOrderId = "";
     pos.isBreakevenLocked = false;

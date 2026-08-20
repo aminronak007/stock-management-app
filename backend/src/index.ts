@@ -14,11 +14,15 @@ import { Backtester } from "./services/backtester";
 import { ParameterOptimizer } from "./services/optimizer";
 import { DatabaseService } from "./utils/database";
 import { ExcelLogger } from "./utils/excelLogger";
+import { GoogleSheetsService } from "./services/googleSheetsService";
 
 async function main() {
   console.log("=================================================");
   console.log("NIFTY 50 OPTIONS ADVISORY TERMINAL BACKEND BOOT");
   console.log("=================================================");
+
+  // Initialize Google Sheets Auth in background if credentials exist
+  GoogleSheetsService.initializeAuth().catch(() => {});
 
   // 1. SEBI Whitelisted IP Egress Check
   const verifyIp = process.env.VERIFY_STATIC_IP === "true";
@@ -273,6 +277,76 @@ async function main() {
     } catch (e: any) {
       console.error("[Fyers Callback API] Error generating access token:", e.message);
       res.status(500).send(`<h1>✖ Authentication Error</h1><p>${e.message}</p>`);
+    }
+  });
+
+  // Google Drive & Sheets OAuth2 endpoints
+  app.get("/api/google/auth", (req, res) => {
+    try {
+      const url = GoogleSheetsService.getAuthUrl();
+      res.redirect(url);
+    } catch (e: any) {
+      res.status(500).send(`<h1>✖ Google Auth Error</h1><p>${e.message}</p><p>Please ensure GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are in .env</p>`);
+    }
+  });
+
+  app.get("/api/google/callback", async (req, res) => {
+    const code = req.query.code as string;
+    if (!code) {
+      res.status(400).send("<h1>✖ Google Auth Failed</h1><p>Authorization code missing.</p>");
+      return;
+    }
+    try {
+      await GoogleSheetsService.handleOAuthCallback(code);
+      res.send(`
+        <html>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0b0f19; color: #10b981; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center;">
+            <div style="background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.2); padding: 32px; border-radius: 12px; box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5); backdrop-filter: blur(5px); max-width: 450px;">
+              <h1 style="margin: 0 0 16px 0; font-size: 24px; font-weight: 600;">✔ Google Drive & Sheets Connected!</h1>
+              <p style="color: #94a3b8; font-size: 15px; line-height: 1.5; margin: 0 0 24px 0;">Your Google account is authorized. All trades will automatically sync directly into <strong>Stock Mock &gt; Year &gt; Month</strong> in your Google Drive.</p>
+              <p style="color: #64748b; font-size: 13px; margin: 0;">You can close this window now.</p>
+            </div>
+          </body>
+        </html>
+      `);
+    } catch (e: any) {
+      res.status(500).send(`<h1>✖ Google Authorization Error</h1><p>${e.message}</p>`);
+    }
+  });
+
+  app.get("/api/google/status", (req, res) => {
+    const isConn = GoogleSheetsService.isConnected();
+    res.json({
+      connected: isConn,
+      message: isConn ? "Connected to Google Drive & Google Sheets" : "Not connected. Visit /api/google/auth to connect."
+    });
+  });
+
+  app.post("/api/google/test", async (req, res) => {
+    try {
+      const ok = await GoogleSheetsService.logTradeToGoogleSheets({
+        type: "CALL_BUY",
+        tier: "SNIPER",
+        symbol: "NSE:NIFTY26AUG24250CE",
+        strike: 24250,
+        qty: 25,
+        price: 120.50,
+        sl: 112.00,
+        t1: 135.00,
+        t2: 155.00,
+        investedCapital: 3012.50,
+        grossPnl: 0,
+        fees: 54.62,
+        netPnl: -54.62,
+        reasoning: "Test transaction verifying dynamic Google Drive folder & Sheet creation."
+      });
+      if (ok) {
+        res.json({ success: true, message: "Successfully created folder hierarchy and appended test trade to Google Sheets!" });
+      } else {
+        res.status(500).json({ success: false, message: "Failed to log to Google Sheets. Check server logs." });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 

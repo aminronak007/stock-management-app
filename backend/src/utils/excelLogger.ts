@@ -1,25 +1,30 @@
-import * as fs from "fs";
-import * as path from "path";
 import { DatabaseService } from "./database";
+import { GoogleSheetsService, TradeLogRow } from "../services/googleSheetsService";
 
 export class ExcelLogger {
-  private static getLogDirectory(): string {
-    const today = new Date();
-    const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-    const dayName = days[today.getDay()];
-    const dateStr = today.toISOString().split("T")[0]; // YYYY-MM-DD
-    
-    // Path: workspace_root/Stock Mock/Day_YYYY-MM-DD (outside backend folder)
-    const rootPath = path.join(__dirname, "../../../");
-    const dirPath = path.join(rootPath, "Stock Mock", `${dayName}_${dateStr}`);
-    
-    if (!fs.existsSync(dirPath)) {
-      fs.mkdirSync(dirPath, { recursive: true });
-    }
-    return dirPath;
+  /**
+   * Calculates realistic Indian FnO statutory fees (Brokerage, STT, GST, Exchange turnover, Stamp duty)
+   */
+  public static calculateStatutoryFees(price: number, qty: number): number {
+    const buyTurnover = price * qty;
+    const sellTurnover = price * qty; // conservative estimate for round trip turnover
+    const totalTurnover = buyTurnover + sellTurnover;
+
+    const brokerage = 40.0; // ₹20 Buy + ₹20 Sell (Standard discount broker)
+    const stt = sellTurnover * 0.00125; // 0.125% on option sell turnover
+    const exchangeCharge = totalTurnover * 0.000505; // 0.0505% NSE transaction charge
+    const gst = (brokerage + exchangeCharge) * 0.18; // 18% GST on brokerage + exchange fee
+    const stampDuty = buyTurnover * 0.00003; // 0.003% on buy
+    const sebiCharge = totalTurnover * 0.000001; // ₹10 per crore
+
+    const totalFees = brokerage + stt + exchangeCharge + gst + stampDuty + sebiCharge;
+    return parseFloat(totalFees.toFixed(2));
   }
 
-  public static logTransaction(
+  /**
+   * Logs transactions directly to Google Sheets and internal database (Zero Local CSV files)
+   */
+  public static async logTransaction(
     type: string,
     symbol: string,
     strike: number | string,
@@ -35,40 +40,38 @@ export class ExcelLogger {
       marketRegime?: string;
       confluenceScore?: number;
     } = {}
-  ): void {
-    const dir = this.getLogDirectory();
-    const filePath = path.join(dir, "ledger.csv");
-    const isNew = !fs.existsSync(filePath);
-
+  ): Promise<void> {
     const tier = additionalData.tier || "SNIPER";
-
-    // Standard CSV headers supporting Tier, Quantity and Invested Capital
-    const headers = "Timestamp,Type,Tier,Symbol,Strike,Qty,Price,StopLoss,Target1,Target2,InvestedCapital,PnL,Reasoning\n";
-    const timestamp = new Date().toLocaleString("en-IN");
-    
-    // Calculate Invested Capital (Premium Price * Lot Quantity)
     const investedCapital = price * qty;
-    
-    // Escape quotes for clean spreadsheet imports
-    const escapedReasoning = reasoning.replace(/"/g, '""');
-    const pnlVal = additionalData.pnl !== undefined ? (additionalData.pnl * qty) : undefined; // scale pnl by quantity traded
-    const pnlStr = pnlVal !== undefined ? pnlVal.toFixed(2) : "";
-    
-    const row = `"${timestamp}","${type}","${tier}","${symbol}","${strike}",${qty},${price.toFixed(2)},${additionalData.sl?.toFixed(2) || ""},${additionalData.t1?.toFixed(2) || ""},${additionalData.t2?.toFixed(2) || ""},${investedCapital.toFixed(2)},${pnlStr},"${escapedReasoning}"\n`;
 
-    // 1. Write to Excel Ledger CSV File
-    try {
-      if (isNew) {
-        fs.writeFileSync(filePath, headers + row, "utf8");
-      } else {
-        fs.appendFileSync(filePath, row, "utf8");
-      }
-      console.log(`[ExcelLogger] Trade logs logged successfully to CSV: ${filePath}`);
-    } catch (e: any) {
-      console.error("[ExcelLogger] Failed to write trade log to excel ledger:", e.message);
+    let grossPnlVal: number | undefined = undefined;
+    let feesVal: number | undefined = undefined;
+    let netPnlVal: number | undefined = undefined;
+
+    if (additionalData.pnl !== undefined) {
+      grossPnlVal = additionalData.pnl * qty; // scale pnl by quantity traded
+      feesVal = this.calculateStatutoryFees(price, qty);
+      netPnlVal = grossPnlVal - feesVal;
     }
 
-    // 2. ALSO Persist simultaneously into SQLite Database (paper_trades table)
+    const tradeRow: TradeLogRow = {
+      type,
+      tier,
+      symbol,
+      strike,
+      qty,
+      price,
+      sl: additionalData.sl,
+      t1: additionalData.t1,
+      t2: additionalData.t2,
+      investedCapital,
+      grossPnl: grossPnlVal,
+      fees: feesVal,
+      netPnl: netPnlVal,
+      reasoning
+    };
+
+    // 1. Persist into SQLite Database (paper_trades table for Dashboard UI)
     try {
       DatabaseService.logPaperTrade({
         type,
@@ -80,14 +83,23 @@ export class ExcelLogger {
         stopLoss: additionalData.sl,
         target1: additionalData.t1,
         target2: additionalData.t2,
-        pnl: pnlVal,
+        pnl: grossPnlVal,
+        fees: feesVal,
+        netPnl: netPnlVal,
         reasoning,
         marketRegime: additionalData.marketRegime,
         confluenceScore: additionalData.confluenceScore
       });
-      console.log(`[ExcelLogger] Trade logged successfully into SQLite Database (paper_trades table).`);
+      console.log(`[TradeLogger] Trade saved to SQLite Database.`);
     } catch (e: any) {
-      console.error("[ExcelLogger] Failed to log paper trade to database:", e.message);
+      console.error("[TradeLogger] Failed to log trade to SQLite database:", e.message);
+    }
+
+    // 2. Stream Directly to Google Sheets (Cloud Only)
+    try {
+      await GoogleSheetsService.logTradeToGoogleSheets(tradeRow);
+    } catch (err: any) {
+      console.error("[TradeLogger] Error logging trade to Google Sheets:", err.message);
     }
   }
 }

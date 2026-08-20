@@ -119,6 +119,14 @@ export class Backtester {
     let isOrbActive = false;
     let lastDateStr = "";
 
+    let prevDayHigh = 0;
+    let prevDayLow = 0;
+    let prevDayClose = 0;
+    let currentDayHigh = 0;
+    let currentDayLow = 0;
+    let currentDayClose = 0;
+    let calculatedDailyCpr: CPRValues | null = null;
+
     const feedCandles: Candle[] = [];
 
     for (let i = 0; i < activeCandlesList.length; i++) {
@@ -130,12 +138,27 @@ export class Backtester {
       const minutes = barTime.getMinutes();
       const currentDateStr = barTime.toDateString();
 
-      // Reset ORB boundaries on new session morning
+      // Reset ORB boundaries and roll CPR on new session morning
       if (currentDateStr !== lastDateStr) {
         orbHigh = 0;
         orbLow = 0;
         isOrbActive = false;
+        
+        if (currentDayHigh > 0 && currentDayLow > 0) {
+          prevDayHigh = currentDayHigh;
+          prevDayLow = currentDayLow;
+          prevDayClose = currentDayClose;
+          calculatedDailyCpr = CPR.calculateCPR(prevDayHigh, prevDayLow, prevDayClose);
+        }
+
+        currentDayHigh = currentBar.high;
+        currentDayLow = currentBar.low;
+        currentDayClose = currentBar.close;
         lastDateStr = currentDateStr;
+      } else {
+        currentDayHigh = Math.max(currentDayHigh, currentBar.high);
+        currentDayLow = Math.min(currentDayLow, currentBar.low);
+        currentDayClose = currentBar.close;
       }
 
       // Track ORB boundaries (9:15 - 9:30 AM)
@@ -179,7 +202,7 @@ export class Backtester {
           }
 
           if (triggerType && orbHigh > 0 && orbLow > 0) {
-            // Option Selecion delta/premium estimations
+            // Option Selection delta/premium estimations
             const strikePrice = Math.round(currentBar.close / 50) * 50;
             const optionLtp = 120.0; // benchmark options entry premium
             
@@ -200,14 +223,14 @@ export class Backtester {
 
             const riskReward = scaledTarget2 / Math.max(1, scaledStopLoss);
 
-            // Compute score card
+            // Compute score card with authentic CPR
             const scoreCard = QuantitativeEngine.calculateConfluence({
               spot: currentBar.close,
               currentVwap,
               orbHigh,
               orbLow,
               triggerType,
-              cpr: CPR.calculateCPR(currentBar.close + 40, currentBar.close - 40, currentBar.close),
+              cpr: calculatedDailyCpr,
               pcr: triggerType === "CALL_BUY" ? 1.15 : 0.75,
               vix: 14.2,
               atr: atrValue,
@@ -441,9 +464,28 @@ export class Backtester {
     const winRatio = winRate / 100;
     const expectancy = (winRatio * averageWin) - ((1 - winRatio) * averageLoss);
 
-    // Dynamic Sharpe estimation
-    const sharpeRatio = profitFactor > 1.3 ? 1.85 : profitFactor > 1.0 ? 0.95 : -0.45;
-    const sortinoRatio = profitFactor > 1.3 ? 2.15 : profitFactor > 1.0 ? 1.10 : -0.65;
+    // True Statistical Sharpe & Sortino calculations from realized trade returns
+    const returns = trades.map(t => t.netPnl * 25);
+    const n = returns.length;
+    let sharpeRatio = 0.0;
+    let sortinoRatio = 0.0;
+
+    if (n > 1) {
+      const meanReturn = returns.reduce((a, b) => a + b, 0) / n;
+      const variance = returns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) / (n - 1);
+      const stdDev = Math.sqrt(variance);
+      
+      const downsideVariance = returns.reduce((sum, r) => sum + Math.pow(Math.min(0, r), 2), 0) / n;
+      const downsideStdDev = Math.sqrt(downsideVariance);
+
+      const tradesPerYear = 250;
+      if (stdDev > 0) {
+        sharpeRatio = parseFloat(((meanReturn / stdDev) * Math.sqrt(tradesPerYear)).toFixed(2));
+      }
+      if (downsideStdDev > 0) {
+        sortinoRatio = parseFloat(((meanReturn / downsideStdDev) * Math.sqrt(tradesPerYear)).toFixed(2));
+      }
+    }
 
     // Overfit risk classification
     let overfit: BacktestReport["overfitAnalysis"] = { passed: true, label: "ROBUST" };

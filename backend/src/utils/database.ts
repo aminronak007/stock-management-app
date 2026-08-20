@@ -20,6 +20,8 @@ export interface PaperTradeRecord {
   invested_capital: number;
   pnl?: number;
   pnl_percent?: number;
+  fees?: number;
+  net_pnl?: number;
   reasoning: string;
   market_regime?: string;
   confluence_score?: number;
@@ -34,6 +36,9 @@ export interface TradeAnalytics {
   breakevenTrades: number;
   winRatePercent: number;
   totalPnl: number;
+  totalGrossPnl?: number;
+  totalFees?: number;
+  totalNetPnl?: number;
   profitFactor: number;
   avgWin: number;
   avgLoss: number;
@@ -123,6 +128,8 @@ export class DatabaseService {
         invested_capital REAL NOT NULL,
         pnl REAL,
         pnl_percent REAL,
+        fees REAL DEFAULT 0.0,
+        net_pnl REAL,
         reasoning TEXT,
         market_regime TEXT,
         confluence_score REAL,
@@ -135,6 +142,12 @@ export class DatabaseService {
       this.db.exec("ALTER TABLE paper_trades ADD COLUMN tier TEXT DEFAULT 'SNIPER'");
     } catch {}
     try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN fees REAL DEFAULT 0.0");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN net_pnl REAL");
+    } catch {}
+    try {
       this.db.exec("ALTER TABLE advisory_signals ADD COLUMN tier TEXT DEFAULT 'SNIPER'");
     } catch {}
 
@@ -144,19 +157,27 @@ export class DatabaseService {
   public static saveSession(provider: string, token: string, expiresAt: number): void {
     const db = this.initialize();
     const stmt = db.prepare(`
-      INSERT OR REPLACE INTO sessions (provider, access_token, expires_at)
+      INSERT INTO sessions (provider, access_token, expires_at)
       VALUES (?, ?, ?)
+      ON CONFLICT(provider) DO UPDATE SET
+        access_token = excluded.access_token,
+        expires_at = excluded.expires_at
     `);
     stmt.run(provider, token, expiresAt);
   }
 
-  public static getSession(provider: string): { access_token: string, expires_at: number } | null {
+  public static getSession(provider: string): { access_token: string; expires_at: number; accessToken: string; expiresAt: number } | null {
     const db = this.initialize();
-    const stmt = db.prepare(`
-      SELECT access_token, expires_at FROM sessions WHERE provider = ?
-    `);
-    const row = stmt.get(provider) as { access_token: string, expires_at: number } | undefined;
-    return row || null;
+    const row = db.prepare("SELECT access_token as access_token, expires_at as expires_at FROM sessions WHERE provider = ?").get(provider) as
+      | { access_token: string; expires_at: number }
+      | undefined;
+    if (!row) return null;
+    return {
+      access_token: row.access_token,
+      expires_at: row.expires_at,
+      accessToken: row.access_token,
+      expiresAt: row.expires_at
+    };
   }
 
   public static clearSession(provider: string): void {
@@ -176,7 +197,9 @@ export class DatabaseService {
   ): void {
     const db = this.initialize();
     const stmt = db.prepare(`
-      INSERT INTO advisory_signals (timestamp, type, tier, strike_price, entry_price, stop_loss_price, target_price1, target_price2, reasoning)
+      INSERT INTO advisory_signals (
+        timestamp, type, tier, strike_price, entry_price, stop_loss_price, target_price1, target_price2, reasoning
+      )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(Date.now(), type, tier, strike ?? null, entry ?? null, sl ?? null, t1 ?? null, t2 ?? null, reasoning);
@@ -193,6 +216,8 @@ export class DatabaseService {
     target1?: number;
     target2?: number;
     pnl?: number;
+    fees?: number;
+    netPnl?: number;
     reasoning: string;
     marketRegime?: string;
     confluenceScore?: number;
@@ -205,7 +230,9 @@ export class DatabaseService {
     
     // Calculate PnL percentage if PnL is present
     let pnlPercent: number | null = null;
-    if (data.pnl !== undefined && investedCapital > 0) {
+    if (data.netPnl !== undefined && investedCapital > 0) {
+      pnlPercent = (data.netPnl / investedCapital) * 100;
+    } else if (data.pnl !== undefined && investedCapital > 0) {
       pnlPercent = (data.pnl / investedCapital) * 100;
     }
 
@@ -213,8 +240,8 @@ export class DatabaseService {
       INSERT INTO paper_trades (
         timestamp, datetime, type, tier, symbol, strike, qty, price,
         stop_loss, target1, target2, invested_capital, pnl, pnl_percent,
-        reasoning, market_regime, confluence_score, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        fees, net_pnl, reasoning, market_regime, confluence_score, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -232,6 +259,8 @@ export class DatabaseService {
       investedCapital,
       data.pnl !== undefined ? data.pnl : null,
       pnlPercent,
+      data.fees ?? 0.0,
+      data.netPnl !== undefined ? data.netPnl : null,
       data.reasoning,
       data.marketRegime ?? null,
       data.confluenceScore ?? null,
@@ -265,7 +294,9 @@ export class DatabaseService {
       ? (db.prepare("SELECT * FROM paper_trades WHERE pnl IS NOT NULL AND tier = ?").all(tier) as PaperTradeRecord[])
       : (db.prepare("SELECT * FROM paper_trades WHERE pnl IS NOT NULL").all() as PaperTradeRecord[]);
 
-    let totalPnl = 0;
+    let totalGrossPnl = 0;
+    let totalFees = 0;
+    let totalNetPnl = 0;
     let winningTrades = 0;
     let losingTrades = 0;
     let breakevenTrades = 0;
@@ -282,17 +313,22 @@ export class DatabaseService {
     let putTrades = 0;
 
     trades.forEach((t) => {
-      const pnl = t.pnl || 0;
-      totalPnl += pnl;
+      const grossPnl = t.pnl || 0;
+      const fees = t.fees || 0;
+      const netPnl = t.net_pnl !== undefined && t.net_pnl !== null ? t.net_pnl : (grossPnl - fees);
 
-      if (pnl > 0) {
+      totalGrossPnl += grossPnl;
+      totalFees += fees;
+      totalNetPnl += netPnl;
+
+      if (netPnl > 0) {
         winningTrades++;
-        grossWins += pnl;
-        largestWin = Math.max(largestWin, pnl);
-      } else if (pnl < 0) {
+        grossWins += netPnl;
+        largestWin = Math.max(largestWin, netPnl);
+      } else if (netPnl < 0) {
         losingTrades++;
-        grossLosses += Math.abs(pnl);
-        largestLoss = Math.min(largestLoss, pnl);
+        grossLosses += Math.abs(netPnl);
+        largestLoss = Math.min(largestLoss, netPnl);
       } else {
         breakevenTrades++;
       }
@@ -302,10 +338,10 @@ export class DatabaseService {
 
       if (t.type.includes("CALL") || (t.symbol && t.symbol.includes("CE"))) {
         callTrades++;
-        if (pnl > 0) callWins++;
+        if (netPnl > 0) callWins++;
       } else if (t.type.includes("PUT") || (t.symbol && t.symbol.includes("PE"))) {
         putTrades++;
-        if (pnl > 0) putWins++;
+        if (netPnl > 0) putWins++;
       }
     });
 
@@ -340,7 +376,10 @@ export class DatabaseService {
       losingTrades,
       breakevenTrades,
       winRatePercent,
-      totalPnl,
+      totalPnl: totalNetPnl,
+      totalGrossPnl,
+      totalFees,
+      totalNetPnl,
       profitFactor,
       avgWin,
       avgLoss,
