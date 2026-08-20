@@ -342,6 +342,97 @@ export class FyersAdapter implements IBrokerAdapter {
     return mockCandles;
   }
 
+  /**
+   * Fyers v3 returns one row per option leg (CE/PE) with snake_case fields.
+   * Group those rows into strike-level call/put pairs for the advisory engine.
+   */
+  private parseFyersOptionsChain(
+    optionsChain: any[],
+    expiry: string,
+    underlying: string
+  ): OptionChainItem[] {
+    const emptyLeg = () => ({
+      symbol: "",
+      ltp: 0,
+      openInterest: 0,
+      changeOpenInterest: 0,
+      volume: 0,
+      impliedVolatility: 0
+    });
+
+    const strikeMap = new Map<number, OptionChainItem>();
+
+    for (const opt of optionsChain) {
+      // Legacy paired-row format (kept for compatibility if API shape changes back)
+      if (opt.callLtp !== undefined || opt.callSymbol) {
+        const strike = Number(opt.strikePrice ?? opt.strike_price);
+        if (!Number.isFinite(strike) || strike <= 0) continue;
+        strikeMap.set(strike, {
+          strikePrice: strike,
+          expiryDate: expiry,
+          underlyingSymbol: underlying,
+          call: {
+            symbol: opt.callSymbol || "",
+            ltp: Number(opt.callLtp || 0),
+            openInterest: Number(opt.callOi || 0),
+            changeOpenInterest: Number(opt.callOiChange || 0),
+            volume: Number(opt.callVolume || 0),
+            impliedVolatility: Number(opt.callIv || 0)
+          },
+          put: {
+            symbol: opt.putSymbol || "",
+            ltp: Number(opt.putLtp || 0),
+            openInterest: Number(opt.putOi || 0),
+            changeOpenInterest: Number(opt.putOiChange || 0),
+            volume: Number(opt.putVolume || 0),
+            impliedVolatility: Number(opt.putIv || 0)
+          }
+        });
+        continue;
+      }
+
+      const strike = Number(opt.strike_price ?? opt.strikePrice);
+      if (!Number.isFinite(strike) || strike <= 0) continue;
+
+      const optionType = String(opt.option_type ?? opt.optionType ?? "").toUpperCase();
+      if (optionType !== "CE" && optionType !== "PE") continue;
+
+      if (!strikeMap.has(strike)) {
+        strikeMap.set(strike, {
+          strikePrice: strike,
+          expiryDate: expiry,
+          underlyingSymbol: underlying,
+          call: emptyLeg(),
+          put: emptyLeg()
+        });
+      }
+
+      const entry = strikeMap.get(strike)!;
+      const leg = optionType === "CE" ? entry.call : entry.put;
+      leg.symbol = opt.symbol || leg.symbol;
+      leg.ltp = Number(opt.ltp ?? opt.fp ?? 0);
+      leg.openInterest = Number(opt.oi ?? opt.openInterest ?? 0);
+      leg.changeOpenInterest = Number(opt.oich ?? opt.oiChange ?? opt.changeOpenInterest ?? 0);
+      leg.volume = Number(opt.volume ?? 0);
+      leg.impliedVolatility = Number(opt.iv ?? opt.impliedVolatility ?? 0);
+    }
+
+    return Array.from(strikeMap.values()).sort((a, b) => a.strikePrice - b.strikePrice);
+  }
+
+  private resolveFyersChainExpiry(chainData: any): string {
+    if (chainData.expiry) return String(chainData.expiry);
+
+    const expiryRows = chainData.expiryData;
+    if (Array.isArray(expiryRows) && expiryRows.length > 0) {
+      const weekly = expiryRows.find((row: any) => row.expiry_flag === "W");
+      if (weekly?.date) return weekly.date;
+      if (expiryRows[0]?.date) return expiryRows[0].date;
+    }
+
+    return "";
+  }
+
   public async getOptionChain(underlying: string): Promise<OptionChainItem[]> {
     const cached = this.optionChainCache[underlying];
     const now = Date.now();
@@ -358,36 +449,24 @@ export class FyersAdapter implements IBrokerAdapter {
         };
         
         const res = await this.fyersClient.getOptionChain(params);
-        if (res && res.s === "ok" && res.data && Array.isArray(res.data.optionsChain)) {
-          const expiry = res.data.expiry;
-          const chain = res.data.optionsChain.map((opt: any) => ({
-            strikePrice: opt.strikePrice,
-            expiryDate: expiry,
-            underlyingSymbol: underlying,
-            call: {
-              symbol: opt.callSymbol,
-              ltp: opt.callLtp,
-              openInterest: opt.callOi,
-              changeOpenInterest: opt.callOiChange,
-              volume: opt.callVolume,
-              impliedVolatility: opt.callIv
-            },
-            put: {
-              symbol: opt.putSymbol,
-              ltp: opt.putLtp,
-              openInterest: opt.putOi,
-              changeOpenInterest: opt.putOiChange,
-              volume: opt.putVolume,
-              impliedVolatility: opt.putIv
-            }
-          }));
+        const chainPayload = res?.data;
+        const optionsChain = chainPayload?.optionsChain;
+        const isOk = res && (res.s === "ok" || chainPayload?.code === 200);
 
-          // Cache for 3 seconds to prevent rate limiting
-          this.optionChainCache[underlying] = {
-            data: chain,
-            expiryTime: now + 3000
-          };
-          return chain;
+        if (isOk && Array.isArray(optionsChain) && optionsChain.length > 0) {
+          const expiry = this.resolveFyersChainExpiry(chainPayload);
+          const chain = this.parseFyersOptionsChain(optionsChain, expiry, underlying);
+
+          if (chain.length > 0) {
+            // Cache for 3 seconds to prevent rate limiting
+            this.optionChainCache[underlying] = {
+              data: chain,
+              expiryTime: now + 3000
+            };
+            return chain;
+          }
+
+          console.warn(`[FyersAdapter] Option chain parsed to 0 strikes for ${underlying}.`);
         }
       } catch (err: any) {
         console.warn(`[FyersAdapter] Option chain query rejected for ${underlying}:`, err?.message || err);

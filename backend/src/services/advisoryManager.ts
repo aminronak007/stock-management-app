@@ -376,9 +376,15 @@ export class AdvisoryManager {
       
       // Retrieve ATM option chain details
       const atmChain = chain.find(item => item.strikePrice === selectedStrike);
-      const optionLtp = triggerType === "CALL_BUY" 
-        ? (atmChain ? atmChain.call.ltp : 100) 
-        : (atmChain ? atmChain.put.ltp : 100);
+      const optionLeg = triggerType === "CALL_BUY" ? atmChain?.call : atmChain?.put;
+      const optionLtp = optionLeg?.ltp && optionLeg.ltp > 0 ? optionLeg.ltp : 0;
+
+      if (!optionLtp) {
+        console.warn(
+          `[AdvisoryManager] Missing live premium for strike ${selectedStrike} (${triggerType}). Skipping signal.`
+        );
+        return;
+      }
 
       // Calculate dynamic weekly options expiry days
       const getDaysToExpiry = (): number => {
