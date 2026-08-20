@@ -22,6 +22,7 @@ export interface AdvisorySignal {
 
 interface TierPositionState {
   activeSignal: AdvisorySignal | null;
+  entrySpot: number;
   peakPremiumLtp: number;
   isBreakevenLocked: boolean;
   isTarget1Locked: boolean;
@@ -75,6 +76,7 @@ export class AdvisoryManager {
   private tierPositions: { [key in SignalTier]: TierPositionState } = {
     SNIPER: {
       activeSignal: null,
+      entrySpot: 0,
       peakPremiumLtp: 0,
       isBreakevenLocked: false,
       isTarget1Locked: false,
@@ -88,6 +90,7 @@ export class AdvisoryManager {
     },
     BALANCED: {
       activeSignal: null,
+      entrySpot: 0,
       peakPremiumLtp: 0,
       isBreakevenLocked: false,
       isTarget1Locked: false,
@@ -101,6 +104,7 @@ export class AdvisoryManager {
     },
     EXPLORATORY: {
       activeSignal: null,
+      entrySpot: 0,
       peakPremiumLtp: 0,
       isBreakevenLocked: false,
       isTarget1Locked: false,
@@ -159,12 +163,12 @@ export class AdvisoryManager {
         this.cpr = CPR.calculateCPR(lastDay.high, lastDay.low, lastDay.close);
         console.log(`[AdvisoryManager] Daily CPR calculated: Pivot=${this.cpr.pivot.toFixed(2)}, Range=[${this.cpr.bottomRange.toFixed(2)} - ${this.cpr.topRange.toFixed(2)}]`);
       } else {
-        console.warn("[AdvisoryManager] Could not fetch daily candles. Using default CPR.");
-        this.cpr = CPR.calculateCPR(24050, 23950, 24000);
+        console.warn("[AdvisoryManager] Could not fetch real daily candles from broker. CPR filter disabled.");
+        this.cpr = null;
       }
     } catch (e) {
-      console.error("[AdvisoryManager] Failed to fetch CPR parameters. Using fallback.", e);
-      this.cpr = CPR.calculateCPR(24050, 23950, 24000);
+      console.warn("[AdvisoryManager] Failed to fetch CPR parameters from broker. CPR filter disabled.", e);
+      this.cpr = null;
     }
 
     // Fetch Nifty 5-minute historical candles for indicator calculations
@@ -288,7 +292,7 @@ export class AdvisoryManager {
     }
 
     // 3. Track Heavyweights & calculate continuous intraday VWAP baseline
-    if (tick.symbol in this.heavyweightLtp) {
+    if (tick.symbol in this.heavyweightLtp && tick.ltp > 0) {
       this.heavyweightLtp[tick.symbol] = tick.ltp;
       if (!this.heavyweightVwap[tick.symbol] || this.heavyweightVwap[tick.symbol] === 0) {
         this.heavyweightVwap[tick.symbol] = tick.ltp;
@@ -298,7 +302,7 @@ export class AdvisoryManager {
     }
 
     // 4. Track VIX
-    if (tick.symbol === "NSE:INDIAVIX-INDEX") {
+    if (tick.symbol === "NSE:INDIAVIX-INDEX" && tick.ltp > 0) {
       this.indiaVixValue = tick.ltp;
     }
   }
@@ -371,8 +375,9 @@ export class AdvisoryManager {
     }
 
     if (triggerType) {
-      // Strike rounded selection based on Black-Scholes Greeks (Delta ATM)
-      let selectedStrike = Math.round(spot / 50) * 50;
+      // Dynamic strike interval (100 for BankNifty/Sensex, 50 for Nifty)
+      const strikeInterval = 50;
+      let selectedStrike = Math.round(spot / strikeInterval) * strikeInterval;
       
       // Retrieve ATM option chain details
       const atmChain = chain.find(item => item.strikePrice === selectedStrike);
@@ -386,8 +391,27 @@ export class AdvisoryManager {
         return;
       }
 
-      // Calculate dynamic weekly options expiry days
-      const getDaysToExpiry = (): number => {
+      // Calculate dynamic expiry days from actual chain data
+      const getDaysToExpiry = (expiryDateStr?: string): number => {
+        if (expiryDateStr) {
+          try {
+            let expDate: Date | null = null;
+            if (/^\d{2}-\d{2}-\d{4}$/.test(expiryDateStr)) {
+              const [d, m, y] = expiryDateStr.split("-").map(Number);
+              expDate = new Date(y, m - 1, d, 15, 30, 0);
+            } else if (/^\d{4}-\d{2}-\d{2}$/.test(expiryDateStr)) {
+              expDate = new Date(`${expiryDateStr}T15:30:00`);
+            } else if (!isNaN(Number(expiryDateStr))) {
+              expDate = new Date(Number(expiryDateStr) * (Number(expiryDateStr) < 1e11 ? 1000 : 1));
+            }
+            if (expDate && !isNaN(expDate.getTime())) {
+              const diffMs = expDate.getTime() - timestamp;
+              const daysRemaining = diffMs / (1000 * 60 * 60 * 24);
+              if (daysRemaining > 0) return Math.max(0.1, parseFloat(daysRemaining.toFixed(2)));
+            }
+          } catch {}
+        }
+        // Fallback calendar calculation
         const today = new Date(timestamp);
         const dayOfWeek = today.getDay(); // 0 = Sun, 1 = Mon, ..., 4 = Thu
         let days = (4 - dayOfWeek + 7) % 7;
@@ -401,7 +425,8 @@ export class AdvisoryManager {
         return Math.max(1, days);
       };
 
-      const expiryDays = getDaysToExpiry();
+      const expiryDateStr = atmChain?.expiryDate || chain[0]?.expiryDate;
+      const expiryDays = getDaysToExpiry(expiryDateStr);
       const greeksResult = Greeks.calculateGreeks(spot, selectedStrike, expiryDays, this.indiaVixValue);
       const delta = triggerType === "CALL_BUY" ? greeksResult.call.delta : Math.abs(greeksResult.put.delta);
 
@@ -424,6 +449,10 @@ export class AdvisoryManager {
       const atrList = Indicators.calculateATR(highsList, lowsList, closePrices, 14);
       const atrValue = atrList.length > 0 ? atrList[atrList.length - 1] : 12; 
       
+      // Calculate true dynamic RSI from market prices
+      const rsiList = Indicators.calculateRSI(closePrices, 14);
+      const marketRsi = rsiList.length > 0 ? rsiList[rsiList.length - 1] : 50;
+
       const scaledTarget1 = targetOffset1 * delta;
       const scaledTarget2 = targetOffset2 * delta;
       const scaledStopLoss = 1.5 * atrValue * delta;
@@ -448,8 +477,13 @@ export class AdvisoryManager {
         candles5m: this.indexCandles,
         heavyweightsLtp: this.heavyweightLtp,
         heavyweightsVwap: this.heavyweightVwap,
-        optionPremiumRsi: 55
+        optionPremiumRsi: marketRsi
       });
+
+      // Strict rejection: zero trade on detected false breakout or score < 45
+      if (scoreCard.isFalseBreakout || scoreCard.totalScore < 45) {
+        return;
+      }
 
       const envScore = process.env.MIN_SIGNAL_SCORE;
       let minSignalScore = envScore !== undefined ? parseInt(envScore, 10) : 75;
@@ -467,7 +501,7 @@ export class AdvisoryManager {
       // Classify into 3-Tier Multi-Track Strategy:
       // Tier 1: SNIPER (>= 75% or MIN_SIGNAL_SCORE) -> Official Signals & UI Audio Alerts
       // Tier 2: BALANCED (60% - 74%) -> Moderate Paper Trading in background
-      // Tier 3: EXPLORATORY (< 60%) -> Aggressive Paper Trading in background
+      // Tier 3: EXPLORATORY (45% - 59%) -> Aggressive Paper Trading in background (only if verified)
       let tier: SignalTier = "EXPLORATORY";
       if (scoreCard.totalScore >= minSignalScore) {
         tier = "SNIPER";
@@ -503,6 +537,7 @@ export class AdvisoryManager {
 
       // Populate position state for this tier
       targetPos.activeSignal = signalObj;
+      targetPos.entrySpot = spot;
       targetPos.peakPremiumLtp = entryPrice;
       targetPos.isBreakevenLocked = false;
       targetPos.isTarget1Locked = false;
@@ -584,10 +619,16 @@ export class AdvisoryManager {
     if (!pos.activeSignal || !pos.activeSignal.entryPrice || !pos.activeSignal.stopLossPrice) return;
 
     const deltaMultiplier = 0.50;
+    const entrySpotVal = pos.entrySpot > 0 ? pos.entrySpot : spot;
     const spotMovementGain = pos.activeSignal.type === "CALL_BUY"
-      ? (spot - this.orbHigh)
-      : (this.orbLow - spot);
-    const currentPremiumLtp = parseFloat(Math.max(1, pos.activeSignal.entryPrice + spotMovementGain * deltaMultiplier).toFixed(2));
+      ? (spot - entrySpotVal)
+      : (entrySpotVal - spot);
+
+    // Intraday Theta Decay model: ~2.5% premium erosion per hour held during sideways consolidation
+    const elapsed = timestamp - pos.entryTime;
+    const elapsedMinutes = Math.max(0, elapsed / (60 * 1000));
+    const thetaDecayPoints = (elapsedMinutes / 60) * (pos.activeSignal.entryPrice * 0.025);
+    const currentPremiumLtp = parseFloat(Math.max(0.05, pos.activeSignal.entryPrice + spotMovementGain * deltaMultiplier - thetaDecayPoints).toFixed(2));
 
     pos.peakPremiumLtp = Math.max(pos.peakPremiumLtp, currentPremiumLtp);
 
@@ -608,7 +649,6 @@ export class AdvisoryManager {
     }
 
     // Theta Exit check: position is open > 12 minutes and sideways
-    const elapsed = timestamp - pos.entryTime;
     if (elapsed > 12 * 60 * 1000) {
       const percentageChange = Math.abs(spotMovementGain / spot) * 100;
       if (percentageChange < 0.15) {
@@ -666,7 +706,11 @@ export class AdvisoryManager {
       const initialRisk = entry - (pos.activeSignal.stopLossPrice || 0);
       const ratio = initialRisk > 0 ? (pnl / initialRisk) : 1.5;
       pos.dailyProfitLoss += ratio;
-      console.log(`[Risk Engine] [${tier}] Take-profit achieved (+${ratio.toFixed(2)}R). Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
+      pos.stoppedCooldownUntil = timestamp + 5 * 60 * 1000;
+      console.log(`[Risk Engine] [${tier}] Take-profit achieved (+${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
+    } else if (type === "THETA_EXIT") {
+      pos.stoppedCooldownUntil = timestamp + 5 * 60 * 1000;
+      console.log(`[Risk Engine] [${tier}] Theta-exit triggered. Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}.`);
     }
 
     const qtyStr = process.env.ORDER_QTY || "25";
@@ -750,6 +794,7 @@ export class AdvisoryManager {
     }
 
     pos.activeSignal = null;
+    pos.entrySpot = 0;
     pos.activeOptionSymbol = "";
     pos.activeOrderId = "";
     pos.isBreakevenLocked = false;

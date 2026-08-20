@@ -395,6 +395,15 @@ async function main() {
     }
   });
 
+  app.post("/api/database/purge-corrupted-trades", (req, res) => {
+    try {
+      const purged = DatabaseService.purgeCorruptedDummyTrades();
+      res.json({ success: true, count: purged, message: `Purged ${purged} corrupted dummy trades.` });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.post("/api/backtest", async (req, res) => {
     try {
       const { symbol, minScore, slippageMultiplier, fromDate, toDate, useWfo } = req.body;

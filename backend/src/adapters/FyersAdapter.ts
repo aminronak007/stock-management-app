@@ -287,21 +287,24 @@ export class FyersAdapter implements IBrokerAdapter {
       try {
         console.log(`[FyersAdapter] Fetching real historical data for: ${symbol}`);
         const candles = await fetchFromFyers();
-        if (candles) return candles;
+        if (candles && candles.length > 0) return candles;
       } catch (err: any) {
         if (err?.message?.includes("limit") || typeof err === "string" && err.includes("limit")) {
           // Rate limit backoff: wait 400ms and retry once
           await new Promise(r => setTimeout(r, 400));
           try {
             const retryCandles = await fetchFromFyers();
-            if (retryCandles) return retryCandles;
+            if (retryCandles && retryCandles.length > 0) return retryCandles;
           } catch {}
         }
         console.warn(`[FyersAdapter] Historical data query rejected for ${symbol}:`, err?.message || err);
       }
+
+      // In Live Broker mode, never generate fake mock candles; return empty to let caller fail safely
+      return [];
     }
 
-    // Accurate realistic market baselines
+    // Accurate realistic market baselines ONLY for offline simulation mode
     const getSymbolBasePrice = (sym: string): number => {
       if (sym.includes("SENSEX")) return 77728.16;
       if (sym.includes("NIFTYBANK") || sym.includes("BANKNIFTY")) return 57497.80;
@@ -471,9 +474,12 @@ export class FyersAdapter implements IBrokerAdapter {
       } catch (err: any) {
         console.warn(`[FyersAdapter] Option chain query rejected for ${underlying}:`, err?.message || err);
       }
+
+      // In live broker mode, never generate synthetic fake options; return [] so callers safely skip signals
+      return [];
     }
 
-    // Option Chain Fallback centered around current live spot price
+    // Option Chain Fallback ONLY for offline simulated/sandbox mode
     const spot = this.latestTicks[underlying] || (underlying.includes("BANK") ? 57200 : 24250);
     const strikeInterval = underlying.includes("BANK") ? 100 : 50;
     const baseStrike = Math.round(spot / strikeInterval) * strikeInterval;
