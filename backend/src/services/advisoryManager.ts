@@ -5,9 +5,10 @@ import { CPR, CPRValues } from "../utils/cpr";
 import { ExcelLogger } from "../utils/excelLogger";
 import { QuantitativeEngine } from "../utils/quantitativeEngine";
 import { DatabaseService, SignalTier } from "../utils/database";
+import { TelegramService } from "./telegramService";
 
 export interface AdvisorySignal {
-  type: "CALL_BUY" | "PUT_BUY" | "HOLD" | "EXIT_PROFIT" | "EXIT_STOP_LOSS" | "THETA_EXIT";
+  type: "CALL_BUY" | "PUT_BUY" | "HOLD" | "EXIT_PROFIT" | "EXIT_STOP_LOSS" | "THETA_EXIT" | "SQUARE_OFF";
   tier?: SignalTier;
   strikePrice?: number;
   entryPrice?: number;
@@ -622,6 +623,9 @@ export class AdvisoryManager {
       // Only notify UI and sound audio alarms for official SNIPER signals
       if (tier === "SNIPER") {
         this.onSignalCallback(signalObj);
+        TelegramService.sendSignalAlert(signalObj).catch(err => {
+          console.warn("[AdvisoryManager] Failed to send Telegram signal alert:", err?.message || err);
+        });
         console.log(`[AdvisoryManager] 🎯 [SNIPER TIER] OFFICIAL TRADE SIGNAL: ${triggerType} @ Strike ${selectedStrike}. Confluence: ${scoreCard.totalScore}/100.`);
       } else {
         console.log(`[AdvisoryManager] 📊 [${tier} TIER] Paper Trade initiated in background: ${triggerType} @ Strike ${selectedStrike}. Score: ${scoreCard.totalScore}/100.`);
@@ -665,11 +669,13 @@ export class AdvisoryManager {
       console.log(`[AdvisoryManager] [${tier}] Breakeven Profit Locker engaged at ${pos.activeSignal.entryPrice.toFixed(2)}`);
       
       if (tier === "SNIPER") {
-        this.onSignalCallback({
+        const holdSignal: AdvisorySignal = {
           ...pos.activeSignal,
           type: "HOLD",
           reasoning: "Breakeven locked. Position risk is zero."
-        });
+        };
+        this.onSignalCallback(holdSignal);
+        TelegramService.sendSignalAlert(holdSignal).catch(() => {});
       }
     }
 
@@ -702,11 +708,13 @@ export class AdvisoryManager {
       console.log(`[AdvisoryManager] [${tier}] Target 1 crossed! Trailing stop stepped up to ₹${profitLockPrice.toFixed(2)}`);
       
       if (tier === "SNIPER") {
-        this.onSignalCallback({
+        const targetLockSignal: AdvisorySignal = {
           ...pos.activeSignal,
           type: "HOLD",
           reasoning: `Target 1 achieved. Trailing stop stepped up to ₹${profitLockPrice.toFixed(2)} to secure profits.`
-        });
+        };
+        this.onSignalCallback(targetLockSignal);
+        TelegramService.sendSignalAlert(targetLockSignal).catch(() => {});
       }
     }
   }
@@ -783,7 +791,7 @@ export class AdvisoryManager {
     } else {
       ExcelLogger.logTransaction(
         type,
-        optionSymbol,
+        optionSymbol || "",
         pos.activeSignal.strikePrice || "",
         qty,
         exit,
@@ -813,7 +821,7 @@ export class AdvisoryManager {
       type,
       tier,
       strikePrice: pos.activeSignal.strikePrice,
-      entryPrice: pos.activeSignal.entryPrice,
+      entryPrice: exit,
       reasoning: formattedReasoning,
       timestamp
     };
@@ -822,6 +830,7 @@ export class AdvisoryManager {
 
     if (tier === "SNIPER") {
       this.onSignalCallback(exitSignal);
+      TelegramService.sendSignalAlert(exitSignal).catch(() => {});
     }
 
     pos.activeSignal = null;

@@ -15,6 +15,7 @@ import { ParameterOptimizer } from "./services/optimizer";
 import { DatabaseService } from "./utils/database";
 import { ExcelLogger } from "./utils/excelLogger";
 import { GoogleSheetsService } from "./services/googleSheetsService";
+import { TelegramService } from "./services/telegramService";
 
 async function main() {
   console.log("=================================================");
@@ -344,6 +345,43 @@ async function main() {
         res.json({ success: true, message: "Successfully created folder hierarchy and appended test trade to Google Sheets!" });
       } else {
         res.status(500).json({ success: false, message: "Failed to log to Google Sheets. Check server logs." });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Telegram Alert endpoints
+  app.get("/api/telegram/status", (req, res) => {
+    const isConf = TelegramService.isConfigured();
+    res.json({
+      configured: isConf,
+      chatId: process.env.TELEGRAM_CHAT_ID ? `Active (${process.env.TELEGRAM_CHAT_ID})` : null,
+      message: isConf ? "Telegram Real-Time Alert Gateway active." : "Telegram credentials missing. Add TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID in .env."
+    });
+  });
+
+  app.post("/api/telegram/test", async (req, res) => {
+    try {
+      const ok = await TelegramService.sendSignalAlert({
+        type: "CALL_BUY",
+        tier: "SNIPER",
+        strikePrice: 24250,
+        entryPrice: 120.50,
+        stopLossPrice: 112.00,
+        targetPrice1: 135.00,
+        targetPrice2: 155.00,
+        timestamp: Date.now(),
+        reasoning: "Test trade notification verifying real-time Telegram signal dispatch.",
+        scoreCard: {
+          totalScore: 92,
+          qualityLabel: "VERY_HIGH_QUALITY"
+        }
+      });
+      if (ok) {
+        res.json({ success: true, message: "Test trade alert successfully delivered to your Telegram!" });
+      } else {
+        res.status(400).json({ success: false, message: "Failed to dispatch Telegram alert. Please verify TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env." });
       }
     } catch (e: any) {
       res.status(500).json({ error: e.message });
