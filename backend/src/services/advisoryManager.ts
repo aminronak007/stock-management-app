@@ -79,6 +79,13 @@ export class AdvisoryManager {
   private lastBreakoutEvalAt: number = 0;
   private breakoutEvalInflight: boolean = false;
   private lastSignalBlockReason: string = "";
+  private lastTriggeredBreakoutLevel: {
+    CALL_BUY: number;
+    PUT_BUY: number;
+  } = {
+    CALL_BUY: 0,
+    PUT_BUY: 0
+  };
 
   // 3-Tier Independent Position State Machines:
   // 1. SNIPER (Score >= 75%) -> Official Alert & Optional Real Execution
@@ -663,6 +670,19 @@ export class AdvisoryManager {
       return;
     }
 
+    // Fresh Swing Breakout & Anti-Churn Watermark check
+    const minBreakoutStep = 10; // Must clear previous entry watermark by at least 10 points
+    if (this.lastTriggeredBreakoutLevel[candidate] > 0) {
+      if (candidate === "CALL_BUY" && spot <= this.lastTriggeredBreakoutLevel.CALL_BUY + minBreakoutStep) {
+        this.lastSignalBlockReason = `Waiting for fresh swing high breakout above ${(this.lastTriggeredBreakoutLevel.CALL_BUY + minBreakoutStep).toFixed(1)} to prevent re-entry churn.`;
+        return;
+      }
+      if (candidate === "PUT_BUY" && spot >= this.lastTriggeredBreakoutLevel.PUT_BUY - minBreakoutStep) {
+        this.lastSignalBlockReason = `Waiting for fresh swing low breakdown below ${(this.lastTriggeredBreakoutLevel.PUT_BUY - minBreakoutStep).toFixed(1)} to prevent re-entry churn.`;
+        return;
+      }
+    }
+
     const chain = await this.broker.getOptionChain("NSE:NIFTY50-INDEX");
     if (chain.length === 0) {
       this.lastSignalBlockReason = "Breakdown is valid, but the Fyers option chain is empty so strike premiums cannot be priced.";
@@ -744,10 +764,25 @@ export class AdvisoryManager {
 
       const expiryDateStr = atmChain?.expiryDate || chain[0]?.expiryDate;
       const expiryDays = getDaysToExpiry(expiryDateStr);
-      const greeksResult = Greeks.calculateGreeks(spot, selectedStrike, expiryDays, this.indiaVixValue);
-      const delta = triggerType === "CALL_BUY" ? greeksResult.call.delta : Math.abs(greeksResult.put.delta);
+      let greeksResult = Greeks.calculateGreeks(spot, selectedStrike, expiryDays, this.indiaVixValue);
+      let delta = triggerType === "CALL_BUY" ? greeksResult.call.delta : Math.abs(greeksResult.put.delta);
 
-      const expectedRange = Greeks.calculateExpectedIntradayRange(spot, this.indiaVixValue);
+      // Low-VIX Delta Protection: If candidate strike Delta is sluggish (< 0.46), shift 1 strike ITM for responsive momentum
+      if (delta < 0.46) {
+        const itmStrike = triggerType === "CALL_BUY" ? selectedStrike - strikeInterval : selectedStrike + strikeInterval;
+        const itmLeg = legFor(itmStrike);
+        if (itmLeg?.ltp && itmLeg.ltp > 0) {
+          const itmGreeks = Greeks.calculateGreeks(spot, itmStrike, expiryDays, this.indiaVixValue);
+          const itmDelta = triggerType === "CALL_BUY" ? itmGreeks.call.delta : Math.abs(itmGreeks.put.delta);
+          if (itmDelta >= 0.46 && itmDelta <= 0.65) {
+            selectedStrike = itmStrike;
+            atmChain = chain.find(item => item.strikePrice === selectedStrike) || atmChain;
+            optionLeg = itmLeg;
+            greeksResult = itmGreeks;
+            delta = itmDelta;
+          }
+        }
+      }
       
       let targetMultiplier = 1.0;
       try {
@@ -757,10 +792,7 @@ export class AdvisoryManager {
         }
       } catch (e) {}
 
-      const targetOffset1 = 0.5 * expectedRange * targetMultiplier;
-      const targetOffset2 = 1.0 * expectedRange * targetMultiplier;
-
-      const entryPrice = optionLtp;
+      const entryPrice = optionLeg?.ltp && optionLeg.ltp > 0 ? optionLeg.ltp : optionLtp;
       const highsList = this.indexCandles.map(c => c.high);
       const lowsList = this.indexCandles.map(c => c.low);
       const atrList = Indicators.calculateATR(highsList, lowsList, closePrices, 14);
@@ -770,13 +802,20 @@ export class AdvisoryManager {
       const rsiList = Indicators.calculateRSI(closePrices, 14);
       const marketRsi = rsiList.length > 0 ? rsiList[rsiList.length - 1] : 50;
 
-      const scaledTarget1 = targetOffset1 * delta;
-      const scaledTarget2 = targetOffset2 * delta;
-      const scaledStopLoss = 1.5 * atrValue * delta;
+      // Realistic Risk & Scalp Geometry:
+      // Initial stop-loss: 1.2 * ATR * delta (bounded to 6 to 14 option points)
+      const scaledStopLoss = Math.max(6.0, Math.min(14.0, 1.2 * atrValue * delta));
+      const initialRisk = scaledStopLoss;
 
-      const stopLossPrice = entryPrice - scaledStopLoss;
-      const targetPrice1 = entryPrice + scaledTarget1;
-      const targetPrice2 = entryPrice + scaledTarget2;
+      // Realistic Targets based on Intraday Option Mechanics:
+      // Target 1 = +1.25R (+15% to +25% option scalp, ~8 to 12 points)
+      // Target 2 = +2.50R (+35% to +50% option runner, ~18 to 25 points)
+      const scaledTarget1 = parseFloat((initialRisk * 1.25 * targetMultiplier).toFixed(2));
+      const scaledTarget2 = parseFloat((initialRisk * 2.50 * targetMultiplier).toFixed(2));
+
+      const stopLossPrice = parseFloat(Math.max(0.50, entryPrice - scaledStopLoss).toFixed(2));
+      const targetPrice1 = parseFloat((entryPrice + scaledTarget1).toFixed(2));
+      const targetPrice2 = parseFloat((entryPrice + scaledTarget2).toFixed(2));
 
       // Quantitative Score Confluence calculation
       const riskReward = scaledTarget2 / Math.max(1, scaledStopLoss);
@@ -923,6 +962,7 @@ export class AdvisoryManager {
       targetPos.activeOptionSymbol = optionSymbol;
       targetPos.liveOptionLtp = entryPrice;
       targetPos.openTradeId = openTradeId;
+      this.lastTriggeredBreakoutLevel[triggerType] = spot;
       this.isSignalGeneratedToday = true;
       this.lastSignalBlockReason = "";
 
@@ -1116,10 +1156,10 @@ export class AdvisoryManager {
       const initialRisk = entry - (pos.activeSignal.stopLossPrice || 0);
       const ratio = initialRisk > 0 ? (pnl / initialRisk) : 0;
       pos.dailyProfitLoss += ratio;
-      // 30 minute cooldown after Theta Exit to prevent continuous chop re-entry loop
-      const cooldownMs = type === "THETA_EXIT" ? 30 * 60 * 1000 : 5 * 60 * 1000;
+      // 45 minute cooldown after Theta Exit to prevent continuous chop re-entry loop
+      const cooldownMs = type === "THETA_EXIT" ? 45 * 60 * 1000 : 5 * 60 * 1000;
       pos.stoppedCooldownUntil = timestamp + cooldownMs;
-      console.log(`[Risk Engine] [${tier}] ${type} triggered (${ratio >= 0 ? '+' : ''}${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}.`);
+      console.log(`[Risk Engine] [${tier}] ${type} triggered (${ratio >= 0 ? '+' : ''}${ratio.toFixed(2)}R). 45-minute chop quarantine active until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}.`);
     }
 
     const qtyStr = process.env.ORDER_QTY || "25";
