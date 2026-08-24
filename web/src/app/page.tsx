@@ -9,6 +9,7 @@ import { QuantitativePanels } from "../components/QuantitativePanels";
 import { DatabaseViewer } from "../components/DatabaseViewer";
 import { SignalGateStatus, EngineStatus } from "../components/SignalGateStatus";
 import { PositionsViewer } from "../components/PositionsViewer";
+import { SettingsViewer } from "../components/SettingsViewer";
 
 interface TickData {
   symbol: string;
@@ -82,7 +83,7 @@ export interface PositionData {
 const SAMPLE_POSITIONS: PositionData[] = [];
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"terminal" | "advisory" | "positions" | "database" | "simulator">("terminal");
+  const [activeTab, setActiveTab] = useState<"terminal" | "advisory" | "positions" | "database" | "settings" | "simulator">("terminal");
   const [activeSymbol, setActiveSymbol] = useState("NSE:NIFTY50-INDEX");
   const [ticks, setTicks] = useState<{ [symbol: string]: TickData }>({});
   const [activeSignal, setActiveSignal] = useState<SignalData | null>(null);
@@ -548,6 +549,13 @@ export default function Home() {
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
                 Database & Trade History
               </button>
+              <button 
+                className={`tab-btn flex items-center gap-2 ${activeTab === "settings" ? "active" : ""}`}
+                onClick={() => setActiveTab("settings")}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                Settings
+              </button>
               {enableSimulator && (
                 <button 
                   className={`tab-btn flex items-center gap-2 ${activeTab === "simulator" ? "active" : ""}`}
@@ -691,6 +699,8 @@ export default function Home() {
               />
             ) : activeTab === "database" ? (
               <DatabaseViewer />
+            ) : activeTab === "settings" ? (
+              <SettingsViewer />
             ) : (
               <SimulatorSandbox ws={socket} />
             )}

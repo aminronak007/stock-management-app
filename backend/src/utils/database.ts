@@ -521,7 +521,7 @@ export class DatabaseService {
       }
     }
 
-    return Object.values(stacks).flat();
+    return Object.values(stacks).flat().filter(t => t.status === "OPEN");
   }
 
   public static purgeCorruptedDummyTrades(): number {
@@ -663,5 +663,226 @@ export class DatabaseService {
       balanced: this.getTradeAnalytics("BALANCED"),
       exploratory: this.getTradeAnalytics("EXPLORATORY")
     };
+  }
+
+  /**
+   * Database-level Paginated Paper Trades
+   */
+  public static getPaginatedPaperTrades(params: {
+    page?: number;
+    limit?: number;
+    tier?: string;
+    date?: string;
+    filterType?: string;
+    search?: string;
+  }): {
+    items: PaperTradeRecord[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  } {
+    const db = this.initialize();
+    const page = Math.max(1, Number(params.page) || 1);
+    const limit = Math.max(1, Number(params.limit) || 10);
+    const offset = (page - 1) * limit;
+
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    // 1. Tier filter
+    if (params.tier && params.tier !== "ALL") {
+      conditions.push("tier = ?");
+      values.push(params.tier);
+    }
+
+    // 2. Date filter (IST)
+    if (params.date && params.date !== "ALL") {
+      const [year, month, day] = params.date.split("-").map(Number);
+      const startMs = new Date(Date.UTC(year, month - 1, day, 0, 0, 0) - (5.5 * 3600 * 1000)).getTime();
+      const endMs = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) - (5.5 * 3600 * 1000)).getTime();
+      
+      const istDate1 = `${day}/${month}/${year}`;
+      const istDate2 = `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${year}`;
+      
+      conditions.push("((timestamp >= ? AND timestamp <= ?) OR datetime LIKE ? OR datetime LIKE ?)");
+      values.push(startMs, endMs, `%${istDate1}%`, `%${istDate2}%`);
+    }
+
+    // 3. Filter Type
+    if (params.filterType === "PROFIT") {
+      conditions.push("pnl > 0");
+    } else if (params.filterType === "LOSS") {
+      conditions.push("pnl < 0");
+    } else if (params.filterType === "BUY") {
+      conditions.push("type LIKE '%BUY%'");
+    } else if (params.filterType === "EXIT") {
+      conditions.push("(type LIKE '%EXIT%' OR type = 'SQUARE_OFF')");
+    } else if (params.filterType === "CALL") {
+      conditions.push("(type LIKE '%CALL%' OR symbol LIKE '%CE%')");
+    } else if (params.filterType === "PUT") {
+      conditions.push("(type LIKE '%PUT%' OR symbol LIKE '%PE%')");
+    }
+
+    // 4. Search query
+    if (params.search && params.search.trim()) {
+      const q = `%${params.search.trim().replace(/^#/, "")}%`;
+      conditions.push("(symbol LIKE ? OR strike LIKE ? OR reasoning LIKE ? OR type LIKE ? OR tier LIKE ? OR CAST(id AS TEXT) LIKE ?)");
+      values.push(q, q, q, q, q, q);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const totalRow = db.prepare(`SELECT COUNT(*) as total FROM paper_trades ${whereClause}`).get(...values) as { total: number };
+    const total = totalRow?.total || 0;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    const items = db.prepare(`SELECT * FROM paper_trades ${whereClause} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset) as PaperTradeRecord[];
+
+    return {
+      items,
+      total,
+      page,
+      limit,
+      totalPages
+    };
+  }
+
+  /**
+   * Database-level Paginated Advisory Signals
+   */
+  public static getPaginatedSignals(params: {
+    page?: number;
+    limit?: number;
+    tier?: string;
+    date?: string;
+    filterType?: string;
+    search?: string;
+  }): {
+    items: any[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  } {
+    const db = this.initialize();
+    const page = Math.max(1, Number(params.page) || 1);
+    const limit = Math.max(1, Number(params.limit) || 10);
+    const offset = (page - 1) * limit;
+
+    const conditions: string[] = [];
+    const values: any[] = [];
+
+    if (params.tier && params.tier !== "ALL") {
+      conditions.push("tier = ?");
+      values.push(params.tier);
+    }
+
+    if (params.date && params.date !== "ALL") {
+      const [year, month, day] = params.date.split("-").map(Number);
+      const startMs = new Date(Date.UTC(year, month - 1, day, 0, 0, 0) - (5.5 * 3600 * 1000)).getTime();
+      const endMs = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999) - (5.5 * 3600 * 1000)).getTime();
+      conditions.push("timestamp >= ? AND timestamp <= ?");
+      values.push(startMs, endMs);
+    }
+
+    if (params.filterType === "BUY") {
+      conditions.push("type LIKE '%BUY%'");
+    } else if (params.filterType === "EXIT") {
+      conditions.push("type LIKE '%EXIT%'");
+    }
+
+    if (params.search && params.search.trim()) {
+      const q = `%${params.search.trim().replace(/^#/, "")}%`;
+      conditions.push("(reasoning LIKE ? OR type LIKE ? OR CAST(strike_price AS TEXT) LIKE ? OR tier LIKE ? OR CAST(id AS TEXT) LIKE ?)");
+      values.push(q, q, q, q, q);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    const totalRow = db.prepare(`SELECT COUNT(*) as total FROM advisory_signals ${whereClause}`).get(...values) as { total: number };
+    const total = totalRow?.total || 0;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    const items = db.prepare(`SELECT * FROM advisory_signals ${whereClause} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...values, limit, offset);
+
+    return {
+      items,
+      total,
+      page,
+      limit,
+      totalPages
+    };
+  }
+
+  /**
+   * Database-level Paginated Sessions
+   */
+  public static getPaginatedSessions(page: number = 1, limit: number = 10): {
+    items: any[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  } {
+    const db = this.initialize();
+    const p = Math.max(1, Number(page) || 1);
+    const lim = Math.max(1, Number(limit) || 10);
+    const offset = (p - 1) * lim;
+
+    const totalRow = db.prepare("SELECT COUNT(*) as total FROM sessions").get() as { total: number };
+    const total = totalRow?.total || 0;
+    const totalPages = Math.max(1, Math.ceil(total / lim));
+
+    const items = db.prepare("SELECT * FROM sessions ORDER BY expires_at DESC LIMIT ? OFFSET ?").all(lim, offset);
+
+    return {
+      items,
+      total,
+      page: p,
+      limit: lim,
+      totalPages
+    };
+  }
+
+  /**
+   * Database-level Paginated Settings
+   */
+  public static getPaginatedSettings(page: number = 1, limit: number = 10): {
+    items: any[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  } {
+    const db = this.initialize();
+    const p = Math.max(1, Number(page) || 1);
+    const lim = Math.max(1, Number(limit) || 10);
+    const offset = (p - 1) * lim;
+
+    const totalRow = db.prepare("SELECT COUNT(*) as total FROM settings").get() as { total: number };
+    const total = totalRow?.total || 0;
+    const totalPages = Math.max(1, Math.ceil(total / lim));
+
+    const items = db.prepare("SELECT * FROM settings ORDER BY key ASC LIMIT ? OFFSET ?").all(lim, offset);
+
+    return {
+      items,
+      total,
+      page: p,
+      limit: lim,
+      totalPages
+    };
+  }
+
+  /**
+   * Delete specific paper trade(s) by ID(s)
+   */
+  public static deletePaperTrades(ids: number[]): number {
+    if (!ids || ids.length === 0) return 0;
+    const db = this.initialize();
+    const placeholders = ids.map(() => "?").join(",");
+    const res = db.prepare(`DELETE FROM paper_trades WHERE id IN (${placeholders})`).run(...ids);
+    return res.changes;
   }
 }

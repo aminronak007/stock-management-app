@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useCallback } from "react";
 
 interface DatabaseSignal {
   id: number;
@@ -170,12 +170,12 @@ const CustomFilterDropdown: React.FC<{
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-md border ${value !== "ALL"
-            ? "bg-indigo-500/15 border-indigo-500/40 text-white shadow-indigo-500/10"
+        className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-md border ${
+          value !== "ALL"
+            ? "bg-indigo-500/20 border-indigo-500/50 text-white shadow-indigo-500/10"
             : "bg-black/50 hover:bg-black/70 border-white/10 hover:border-white/20 text-white"
-          }`}
+        }`}
       >
-        <span className="text-gray-400 font-semibold text-[11px]">⚡ Filter:</span>
         <span className={`flex items-center gap-1.5 ${selectedOption.color || "text-white"}`}>
           {selectedOption.icon && <span>{selectedOption.icon}</span>}
           <span>{selectedOption.label}</span>
@@ -202,10 +202,11 @@ const CustomFilterDropdown: React.FC<{
                     onChange(option.value);
                     setIsOpen(false);
                   }}
-                  className={`w-full text-left px-3.5 py-2 text-xs flex items-center justify-between transition-colors cursor-pointer ${isSelected
+                  className={`w-full text-left px-3.5 py-2 text-xs flex items-center justify-between transition-colors cursor-pointer ${
+                    isSelected
                       ? "bg-indigo-500/20 text-indigo-300 font-bold border-l-2 border-indigo-400"
                       : "text-gray-300 hover:bg-white/10 hover:text-white"
-                    }`}
+                  }`}
                 >
                   <div className="flex items-center gap-2">
                     {option.icon && <span>{option.icon}</span>}
@@ -363,10 +364,11 @@ const CustomCalendarPicker: React.FC<{
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer shadow-md ${selectedDate !== "ALL" && selectedDate !== todayDateStr
+        className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer shadow-md ${
+          selectedDate !== "ALL" && selectedDate !== todayDateStr
             ? "bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-amber-500/10"
             : "bg-black/50 hover:bg-black/70 border-white/10 text-gray-200 hover:text-white hover:border-white/20"
-          }`}
+        }`}
       >
         <span>📆</span>
         <span>{triggerLabel}</span>
@@ -378,7 +380,7 @@ const CustomCalendarPicker: React.FC<{
       {/* Modern Glass Calendar Popup */}
       {isOpen && (
         <div className="absolute right-0 mt-2 w-80 rounded-2xl bg-[#0b0e14]/95 backdrop-blur-2xl border border-white/15 shadow-2xl shadow-black/90 p-4 z-50 animate-in fade-in zoom-in-95 duration-150">
-
+          
           {/* Header Month / Year & Prev/Next Buttons */}
           <div className="flex justify-between items-center mb-3.5 pb-2.5 border-b border-white/10">
             <div className="flex items-center gap-2">
@@ -410,8 +412,9 @@ const CustomCalendarPicker: React.FC<{
             {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day, dIdx) => (
               <span
                 key={day}
-                className={`text-[10px] font-bold uppercase tracking-wider py-0.5 ${dIdx === 0 || dIdx === 6 ? "text-rose-400/70" : "text-gray-500"
-                  }`}
+                className={`text-[10px] font-bold uppercase tracking-wider py-0.5 ${
+                  dIdx === 0 || dIdx === 6 ? "text-rose-400/70" : "text-gray-500"
+                }`}
               >
                 {day}
               </span>
@@ -431,16 +434,17 @@ const CustomCalendarPicker: React.FC<{
                     onSelectDate(item.dateStr);
                     setIsOpen(false);
                   }}
-                  className={`relative w-8 h-8 mx-auto flex flex-col items-center justify-center rounded-xl text-xs font-semibold transition-all cursor-pointer ${item.isSelected
+                  className={`relative w-8 h-8 mx-auto flex flex-col items-center justify-center rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                    item.isSelected
                       ? "bg-emerald-500 text-black font-extrabold shadow-lg shadow-emerald-500/40 scale-110 z-10"
                       : item.isToday
-                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 font-bold"
-                        : !item.isCurrentMonth
-                          ? "text-gray-600 hover:text-gray-400 hover:bg-white/5"
-                          : disabled
-                            ? "text-gray-700 cursor-not-allowed opacity-30"
-                            : "text-gray-200 hover:bg-white/10 hover:text-white"
-                    }`}
+                      ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 font-bold"
+                      : !item.isCurrentMonth
+                      ? "text-gray-600 hover:text-gray-400 hover:bg-white/5"
+                      : disabled
+                      ? "text-gray-700 cursor-not-allowed opacity-30"
+                      : "text-gray-200 hover:bg-white/10 hover:text-white"
+                  }`}
                 >
                   <span>{item.day}</span>
                   {item.hasTrades && !item.isSelected && (
@@ -482,8 +486,133 @@ const CustomCalendarPicker: React.FC<{
   );
 };
 
+// Modern Dark Glassmorphic Pagination Component
+interface ModernPaginationProps {
+  currentPage: number;
+  totalRecords: number;
+  pageSize: number;
+  onPageChange: (page: number) => void;
+  onPageSizeChange: (size: number) => void;
+}
+
+const ModernPagination: React.FC<ModernPaginationProps> = ({
+  currentPage,
+  totalRecords,
+  pageSize,
+  onPageChange,
+  onPageSizeChange
+}) => {
+  const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
+  const startRecord = totalRecords === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const endRecord = Math.min(currentPage * pageSize, totalRecords);
+
+  const getPageNumbers = () => {
+    const delta = 2;
+    const range: number[] = [];
+    for (let i = Math.max(2, currentPage - delta); i <= Math.min(totalPages - 1, currentPage + delta); i++) {
+      range.push(i);
+    }
+    if (currentPage - delta > 2) range.unshift(-1);
+    if (currentPage + delta < totalPages - 1) range.push(-2);
+    range.unshift(1);
+    if (totalPages > 1 && !range.includes(totalPages)) range.push(totalPages);
+    return range;
+  };
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3.5 border-t border-white/10 bg-white/[0.015] text-xs">
+      {/* Left: Info & Per Page selector */}
+      <div className="flex items-center gap-3">
+        <span className="text-gray-400 font-sans">
+          Showing <span className="font-bold text-white font-mono">{startRecord}</span> to <span className="font-bold text-white font-mono">{endRecord}</span> of <span className="font-bold text-emerald-400 font-mono">{totalRecords}</span> entries
+        </span>
+
+        <div className="flex items-center gap-1.5 bg-black/40 border border-white/10 rounded-lg px-2 py-0.5">
+          <span className="text-[10px] text-gray-500 font-bold uppercase">Rows:</span>
+          <select
+            value={pageSize}
+            onChange={(e) => {
+              onPageSizeChange(Number(e.target.value));
+              onPageChange(1);
+            }}
+            className="bg-transparent text-[11px] font-bold text-white focus:outline-none cursor-pointer [color-scheme:dark]"
+          >
+            <option value={10} className="bg-[#12141a] text-white">10</option>
+            <option value={25} className="bg-[#12141a] text-white">25</option>
+            <option value={50} className="bg-[#12141a] text-white">50</option>
+            <option value={100} className="bg-[#12141a] text-white">100</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Right: Page Navigation Pills */}
+      <div className="flex items-center gap-1">
+        <button
+          onClick={() => onPageChange(1)}
+          disabled={currentPage === 1}
+          className="w-7 h-7 flex items-center justify-center rounded-lg border border-white/5 bg-white/5 text-gray-400 hover:text-white hover:bg-white/10 disabled:opacity-20 disabled:cursor-not-allowed text-[10px] font-bold transition-all cursor-pointer"
+          title="First Page"
+        >
+          ⏮
+        </button>
+
+        <button
+          onClick={() => onPageChange(currentPage - 1)}
+          disabled={currentPage === 1}
+          className="px-2.5 py-1 rounded-lg border border-white/5 bg-white/5 text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-20 disabled:cursor-not-allowed text-xs font-semibold transition-all flex items-center gap-1 cursor-pointer"
+        >
+          ‹ Prev
+        </button>
+
+        <div className="flex items-center gap-1 mx-1">
+          {getPageNumbers().map((p, idx) => {
+            if (p < 0) {
+              return (
+                <span key={`dots-${idx}`} className="px-1 text-gray-600 font-mono text-xs">
+                  ...
+                </span>
+              );
+            }
+            const isActive = p === currentPage;
+            return (
+              <button
+                key={p}
+                onClick={() => onPageChange(p)}
+                className={`w-7 h-7 rounded-lg text-xs font-bold transition-all flex items-center justify-center cursor-pointer ${
+                  isActive
+                    ? "bg-emerald-500 text-black shadow-lg shadow-emerald-500/30 font-extrabold scale-105"
+                    : "bg-white/5 hover:bg-white/15 text-gray-300 hover:text-white border border-white/5"
+                }`}
+              >
+                {p}
+              </button>
+            );
+          })}
+        </div>
+
+        <button
+          onClick={() => onPageChange(currentPage + 1)}
+          disabled={currentPage === totalPages || totalPages === 0}
+          className="px-2.5 py-1 rounded-lg border border-white/5 bg-white/5 text-gray-300 hover:text-white hover:bg-white/10 disabled:opacity-20 disabled:cursor-not-allowed text-xs font-semibold transition-all flex items-center gap-1 cursor-pointer"
+        >
+          Next ›
+        </button>
+
+        <button
+          onClick={() => onPageChange(totalPages)}
+          disabled={currentPage === totalPages || totalPages === 0}
+          className="w-7 h-7 flex items-center justify-center rounded-lg border border-white/5 bg-white/5 text-gray-400 hover:text-white hover:bg-white/10 disabled:opacity-20 disabled:cursor-not-allowed text-[10px] font-bold transition-all cursor-pointer"
+          title="Last Page"
+        >
+          ⏭
+        </button>
+      </div>
+    </div>
+  );
+};
+
 export const DatabaseViewer: React.FC = () => {
-  const [activeSubTab, setActiveSubTab] = useState<"trades" | "signals" | "sessions" | "settings">("trades");
+  const [activeSubTab, setActiveSubTab] = useState<"trades" | "signals">("trades");
   const [selectedTier, setSelectedTier] = useState<"ALL" | "SNIPER" | "BALANCED" | "EXPLORATORY">("SNIPER");
   const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([]);
   const [signals, setSignals] = useState<DatabaseSignal[]>([]);
@@ -492,7 +621,7 @@ export const DatabaseViewer: React.FC = () => {
   const [sessions, setSessions] = useState<DatabaseSession[]>([]);
   const [settings, setSettings] = useState<DatabaseSetting[]>([]);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
-
+  
   const todayDateStr = useMemo(() => getIstDateString(Date.now()), []);
   const todayDateFormatted = useMemo(() => {
     return new Intl.DateTimeFormat("en-IN", {
@@ -518,6 +647,15 @@ export const DatabaseViewer: React.FC = () => {
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>("");
+  const [debouncedSearch, setDebouncedSearch] = useState<string>("");
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+    }, 200);
+    return () => clearTimeout(handler);
+  }, [searchQuery]);
+
   const [filterType, setFilterType] = useState<string>("ALL");
   const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
   const [lastRefreshed, setLastRefreshed] = useState<string>("");
@@ -625,7 +763,7 @@ export const DatabaseViewer: React.FC = () => {
     return linkMap;
   }, [paperTrades]);
 
-  // Group into Round-Trip Trade Cycles
+  // Group into Round-Trip Trade Cycles (with Date, Tier, Type, and Search Filtering)
   const roundTripPairs = useMemo(() => {
     const pairs: {
       id: string;
@@ -695,8 +833,36 @@ export const DatabaseViewer: React.FC = () => {
       });
     }
 
-    return pairs;
-  }, [paperTrades, tradeLinkages, selectedTier, selectedDate]);
+    // Filter Cycles by filterType and search query
+    return pairs.filter(pair => {
+      // 1. Filter Type
+      if (filterType === "PROFIT" && (pair.pnl === undefined || pair.pnl <= 0)) return false;
+      if (filterType === "LOSS" && (pair.pnl === undefined || pair.pnl >= 0)) return false;
+      if (filterType === "CALL" && !pair.symbol.includes("CE") && !pair.entryTrade.type.includes("CALL")) return false;
+      if (filterType === "PUT" && !pair.symbol.includes("PE") && !pair.entryTrade.type.includes("PUT")) return false;
+      if (filterType === "EXIT" && !pair.exitTrade) return false;
+      if (filterType === "BUY" && pair.status !== "OPEN") return false;
+
+      // 2. Search Query (Symbol, Strike, Reasoning, IDs, Tier, Action)
+      if (debouncedSearch && debouncedSearch.trim()) {
+        const q = debouncedSearch.trim().toLowerCase().replace(/^#/, "");
+        const matches = 
+          pair.id.toLowerCase().includes(q) ||
+          pair.symbol.toLowerCase().includes(q) ||
+          (pair.strike && pair.strike.toString().toLowerCase().includes(q)) ||
+          pair.tier.toLowerCase().includes(q) ||
+          (pair.exitReason && pair.exitReason.toLowerCase().includes(q)) ||
+          (pair.entryTrade.reasoning && pair.entryTrade.reasoning.toLowerCase().includes(q)) ||
+          (pair.exitType && pair.exitType.toLowerCase().includes(q)) ||
+          (pair.status && pair.status.toLowerCase().includes(q)) ||
+          pair.entryTrade.id.toString().includes(q) ||
+          (pair.exitTrade && pair.exitTrade.id.toString().includes(q));
+        if (!matches) return false;
+      }
+
+      return true;
+    });
+  }, [paperTrades, tradeLinkages, selectedTier, selectedDate, filterType, debouncedSearch]);
 
   // Filter paper trades by Search, Type, Tier, and Date
   const filteredPaperTrades = useMemo(() => {
@@ -715,7 +881,7 @@ export const DatabaseViewer: React.FC = () => {
 
       // 3. Search query
       const q = searchQuery.toLowerCase();
-      const matchesSearch =
+      const matchesSearch = 
         (trade.reasoning && trade.reasoning.toLowerCase().includes(q)) ||
         (trade.symbol && trade.symbol.toLowerCase().includes(q)) ||
         (trade.strike && trade.strike.toLowerCase().includes(q)) ||
@@ -751,7 +917,7 @@ export const DatabaseViewer: React.FC = () => {
 
       // 3. Search query
       const q = searchQuery.toLowerCase();
-      const matchesSearch =
+      const matchesSearch = 
         (sig.reasoning && sig.reasoning.toLowerCase().includes(q)) ||
         (sig.strike_price && sig.strike_price.toString().includes(q)) ||
         (sig.type && sig.type.toLowerCase().includes(q));
@@ -766,6 +932,146 @@ export const DatabaseViewer: React.FC = () => {
       return matchesSearch && matchesType;
     });
   }, [signals, searchQuery, filterType, selectedTier, selectedDate]);
+
+  // Pagination States (Default: 10 items per page)
+  const [tradesPage, setTradesPage] = useState<number>(1);
+  const [tradesLimit, setTradesLimit] = useState<number>(10);
+
+  const [cyclesPage, setCyclesPage] = useState<number>(1);
+  const [cyclesLimit, setCyclesLimit] = useState<number>(10);
+
+  const [signalsPage, setSignalsPage] = useState<number>(1);
+  const [signalsLimit, setSignalsLimit] = useState<number>(10);
+
+  const [sessionsPage, setSessionsPage] = useState<number>(1);
+  const [sessionsLimit, setSessionsLimit] = useState<number>(10);
+
+  const [settingsPage, setSettingsPage] = useState<number>(1);
+  const [settingsLimit, setSettingsLimit] = useState<number>(10);
+
+  // Dynamic DB-Level Search and Queries
+  const [dbTrades, setDbTrades] = useState<PaperTrade[]>([]);
+  const [dbTradesTotal, setDbTradesTotal] = useState<number>(0);
+  const [isDbTradesLoading, setIsDbTradesLoading] = useState<boolean>(false);
+
+  const [dbSignals, setDbSignals] = useState<DatabaseSignal[]>([]);
+  const [dbSignalsTotal, setDbSignalsTotal] = useState<number>(0);
+  const [isDbSignalsLoading, setIsDbSignalsLoading] = useState<boolean>(false);
+
+  const [dbSessions, setDbSessions] = useState<DatabaseSession[]>([]);
+  const [dbSessionsTotal, setDbSessionsTotal] = useState<number>(0);
+
+  const [dbSettings, setDbSettings] = useState<DatabaseSetting[]>([]);
+  const [dbSettingsTotal, setDbSettingsTotal] = useState<number>(0);
+
+  // Fetch Trades directly from DB level
+  const fetchDbTrades = useCallback(async () => {
+    try {
+      setIsDbTradesLoading(true);
+      const params = new URLSearchParams({
+        page: String(tradesPage),
+        limit: String(tradesLimit),
+        tier: selectedTier,
+        date: selectedDate,
+        filterType: filterType,
+        search: debouncedSearch
+      });
+      const res = await fetch(`http://localhost:8080/api/database/trades?${params.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        setDbTrades(data.items || []);
+        setDbTradesTotal(data.total || 0);
+      }
+    } catch (e) {
+      console.error("Failed to query db trades:", e);
+    } finally {
+      setIsDbTradesLoading(false);
+    }
+  }, [tradesPage, tradesLimit, selectedTier, selectedDate, filterType, debouncedSearch]);
+
+  useEffect(() => {
+    fetchDbTrades();
+  }, [fetchDbTrades]);
+
+  // Fetch Signals directly from DB level
+  const fetchDbSignals = useCallback(async () => {
+    try {
+      setIsDbSignalsLoading(true);
+      const params = new URLSearchParams({
+        page: String(signalsPage),
+        limit: String(signalsLimit),
+        tier: selectedTier,
+        date: selectedDate,
+        filterType: filterType,
+        search: debouncedSearch
+      });
+      const res = await fetch(`http://localhost:8080/api/database/signals?${params.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        setDbSignals(data.items || []);
+        setDbSignalsTotal(data.total || 0);
+      }
+    } catch (e) {
+      console.error("Failed to query db signals:", e);
+    } finally {
+      setIsDbSignalsLoading(false);
+    }
+  }, [signalsPage, signalsLimit, selectedTier, selectedDate, filterType, debouncedSearch]);
+
+  useEffect(() => {
+    fetchDbSignals();
+  }, [fetchDbSignals]);
+
+  // Fetch Sessions directly from DB level
+  const fetchDbSessions = useCallback(async () => {
+    try {
+      const res = await fetch(`http://localhost:8080/api/database/sessions?page=${sessionsPage}&limit=${sessionsLimit}`);
+      if (res.ok) {
+        const data = await res.json();
+        setDbSessions(data.items || []);
+        setDbSessionsTotal(data.total || 0);
+      }
+    } catch (e) {
+      console.error("Failed to query db sessions:", e);
+    }
+  }, [sessionsPage, sessionsLimit]);
+
+  useEffect(() => {
+    fetchDbSessions();
+  }, [fetchDbSessions]);
+
+  // Fetch Settings directly from DB level
+  const fetchDbSettings = useCallback(async () => {
+    try {
+      const res = await fetch(`http://localhost:8080/api/database/settings?page=${settingsPage}&limit=${settingsLimit}`);
+      if (res.ok) {
+        const data = await res.json();
+        setDbSettings(data.items || []);
+        setDbSettingsTotal(data.total || 0);
+      }
+    } catch (e) {
+      console.error("Failed to query db settings:", e);
+    }
+  }, [settingsPage, settingsLimit]);
+
+  useEffect(() => {
+    fetchDbSettings();
+  }, [fetchDbSettings]);
+
+  // Reset page to 1 whenever filters change
+  useEffect(() => {
+    setTradesPage(1);
+    setCyclesPage(1);
+    setSignalsPage(1);
+    setSessionsPage(1);
+    setSettingsPage(1);
+  }, [selectedDate, selectedTier, filterType, debouncedSearch, tradesViewMode]);
+
+  // Paginated cycles slice for cycles view mode
+  const paginatedCycles = useMemo(() => {
+    const start = (cyclesPage - 1) * cyclesLimit;
+    return roundTripPairs.slice(start, start + cyclesLimit);
+  }, [roundTripPairs, cyclesPage, cyclesLimit]);
 
   const handleClearPaperTrades = async () => {
     if (!window.confirm("Are you sure you want to clear the paper trading ledger from SQLite?")) return;
@@ -853,8 +1159,8 @@ export const DatabaseViewer: React.FC = () => {
     const t = tier || "SNIPER";
     if (t === "SNIPER") {
       return (
-        <span
-          title="SNIPER Tier (Score ≥ 75%)"
+        <span 
+          title="SNIPER Tier (Score ≥ 75%)" 
           className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-sm bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 shadow-sm shadow-emerald-500/10 cursor-help"
         >
           🎯
@@ -863,8 +1169,8 @@ export const DatabaseViewer: React.FC = () => {
     }
     if (t === "BALANCED") {
       return (
-        <span
-          title="BALANCED Tier (Score 60% - 74%)"
+        <span 
+          title="BALANCED Tier (Score 60% - 74%)" 
           className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-sm bg-blue-500/15 border border-blue-500/30 text-blue-400 shadow-sm shadow-blue-500/10 cursor-help"
         >
           ⚖️
@@ -872,8 +1178,8 @@ export const DatabaseViewer: React.FC = () => {
       );
     }
     return (
-      <span
-        title="EXPLORATORY Tier (Score < 60%)"
+      <span 
+        title="EXPLORATORY Tier (Score < 60%)" 
         className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-sm bg-amber-500/15 border border-amber-500/30 text-amber-400 shadow-sm shadow-amber-500/10 cursor-help"
       >
         🔬
@@ -983,7 +1289,7 @@ export const DatabaseViewer: React.FC = () => {
 
   return (
     <div className="database-viewer flex flex-col gap-6 w-full pb-10">
-
+      
       {/* 3-Tier Multi-Track Performance Comparison Bar */}
       <div className="p-4 rounded-2xl bg-gradient-to-r from-white/[0.04] via-white/[0.02] to-white/[0.04] border border-white/10 flex flex-col gap-3">
         <div className="flex justify-between items-center">
@@ -1002,10 +1308,11 @@ export const DatabaseViewer: React.FC = () => {
         <div className="grid grid-cols-4 gap-3 pt-1">
           <button
             onClick={() => setSelectedTier("ALL")}
-            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${selectedTier === "ALL"
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
+              selectedTier === "ALL"
                 ? "bg-white/10 border-white/30 shadow-lg"
                 : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-white"
-              }`}
+            }`}
           >
             <div className="flex justify-between items-center text-xs font-bold">
               <span>🌐 All Tiers Combined</span>
@@ -1021,10 +1328,11 @@ export const DatabaseViewer: React.FC = () => {
 
           <button
             onClick={() => setSelectedTier("SNIPER")}
-            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${selectedTier === "SNIPER"
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
+              selectedTier === "SNIPER"
                 ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 shadow-lg shadow-emerald-500/10"
                 : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-emerald-300"
-              }`}
+            }`}
           >
             <div className="flex justify-between items-center text-xs font-bold">
               <span className="flex items-center gap-1.5">🎯 Sniper Mode (≥75%)</span>
@@ -1041,10 +1349,11 @@ export const DatabaseViewer: React.FC = () => {
 
           <button
             onClick={() => setSelectedTier("BALANCED")}
-            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${selectedTier === "BALANCED"
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
+              selectedTier === "BALANCED"
                 ? "bg-blue-500/15 border-blue-500/40 text-blue-300 shadow-lg shadow-blue-500/10"
                 : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-blue-300"
-              }`}
+            }`}
           >
             <div className="flex justify-between items-center text-xs font-bold">
               <span className="flex items-center gap-1.5">⚖️ Balanced (60% - 74%)</span>
@@ -1061,10 +1370,11 @@ export const DatabaseViewer: React.FC = () => {
 
           <button
             onClick={() => setSelectedTier("EXPLORATORY")}
-            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${selectedTier === "EXPLORATORY"
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
+              selectedTier === "EXPLORATORY"
                 ? "bg-amber-500/15 border-amber-500/40 text-amber-300 shadow-lg shadow-amber-500/10"
                 : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-amber-300"
-              }`}
+            }`}
           >
             <div className="flex justify-between items-center text-xs font-bold">
               <span className="flex items-center gap-1.5">⚡ Exploratory (&lt;60%)</span>
@@ -1080,10 +1390,10 @@ export const DatabaseViewer: React.FC = () => {
           </button>
         </div>
       </div>
-
+      
       {/* Top Header Overview & Adaptive Machine Learning Analytics Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-
+        
         {/* Card 1: Total PnL & Win Rate */}
         <div className="card p-4 rounded-xl bg-white/[0.03] border border-white/10 flex flex-col items-center text-center justify-between">
           <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg mb-2 shadow-inner ${isNetProfit ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400" : "bg-rose-500/10 border border-rose-500/20 text-rose-400"}`}>
@@ -1157,10 +1467,11 @@ export const DatabaseViewer: React.FC = () => {
               </button>
               <button
                 onClick={() => setAutoRefresh(!autoRefresh)}
-                className={`text-xs font-semibold py-1.5 px-3 rounded-lg border transition-all cursor-pointer ${autoRefresh
-                    ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400"
+                className={`text-xs font-semibold py-1.5 px-3 rounded-lg border transition-all cursor-pointer ${
+                  autoRefresh 
+                    ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" 
                     : "bg-white/5 border-white/10 text-gray-400"
-                  }`}
+                }`}
               >
                 {autoRefresh ? "Live Sync ON" : "Live Sync OFF"}
               </button>
@@ -1172,18 +1483,19 @@ export const DatabaseViewer: React.FC = () => {
       {/* Main Database Table Container */}
       {/* Database Container */}
       <div className="card rounded-2xl bg-white/[0.02] border border-white/10 overflow-hidden shadow-2xl">
-
+        
         {/* Row 1: Primary Navigation Bar & Date Deck */}
         <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3.5 border-b border-white/10 bg-white/[0.02]">
-
+          
           {/* Left: Main Sub-Tab Segmented Control */}
           <div className="flex items-center gap-1 p-1 bg-black/40 border border-white/10 rounded-xl backdrop-blur-md">
             <button
               onClick={() => setActiveSubTab("trades")}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${activeSubTab === "trades"
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeSubTab === "trades"
                   ? "bg-emerald-500 text-black shadow-md font-extrabold"
                   : "text-gray-400 hover:text-white hover:bg-white/5"
-                }`}
+              }`}
             >
               <span>💼</span> Trades
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${activeSubTab === "trades" ? "bg-black/20 text-black font-bold" : "bg-white/10 text-gray-300"}`}>
@@ -1193,40 +1505,15 @@ export const DatabaseViewer: React.FC = () => {
 
             <button
               onClick={() => setActiveSubTab("signals")}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${activeSubTab === "signals"
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeSubTab === "signals"
                   ? "bg-indigo-500 text-white shadow-md font-extrabold"
                   : "text-gray-400 hover:text-white hover:bg-white/5"
-                }`}
+              }`}
             >
               <span>📋</span> Signals
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${activeSubTab === "signals" ? "bg-white/20 text-white font-bold" : "bg-white/10 text-gray-300"}`}>
                 {filteredSignals.length}
-              </span>
-            </button>
-
-            <button
-              onClick={() => setActiveSubTab("sessions")}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${activeSubTab === "sessions"
-                  ? "bg-indigo-500 text-white shadow-md font-extrabold"
-                  : "text-gray-400 hover:text-white hover:bg-white/5"
-                }`}
-            >
-              <span>🔒</span> Sessions
-              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-white/10 text-gray-300 font-mono">
-                {sessions.length}
-              </span>
-            </button>
-
-            <button
-              onClick={() => setActiveSubTab("settings")}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${activeSubTab === "settings"
-                  ? "bg-indigo-500 text-white shadow-md font-extrabold"
-                  : "text-gray-400 hover:text-white hover:bg-white/5"
-                }`}
-            >
-              <span>⚙️</span> Settings
-              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-white/10 text-gray-300 font-mono">
-                {settings.length}
               </span>
             </button>
           </div>
@@ -1237,10 +1524,11 @@ export const DatabaseViewer: React.FC = () => {
               <div className="flex items-center gap-1.5 p-1 bg-black/40 border border-white/10 rounded-xl">
                 <button
                   onClick={() => setSelectedDate(todayDateStr)}
-                  className={`px-3 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${selectedDate === todayDateStr
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    selectedDate === todayDateStr
                       ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm"
                       : "text-gray-400 hover:text-white"
-                    }`}
+                  }`}
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
                   Today ({todayDateFormatted})
@@ -1248,10 +1536,11 @@ export const DatabaseViewer: React.FC = () => {
 
                 <button
                   onClick={() => setSelectedDate("ALL")}
-                  className={`px-3 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${selectedDate === "ALL"
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                    selectedDate === "ALL"
                       ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-sm"
                       : "text-gray-400 hover:text-white"
-                    }`}
+                  }`}
                 >
                   All Dates
                 </button>
@@ -1280,26 +1569,28 @@ export const DatabaseViewer: React.FC = () => {
         {/* Row 2: Secondary Command Bar (View Mode on Left, Search & Filter Dropdown on Right) */}
         {(activeSubTab === "trades" || activeSubTab === "signals") && (
           <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3 border-b border-white/10 bg-white/[0.01]">
-
+            
             {/* Left: View Mode Toggle */}
             <div>
               {activeSubTab === "trades" && (
                 <div className="flex items-center gap-1 p-0.5 bg-black/40 border border-white/10 rounded-lg">
                   <button
                     onClick={() => setTradesViewMode("ledger")}
-                    className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${tradesViewMode === "ledger"
+                    className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      tradesViewMode === "ledger"
                         ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow-sm"
                         : "text-gray-400 hover:text-white"
-                      }`}
+                    }`}
                   >
-                    <span>📋</span> Ledger ({filteredPaperTrades.length})
+                    <span>📋</span> Ledger ({dbTradesTotal})
                   </button>
                   <button
                     onClick={() => setTradesViewMode("pairs")}
-                    className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${tradesViewMode === "pairs"
+                    className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                      tradesViewMode === "pairs"
                         ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow-sm"
                         : "text-gray-400 hover:text-white"
-                      }`}
+                    }`}
                   >
                     <span>🔄</span> Cycles ({roundTripPairs.length})
                   </button>
@@ -1309,7 +1600,7 @@ export const DatabaseViewer: React.FC = () => {
 
             {/* Right: Search Box & Custom Filter Dropdown */}
             <div className="flex items-center gap-3 flex-1 justify-end max-w-lg">
-
+              
               {/* Search Box */}
               <div className="relative flex-1 max-w-xs flex items-center">
                 <span className="absolute left-3 text-gray-500 text-xs">🔍</span>
@@ -1342,406 +1633,355 @@ export const DatabaseViewer: React.FC = () => {
 
         {/* 1. Paper Trades Tab Content */}
         {activeSubTab === "trades" && (
-          <div className="overflow-x-auto max-h-[580px] overflow-y-auto">
-            {tradesViewMode === "pairs" ? (
-              /* Round-Trip Trade Cycles View */
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-white/10 bg-white/[0.02] text-[11px] font-semibold text-gray-400 uppercase tracking-wider sticky top-0 backdrop-blur-md">
-                    <th className="py-3 px-4">Cycle ID</th>
-                    <th className="py-3 px-4">Tier</th>
-                    <th className="py-3 px-4">Strike</th>
-                    <th className="py-3 px-4">Qty</th>
-                    <th className="py-3 px-4">Entry</th>
-                    <th className="py-3 px-4">Exit</th>
-                    <th className="py-3 px-4">Duration</th>
-                    <th className="py-3 px-4">Pos. Status</th>
-                    <th className="py-3 px-4">R. P&L</th>
-                    <th className="py-3 px-4">Reason</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5 text-xs font-outfit">
-                  {roundTripPairs.length > 0 ? (
-                    roundTripPairs.map((pair) => {
-                      const isProfit = (pair.pnl || 0) >= 0;
-                      return (
-                        <tr key={pair.id} className="hover:bg-white/[0.03] transition-colors">
-                          <td className="py-3.5 px-4 font-mono font-bold text-indigo-400 whitespace-nowrap">
-                            {pair.id}
-                          </td>
-                          <td className="py-3.5 px-4 whitespace-nowrap">
-                            {getTierBadge(pair.tier)}
-                          </td>
-                          <td className="py-3.5 px-4 whitespace-nowrap">
-                            <div className="font-bold text-white">{pair.strike ? `NIFTY ${pair.strike}` : pair.symbol}</div>
-                            <div className="text-[10px] text-gray-400 font-mono">{pair.symbol}</div>
-                          </td>
-                          <td className="py-3.5 px-4 font-mono font-semibold text-gray-300">
-                            {pair.qty}x
-                          </td>
-                          <td className="py-3.5 px-4 whitespace-nowrap">
-                            <div className="font-bold text-emerald-400">₹{pair.entryPrice.toFixed(2)}</div>
-                            <div className="text-[10px] text-gray-400 font-mono">#{pair.entryTrade.id} @ {pair.entryTime}</div>
-                          </td>
-                          <td className="py-3.5 px-4 whitespace-nowrap">
-                            {pair.exitTrade ? (
-                              <div>
-                                <div className="font-bold text-white">₹{pair.exitPrice?.toFixed(2)}</div>
-                                <div className="text-[10px] text-cyan-400 font-mono flex items-center gap-1 mt-0.5">
-                                  <span className={`px-1.5 py-0.2 rounded border text-[9px] font-bold ${getBadgeClass(pair.exitType || '')}`}>
-                                    {pair.exitType}
-                                  </span>
-                                  <span>#{pair.exitTrade.id}</span>
-                                </div>
-                              </div>
-                            ) : (
-                              <span className="text-amber-400 italic">Holding Active</span>
-                            )}
-                          </td>
-                          <td className="py-3.5 px-4 font-mono text-gray-300 whitespace-nowrap">
-                            {pair.durationMins ? `${pair.durationMins} min${pair.durationMins > 1 ? 's' : ''}` : "Active"}
-                          </td>
-                          <td className="py-3.5 px-4 whitespace-nowrap">
-                            {pair.status === "OPEN" ? (
-                              <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-amber-500/15 border-amber-500/40 text-amber-300 animate-pulse">
-                                🟢 OPEN
-                              </span>
-                            ) : (
-                              <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-emerald-500/10 border-emerald-500/20 text-emerald-400">
-                                ✅ CLOSED
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3.5 px-4 whitespace-nowrap">
-                            {pair.status === "OPEN" ? (
-                              <span className="text-gray-500 italic">Running MTM</span>
-                            ) : pair.pnl !== undefined ? (
-                              <div className={`font-bold ${isProfit ? "text-emerald-400" : "text-rose-400"}`}>
-                                {isProfit ? `+₹${pair.pnl.toFixed(2)}` : `-₹${Math.abs(pair.pnl).toFixed(2)}`}
-                                {pair.pnlPercent !== undefined && (
-                                  <span className="block text-[10px] font-normal">
-                                    ({pair.pnlPercent >= 0 ? "+" : ""}{pair.pnlPercent.toFixed(1)}%)
-                                  </span>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="text-gray-500">—</span>
-                            )}
-                          </td>
-                          <td className="py-3.5 px-4 text-gray-400 font-sans text-[11.5px] max-w-xs leading-relaxed">
-                            {pair.exitReason || "Active position monitoring real-time ticks."}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  ) : (
-                    <tr>
-                      <td colSpan={10} className="py-16 text-center text-gray-500 text-sm font-sans">
-                        No trade cycles completed yet.
-                      </td>
+          <div>
+            <div className="overflow-x-auto max-h-[580px] overflow-y-auto">
+              {tradesViewMode === "pairs" ? (
+                /* Round-Trip Trade Cycles View */
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-white/10 bg-white/[0.02] text-[11px] font-semibold text-gray-400 uppercase tracking-wider sticky top-0 backdrop-blur-md z-10">
+                      <th className="py-3 px-4">Cycle ID</th>
+                      <th className="py-3 px-4">Tier</th>
+                      <th className="py-3 px-4">Strike</th>
+                      <th className="py-3 px-4">Qty</th>
+                      <th className="py-3 px-4">Entry Leg</th>
+                      <th className="py-3 px-4">Exit Leg</th>
+                      <th className="py-3 px-4">Duration</th>
+                      <th className="py-3 px-4">Pos. Status</th>
+                      <th className="py-3 px-4">R. P&L</th>
+                      <th className="py-3 px-4">Reason</th>
                     </tr>
-                  )}
-                </tbody>
-              </table>
-            ) : (
-              /* All Ledger Transactions View */
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-white/10 bg-white/[0.02] text-[11px] font-semibold text-gray-400 uppercase tracking-wider sticky top-0 backdrop-blur-md">
-                    <th className="py-3 px-4"># ID</th>
-                    <th className="py-3 px-4">Date & Time</th>
-                    <th className="py-3 px-4">Tier</th>
-                    <th className="py-3 px-4">Action</th>
-                    <th className="py-3 px-4">Strike</th>
-                    <th className="py-3 px-4">Qty</th>
-                    <th className="py-3 px-4">Exec. Price</th>
-                    <th className="py-3 px-4">S/L</th>
-                    <th className="py-3 px-4">Targets</th>
-                    <th className="py-3 px-4">Inv. Capital</th>
-                    <th className="py-3 px-4">Pos. Status</th>
-                    <th className="py-3 px-4">R. P&L</th>
-                    <th className="py-3 px-4">Confluence</th>
-                    <th className="py-3 px-4">Reason</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5 text-xs font-outfit">
-                  {filteredPaperTrades.length > 0 ? (
-                    filteredPaperTrades.map((t) => {
-                      const link = tradeLinkages.get(t.id);
-                      const hasPnl = t.pnl !== undefined && t.pnl !== null;
-                      const isExit = !t.type.includes("BUY");
-                      const isOpen = t.status === "OPEN" || (!hasPnl && !isExit);
-                      const isProfit = hasPnl && t.pnl! >= 0;
+                  </thead>
+                  <tbody className="divide-y divide-white/5 text-xs font-outfit">
+                    {paginatedCycles.length > 0 ? (
+                      paginatedCycles.map((pair) => {
+                        const isProfit = (pair.pnl || 0) >= 0;
+                        return (
+                          <tr key={pair.id} className="hover:bg-white/[0.03] transition-colors">
+                            <td className="py-3.5 px-4 font-mono font-bold text-indigo-400 whitespace-nowrap">
+                              {pair.id}
+                            </td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">
+                              {getTierBadge(pair.tier)}
+                            </td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">
+                              <div className="font-bold text-white">{pair.strike ? `NIFTY ${pair.strike}` : pair.symbol}</div>
+                              <div className="text-[10px] text-gray-400 font-mono">{pair.symbol}</div>
+                            </td>
+                            <td className="py-3.5 px-4 font-mono font-semibold text-gray-300">
+                              {pair.qty}x
+                            </td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">
+                              <div className="font-bold text-emerald-400">₹{pair.entryPrice.toFixed(2)}</div>
+                              <div className="text-[10px] text-gray-400 font-mono">#{pair.entryTrade.id} @ {pair.entryTime}</div>
+                            </td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">
+                              {pair.exitTrade ? (
+                                <div>
+                                  <div className="font-bold text-white">₹{pair.exitPrice?.toFixed(2)}</div>
+                                  <div className="text-[10px] text-cyan-400 font-mono flex items-center gap-1 mt-0.5">
+                                    <span className={`px-1.5 py-0.2 rounded border text-[9px] font-bold ${getBadgeClass(pair.exitType || '')}`}>
+                                      {pair.exitType}
+                                    </span>
+                                    <span>#{pair.exitTrade.id}</span>
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-amber-400 italic">Holding Active</span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 font-mono text-gray-300 whitespace-nowrap">
+                              {pair.durationMins ? `${pair.durationMins} min${pair.durationMins > 1 ? 's' : ''}` : "Active"}
+                            </td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">
+                              {pair.status === "OPEN" ? (
+                                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-amber-500/15 border-amber-500/40 text-amber-300 animate-pulse">
+                                  🟢 OPEN
+                                </span>
+                              ) : (
+                                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-emerald-500/10 border-emerald-500/20 text-emerald-400">
+                                  ✅ CLOSED
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">
+                              {pair.status === "OPEN" ? (
+                                <span className="text-gray-500 italic">Running MTM</span>
+                              ) : pair.pnl !== undefined ? (
+                                <div className={`font-bold ${isProfit ? "text-emerald-400" : "text-rose-400"}`}>
+                                  {isProfit ? `+₹${pair.pnl.toFixed(2)}` : `-₹${Math.abs(pair.pnl).toFixed(2)}`}
+                                  {pair.pnlPercent !== undefined && (
+                                    <span className="block text-[10px] font-normal">
+                                      ({pair.pnlPercent >= 0 ? "+" : ""}{pair.pnlPercent.toFixed(1)}%)
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-gray-500">—</span>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4 text-gray-400 font-sans text-[11.5px] max-w-xs leading-relaxed">
+                              {pair.exitReason || "Active position monitoring real-time ticks."}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan={10} className="py-16 text-center text-gray-500 text-sm font-sans">
+                          No trade cycles matching filter criteria.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              ) : (
+                /* All Ledger Transactions View */
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-white/10 bg-white/[0.02] text-[11px] font-semibold text-gray-400 uppercase tracking-wider sticky top-0 backdrop-blur-md z-10">
+                      <th className="py-3 px-4"># ID</th>
+                      <th className="py-3 px-4">Date & Time</th>
+                      <th className="py-3 px-4">Tier</th>
+                      <th className="py-3 px-4">Action</th>
+                      <th className="py-3 px-4">Strike</th>
+                      <th className="py-3 px-4">Qty</th>
+                      <th className="py-3 px-4">Exec. Price</th>
+                      <th className="py-3 px-4">S/L</th>
+                      <th className="py-3 px-4">Targets</th>
+                      <th className="py-3 px-4">Inv. Capital</th>
+                      <th className="py-3 px-4">Pos. Status</th>
+                      <th className="py-3 px-4">R. P&L</th>
+                      <th className="py-3 px-4">Confluence</th>
+                      <th className="py-3 px-4">Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5 text-xs font-outfit">
+                    {dbTrades.length > 0 ? (
+                      dbTrades.map((t) => {
+                        const link = tradeLinkages.get(t.id);
+                        const hasPnl = t.pnl !== undefined && t.pnl !== null;
+                        const isExit = !t.type.includes("BUY");
+                        const isOpen = t.status === "OPEN" || (!hasPnl && !isExit);
+                        const isProfit = hasPnl && t.pnl! >= 0;
 
-                      return (
-                        <tr key={t.id} className="hover:bg-white/[0.03] transition-colors">
-                          <td className="py-3 px-4 text-gray-500 font-mono">#{t.id}</td>
-                          <td className="py-3 px-4 whitespace-nowrap">
-                            {formatDateTimeSplit(t.datetime, t.timestamp)}
-                          </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
-                            {getTierBadge(t.tier)}
-                          </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
-                            <div className="flex flex-col items-start gap-1">
-                              <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(t.type)}`}>
-                                {t.type}
-                              </span>
-                              {isExit && (link?.pairedId || t.parent_trade_id) && (
-                                <span className="text-[9.5px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
-                                  <span>🔗</span> Closes Buy #{link?.pairedId || t.parent_trade_id}
-                                </span>
-                              )}
-                              {!isExit && link?.pairedId && (
-                                <span className="text-[9.5px] font-mono text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
-                                  <span>➜</span> Exited by #{link.pairedId}
-                                </span>
-                              )}
-                            </div>
-                          </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
-                            <div className="font-bold text-white">{t.strike ? `NIFTY ${t.strike}` : t.symbol}</div>
-                            <div className="text-[10px] text-gray-400 font-mono">{t.symbol}</div>
-                          </td>
-                          <td className="py-3 px-4 font-mono font-semibold text-gray-300">
-                            {t.qty}x
-                          </td>
-                          <td className="py-3 px-4 text-white font-bold whitespace-nowrap">
-                            <div>₹{t.price.toFixed(2)}</div>
-                            {isExit && (t.entry_price || link?.entryPrice) && (
-                              <div className="text-[10px] text-gray-400 font-mono font-normal">
-                                Entry: ₹{(t.entry_price || link?.entryPrice)?.toFixed(2)}
-                              </div>
-                            )}
-                          </td>
-                          <td className="py-3 px-4 text-rose-400 font-semibold whitespace-nowrap">
-                            {t.stop_loss ? `₹${t.stop_loss.toFixed(2)}` : "--"}
-                          </td>
-                          <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
-                            {t.target1 ? `T1: ₹${t.target1.toFixed(2)}` : "--"}
-                            {t.target2 && <span className="block text-[10px] text-emerald-400/80">T2: ₹${t.target2.toFixed(2)}</span>}
-                          </td>
-                          <td className="py-3 px-4 text-gray-300 whitespace-nowrap font-mono">
-                            ₹{t.invested_capital.toFixed(2)}
-                          </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
-                            {isOpen ? (
-                              <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-amber-500/15 border-amber-500/40 text-amber-300 animate-pulse">
-                                🟢 OPEN
-                              </span>
-                            ) : (
-                              <div className="flex flex-col items-start">
-                                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-white/5 border-white/10 text-gray-400">
-                                  CLOSED
+                        return (
+                          <tr key={t.id} className="hover:bg-white/[0.03] transition-colors">
+                            <td className="py-3 px-4 text-gray-500 font-mono">#{t.id}</td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {formatDateTimeSplit(t.datetime, t.timestamp)}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {getTierBadge(t.tier)}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <div className="flex flex-col items-start gap-1">
+                                <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(t.type)}`}>
+                                  {t.type}
                                 </span>
                                 {isExit && (link?.pairedId || t.parent_trade_id) && (
-                                  <span className="text-[9.5px] text-gray-500 font-mono mt-0.5">
-                                    Round-Trip #{link?.pairedId || t.parent_trade_id}➜#{t.id}
+                                  <span className="text-[9.5px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                                    <span>🔗</span> Closes Buy #{link?.pairedId || t.parent_trade_id}
+                                  </span>
+                                )}
+                                {!isExit && link?.pairedId && (
+                                  <span className="text-[9.5px] font-mono text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
+                                    <span>➜</span> Exited by #{link.pairedId}
                                   </span>
                                 )}
                               </div>
-                            )}
-                          </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
-                            {isOpen ? (
-                              <span className="text-gray-500 italic">Position Open</span>
-                            ) : hasPnl ? (
-                              <div className={`font-bold ${isProfit ? "text-emerald-400" : "text-rose-400"}`}>
-                                {isProfit ? `+₹${t.pnl!.toFixed(2)}` : `-₹${Math.abs(t.pnl!).toFixed(2)}`}
-                                {t.pnl_percent !== undefined && t.pnl_percent !== null && (
-                                  <span className="block text-[10px] font-normal">
-                                    ({t.pnl_percent >= 0 ? "+" : ""}{t.pnl_percent.toFixed(1)}%)
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <div className="font-bold text-white">{t.strike ? `NIFTY ${t.strike}` : t.symbol}</div>
+                              <div className="text-[10px] text-gray-400 font-mono">{t.symbol}</div>
+                            </td>
+                            <td className="py-3 px-4 font-mono font-semibold text-gray-300">
+                              {t.qty}x
+                            </td>
+                            <td className="py-3 px-4 text-white font-bold whitespace-nowrap">
+                              <div>₹{t.price.toFixed(2)}</div>
+                              {isExit && (t.entry_price || link?.entryPrice) && (
+                                <div className="text-[10px] text-gray-400 font-mono font-normal">
+                                  Entry: ₹{(t.entry_price || link?.entryPrice)?.toFixed(2)}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-rose-400 font-semibold whitespace-nowrap">
+                              {t.stop_loss ? `₹${t.stop_loss.toFixed(2)}` : "--"}
+                            </td>
+                            <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
+                              {t.target1 ? `T1: ₹${t.target1.toFixed(2)}` : "--"}
+                              {t.target2 && <span className="block text-[10px] text-emerald-400/80">T2: ₹${t.target2.toFixed(2)}</span>}
+                            </td>
+                            <td className="py-3 px-4 text-gray-300 whitespace-nowrap font-mono">
+                              ₹{t.invested_capital.toFixed(2)}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {isOpen ? (
+                                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-amber-500/15 border-amber-500/40 text-amber-300 animate-pulse">
+                                  🟢 OPEN
+                                </span>
+                              ) : (
+                                <div className="flex flex-col items-start">
+                                  <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-white/5 border-white/10 text-gray-400">
+                                    CLOSED
                                   </span>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="text-gray-500">—</span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
-                            {t.market_regime ? (
-                              <span className="px-2 py-0.5 rounded bg-violet-500/10 border border-violet-500/20 text-violet-300 text-[10px] font-bold">
-                                {t.market_regime}
-                              </span>
-                            ) : "--"}
-                            {t.confluence_score && (
-                              <span className="block text-[10px] text-gray-400 mt-0.5">Score: {t.confluence_score}/100</span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4 text-gray-400 font-sans text-[11.5px] max-w-xs leading-relaxed">
-                            {isExit && (link?.pairedId || t.parent_trade_id) && (
-                              <div className="text-cyan-400 text-[10px] font-mono font-semibold mb-0.5">
-                                🔗 Closes Buy #{link?.pairedId || t.parent_trade_id} @ ₹{(t.entry_price || link?.entryPrice || 0).toFixed(2)}
-                              </div>
-                            )}
-                            {t.reasoning || "--"}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  ) : (
-                    <tr>
-                      <td colSpan={14} className="py-16 text-center text-gray-500 text-sm font-sans">
-                        {isLoading ? "Loading paper trading ledger from SQLite..." : `No ${selectedTier !== "ALL" ? selectedTier : ""} paper trades recorded yet. Ticks will automatically simulate Buy & Exit transactions here and in CSV.`}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                                  {isExit && (link?.pairedId || t.parent_trade_id) && (
+                                    <span className="text-[9.5px] text-gray-500 font-mono mt-0.5">
+                                      Round-Trip #{link?.pairedId || t.parent_trade_id}➜#{t.id}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {isOpen ? (
+                                <span className="text-gray-500 italic">Position Open</span>
+                              ) : hasPnl ? (
+                                <div className={`font-bold ${isProfit ? "text-emerald-400" : "text-rose-400"}`}>
+                                  {isProfit ? `+₹${t.pnl!.toFixed(2)}` : `-₹${Math.abs(t.pnl!).toFixed(2)}`}
+                                  {t.pnl_percent !== undefined && t.pnl_percent !== null && (
+                                    <span className="block text-[10px] font-normal">
+                                      ({t.pnl_percent >= 0 ? "+" : ""}{t.pnl_percent.toFixed(1)}%)
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-gray-500">—</span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {t.market_regime ? (
+                                <span className="px-2 py-0.5 rounded bg-violet-500/10 border border-violet-500/20 text-violet-300 text-[10px] font-bold">
+                                  {t.market_regime}
+                                </span>
+                              ) : "--"}
+                              {t.confluence_score && (
+                                <span className="block text-[10px] text-gray-400 mt-0.5">Score: {t.confluence_score}/100</span>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-gray-400 font-sans text-[11.5px] max-w-xs leading-relaxed">
+                              {isExit && (link?.pairedId || t.parent_trade_id) && (
+                                <div className="text-cyan-400 text-[10px] font-mono font-semibold mb-0.5">
+                                  🔗 Closes Buy #{link?.pairedId || t.parent_trade_id} @ ₹{(t.entry_price || link?.entryPrice || 0).toFixed(2)}
+                                </div>
+                              )}
+                              {t.reasoning || "--"}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    ) : (
+                      <tr>
+                        <td colSpan={14} className="py-16 text-center text-gray-500 text-sm font-sans">
+                          {isDbTradesLoading ? "Executing SQLite query..." : `No ${selectedTier !== "ALL" ? selectedTier : ""} paper trades matching search/filter in database.`}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {/* Pagination Controls */}
+            {tradesViewMode === "pairs" ? (
+              <ModernPagination
+                currentPage={cyclesPage}
+                totalRecords={roundTripPairs.length}
+                pageSize={cyclesLimit}
+                onPageChange={setCyclesPage}
+                onPageSizeChange={setCyclesLimit}
+              />
+            ) : (
+              <ModernPagination
+                currentPage={tradesPage}
+                totalRecords={dbTradesTotal}
+                pageSize={tradesLimit}
+                onPageChange={setTradesPage}
+                onPageSizeChange={setTradesLimit}
+              />
             )}
           </div>
         )}
 
         {/* 2. Signals Tab Content */}
         {activeSubTab === "signals" && (
-          <div className="overflow-x-auto max-h-[580px] overflow-y-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-white/10 bg-white/[0.02] text-[11px] font-semibold text-gray-400 uppercase tracking-wider sticky top-0 backdrop-blur-md">
-                  <th className="py-3 px-4"># ID</th>
-                  <th className="py-3 px-4">Date & Time</th>
-                  <th className="py-3 px-4">Tier</th>
-                  <th className="py-3 px-4">Signal Type</th>
-                  <th className="py-3 px-4">Strike</th>
-                  <th className="py-3 px-4">Entry</th>
-                  <th className="py-3 px-4">S/L</th>
-                  <th className="py-3 px-4">T1</th>
-                  <th className="py-3 px-4">T2</th>
-                  <th className="py-3 px-4">Reason</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-white/5 text-xs font-outfit">
-                {filteredSignals.length > 0 ? (
-                  filteredSignals.map((s) => (
-                    <tr key={s.id} className="hover:bg-white/[0.03] transition-colors">
-                      <td className="py-3 px-4 text-gray-500 font-mono">#{s.id}</td>
-                      <td className="py-3 px-4 whitespace-nowrap">
-                        {formatDateTimeSplit(undefined, s.timestamp)}
-                      </td>
-                      <td className="py-3 px-4 whitespace-nowrap">
-                        {getTierBadge(s.tier)}
-                      </td>
-                      <td className="py-3 px-4 whitespace-nowrap">
-                        <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(s.type)}`}>
-                          {s.type}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 font-bold text-white whitespace-nowrap">
-                        {s.strike_price ? `${s.strike_price}` : "--"}
-                      </td>
-                      <td className="py-3 px-4 text-white whitespace-nowrap">
-                        {s.entry_price ? `₹${s.entry_price.toFixed(2)}` : "--"}
-                      </td>
-                      <td className="py-3 px-4 text-rose-400 font-semibold whitespace-nowrap">
-                        {s.stop_loss_price ? `₹${s.stop_loss_price.toFixed(2)}` : "--"}
-                      </td>
-                      <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
-                        {s.target_price1 ? `₹${s.target_price1.toFixed(2)}` : "--"}
-                      </td>
-                      <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
-                        {s.target_price2 ? `₹${s.target_price2.toFixed(2)}` : "--"}
-                      </td>
-                      <td className="py-3 px-4 text-gray-400 font-sans text-[11.5px] max-w-sm leading-relaxed">
-                        {s.reasoning || "--"}
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={10} className="py-16 text-center text-gray-500 text-sm font-sans">
-                      {isLoading ? "Loading advisory signals from SQLite..." : `No ${selectedTier !== "ALL" ? selectedTier : ""} advisory signals recorded yet.`}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {/* 3. Sessions Tab Content */}
-        {activeSubTab === "sessions" && (
-          <div className="p-6">
-            <div className="overflow-x-auto">
+          <div>
+            <div className="overflow-x-auto max-h-[580px] overflow-y-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
-                  <tr className="border-b border-white/10 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                    <th className="py-3 px-4">Broker Provider</th>
-                    <th className="py-3 px-4">Access Token (Encrypted/Cached)</th>
-                    <th className="py-3 px-4">Expires At</th>
-                    <th className="py-3 px-4">Status</th>
+                  <tr className="border-b border-white/10 bg-white/[0.02] text-[11px] font-semibold text-gray-400 uppercase tracking-wider sticky top-0 backdrop-blur-md z-10">
+                    <th className="py-3 px-4"># ID</th>
+                    <th className="py-3 px-4">Date & Time</th>
+                    <th className="py-3 px-4">Tier</th>
+                    <th className="py-3 px-4">Signal Type</th>
+                    <th className="py-3 px-4">Strike</th>
+                    <th className="py-3 px-4">Entry</th>
+                    <th className="py-3 px-4">S/L</th>
+                    <th className="py-3 px-4">T1</th>
+                    <th className="py-3 px-4">T2</th>
+                    <th className="py-3 px-4">Reason</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-white/5 text-xs font-outfit">
-                  {sessions.length > 0 ? (
-                    sessions.map((s, idx) => {
-                      const isExpired = Date.now() > s.expires_at;
-                      return (
-                        <tr key={idx} className="hover:bg-white/[0.03] transition-colors">
-                          <td className="py-3 px-4 font-bold text-white">{s.provider}</td>
-                          <td className="py-3 px-4 text-gray-400 font-mono">
-                            {s.access_token ? `${s.access_token.substring(0, 16)}...${s.access_token.substring(s.access_token.length - 8)}` : "--"}
-                          </td>
-                          <td className="py-3 px-4 text-gray-300">
-                            {new Date(s.expires_at).toLocaleString()}
-                          </td>
-                          <td className="py-3 px-4">
-                            <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${isExpired
-                                ? "bg-rose-500/15 border-rose-500/30 text-rose-400"
-                                : "bg-emerald-500/15 border-emerald-500/30 text-emerald-400"
-                              }`}>
-                              <span className={`w-1.5 h-1.5 rounded-full ${isExpired ? "bg-rose-400" : "bg-emerald-400 animate-pulse"}`}></span>
-                              {isExpired ? "EXPIRED (Daily 5 AM Rule)" : "ACTIVE SESSION"}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  ) : (
-                    <tr>
-                      <td colSpan={4} className="py-12 text-center text-gray-500 text-sm font-sans">
-                        No active sessions cached in database.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* 4. Settings Tab Content */}
-        {activeSubTab === "settings" && (
-          <div className="p-6">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-white/10 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                    <th className="py-3 px-4">Configuration Key</th>
-                    <th className="py-3 px-4">Database Value</th>
-                    <th className="py-3 px-4">Description</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5 text-xs font-outfit">
-                  {settings.length > 0 ? (
-                    settings.map((st, idx) => (
-                      <tr key={idx} className="hover:bg-white/[0.03] transition-colors">
-                        <td className="py-3 px-4 font-bold text-indigo-400 font-mono">{st.key}</td>
-                        <td className="py-3 px-4 text-emerald-400 font-bold">{st.value}</td>
-                        <td className="py-3 px-4 text-gray-400 font-sans">Persisted system runtime parameter</td>
+                  {dbSignals.length > 0 ? (
+                    dbSignals.map((s) => (
+                      <tr key={s.id} className="hover:bg-white/[0.03] transition-colors">
+                        <td className="py-3 px-4 text-gray-500 font-mono">#{s.id}</td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          {formatDateTimeSplit(undefined, s.timestamp)}
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          {getTierBadge(s.tier)}
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(s.type)}`}>
+                            {s.type}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 font-bold text-white whitespace-nowrap">
+                          {s.strike_price ? `${s.strike_price}` : "--"}
+                        </td>
+                        <td className="py-3 px-4 text-white whitespace-nowrap">
+                          {s.entry_price ? `₹${s.entry_price.toFixed(2)}` : "--"}
+                        </td>
+                        <td className="py-3 px-4 text-rose-400 font-semibold whitespace-nowrap">
+                          {s.stop_loss_price ? `₹${s.stop_loss_price.toFixed(2)}` : "--"}
+                        </td>
+                        <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
+                          {s.target_price1 ? `₹${s.target_price1.toFixed(2)}` : "--"}
+                        </td>
+                        <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
+                          {s.target_price2 ? `₹${s.target_price2.toFixed(2)}` : "--"}
+                        </td>
+                        <td className="py-3 px-4 text-gray-400 font-sans text-[11.5px] max-w-sm leading-relaxed">
+                          {s.reasoning || "--"}
+                        </td>
                       </tr>
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={3} className="py-12 text-center text-gray-500 text-sm font-sans">
-                        No custom settings rows stored. Default parameters loaded from environment (.env).
+                      <td colSpan={10} className="py-16 text-center text-gray-500 text-sm font-sans">
+                        {isDbSignalsLoading ? "Executing SQLite query..." : `No ${selectedTier !== "ALL" ? selectedTier : ""} advisory signals matching search/filter in database.`}
                       </td>
                     </tr>
                   )}
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            <ModernPagination
+              currentPage={signalsPage}
+              totalRecords={dbSignalsTotal}
+              pageSize={signalsLimit}
+              onPageChange={setSignalsPage}
+              onPageSizeChange={setSignalsLimit}
+            />
           </div>
         )}
+
+        {/* 2. Signals Tab Content is closed above */}
 
       </div>
     </div>

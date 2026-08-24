@@ -49,7 +49,7 @@ export const PositionsViewer: React.FC<PositionsViewerProps> = ({
   };
 
   return (
-    <div className="positions-container flex flex-col gap-6 w-full max-w-7xl mx-auto pb-10">
+    <div className="positions-container flex flex-col gap-6 w-full pb-10">
       {/* 1. Header Metrics Strip (4 Spacious Executive Cards) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Metric 1: Open Positions */}

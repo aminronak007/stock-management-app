@@ -504,9 +504,9 @@ async function main() {
       const db = DatabaseService.initialize();
       const tierParam = (req.query.tier as string) || "ALL";
       const signals = (tierParam !== "ALL")
-        ? db.prepare("SELECT * FROM advisory_signals WHERE tier = ? ORDER BY id DESC LIMIT 100").all(tierParam)
-        : db.prepare("SELECT * FROM advisory_signals ORDER BY id DESC LIMIT 100").all();
-      const paperTrades = DatabaseService.getPaperTrades(200, tierParam);
+        ? db.prepare("SELECT * FROM advisory_signals WHERE tier = ? ORDER BY id DESC LIMIT 500").all(tierParam)
+        : db.prepare("SELECT * FROM advisory_signals ORDER BY id DESC LIMIT 500").all();
+      const paperTrades = DatabaseService.getPaperTrades(1000, tierParam);
       const analytics = DatabaseService.getTradeAnalytics(tierParam);
       const tierAnalytics = DatabaseService.getTierOverviewAnalytics();
       const sessions = db.prepare("SELECT * FROM sessions").all();
@@ -520,6 +520,85 @@ async function main() {
         engineTime: Date.now()
       };
       res.json({ stats, signals, paperTrades, analytics, tierAnalytics, sessions, settings });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Dedicated Database-Level Paginated Endpoints
+  app.get("/api/database/trades", (req, res) => {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const tier = req.query.tier as string | undefined;
+      const date = req.query.date as string | undefined;
+      const filterType = req.query.filterType as string | undefined;
+      const search = req.query.search as string | undefined;
+
+      const result = DatabaseService.getPaginatedPaperTrades({
+        page,
+        limit,
+        tier,
+        date,
+        filterType,
+        search
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/database/signals", (req, res) => {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const tier = req.query.tier as string | undefined;
+      const date = req.query.date as string | undefined;
+      const filterType = req.query.filterType as string | undefined;
+      const search = req.query.search as string | undefined;
+
+      const result = DatabaseService.getPaginatedSignals({
+        page,
+        limit,
+        tier,
+        date,
+        filterType,
+        search
+      });
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/database/sessions", (req, res) => {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const result = DatabaseService.getPaginatedSessions(page, limit);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/database/settings", (req, res) => {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const result = DatabaseService.getPaginatedSettings(page, limit);
+      res.json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/database/delete-trades", (req, res) => {
+    try {
+      const { ids } = req.body;
+      const count = DatabaseService.deletePaperTrades(Array.isArray(ids) ? ids.map(Number) : [Number(ids)]);
+      res.json({ success: true, count });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
