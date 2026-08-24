@@ -170,11 +170,10 @@ const CustomFilterDropdown: React.FC<{
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-md border ${
-          value !== "ALL"
+        className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-md border ${value !== "ALL"
             ? "bg-indigo-500/20 border-indigo-500/50 text-white shadow-indigo-500/10"
             : "bg-black/50 hover:bg-black/70 border-white/10 hover:border-white/20 text-white"
-        }`}
+          }`}
       >
         <span className={`flex items-center gap-1.5 ${selectedOption.color || "text-white"}`}>
           {selectedOption.icon && <span>{selectedOption.icon}</span>}
@@ -202,11 +201,10 @@ const CustomFilterDropdown: React.FC<{
                     onChange(option.value);
                     setIsOpen(false);
                   }}
-                  className={`w-full text-left px-3.5 py-2 text-xs flex items-center justify-between transition-colors cursor-pointer ${
-                    isSelected
+                  className={`w-full text-left px-3.5 py-2 text-xs flex items-center justify-between transition-colors cursor-pointer ${isSelected
                       ? "bg-indigo-500/20 text-indigo-300 font-bold border-l-2 border-indigo-400"
                       : "text-gray-300 hover:bg-white/10 hover:text-white"
-                  }`}
+                    }`}
                 >
                   <div className="flex items-center gap-2">
                     {option.icon && <span>{option.icon}</span>}
@@ -364,11 +362,10 @@ const CustomCalendarPicker: React.FC<{
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer shadow-md ${
-          selectedDate !== "ALL" && selectedDate !== todayDateStr
+        className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer shadow-md ${selectedDate !== "ALL" && selectedDate !== todayDateStr
             ? "bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-amber-500/10"
             : "bg-black/50 hover:bg-black/70 border-white/10 text-gray-200 hover:text-white hover:border-white/20"
-        }`}
+          }`}
       >
         <span>📆</span>
         <span>{triggerLabel}</span>
@@ -380,7 +377,7 @@ const CustomCalendarPicker: React.FC<{
       {/* Modern Glass Calendar Popup */}
       {isOpen && (
         <div className="absolute right-0 mt-2 w-80 rounded-2xl bg-[#0b0e14]/95 backdrop-blur-2xl border border-white/15 shadow-2xl shadow-black/90 p-4 z-50 animate-in fade-in zoom-in-95 duration-150">
-          
+
           {/* Header Month / Year & Prev/Next Buttons */}
           <div className="flex justify-between items-center mb-3.5 pb-2.5 border-b border-white/10">
             <div className="flex items-center gap-2">
@@ -412,9 +409,8 @@ const CustomCalendarPicker: React.FC<{
             {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day, dIdx) => (
               <span
                 key={day}
-                className={`text-[10px] font-bold uppercase tracking-wider py-0.5 ${
-                  dIdx === 0 || dIdx === 6 ? "text-rose-400/70" : "text-gray-500"
-                }`}
+                className={`text-[10px] font-bold uppercase tracking-wider py-0.5 ${dIdx === 0 || dIdx === 6 ? "text-rose-400/70" : "text-gray-500"
+                  }`}
               >
                 {day}
               </span>
@@ -434,17 +430,16 @@ const CustomCalendarPicker: React.FC<{
                     onSelectDate(item.dateStr);
                     setIsOpen(false);
                   }}
-                  className={`relative w-8 h-8 mx-auto flex flex-col items-center justify-center rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                    item.isSelected
+                  className={`relative w-8 h-8 mx-auto flex flex-col items-center justify-center rounded-xl text-xs font-semibold transition-all cursor-pointer ${item.isSelected
                       ? "bg-emerald-500 text-black font-extrabold shadow-lg shadow-emerald-500/40 scale-110 z-10"
                       : item.isToday
-                      ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 font-bold"
-                      : !item.isCurrentMonth
-                      ? "text-gray-600 hover:text-gray-400 hover:bg-white/5"
-                      : disabled
-                      ? "text-gray-700 cursor-not-allowed opacity-30"
-                      : "text-gray-200 hover:bg-white/10 hover:text-white"
-                  }`}
+                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 font-bold"
+                        : !item.isCurrentMonth
+                          ? "text-gray-600 hover:text-gray-400 hover:bg-white/5"
+                          : disabled
+                            ? "text-gray-700 cursor-not-allowed opacity-30"
+                            : "text-gray-200 hover:bg-white/10 hover:text-white"
+                    }`}
                 >
                   <span>{item.day}</span>
                   {item.hasTrades && !item.isSelected && (
@@ -578,11 +573,10 @@ const ModernPagination: React.FC<ModernPaginationProps> = ({
               <button
                 key={p}
                 onClick={() => onPageChange(p)}
-                className={`w-7 h-7 rounded-lg text-xs font-bold transition-all flex items-center justify-center cursor-pointer ${
-                  isActive
+                className={`w-7 h-7 rounded-lg text-xs font-bold transition-all flex items-center justify-center cursor-pointer ${isActive
                     ? "bg-emerald-500 text-black shadow-lg shadow-emerald-500/30 font-extrabold scale-105"
                     : "bg-white/5 hover:bg-white/15 text-gray-300 hover:text-white border border-white/5"
-                }`}
+                  }`}
               >
                 {p}
               </button>
@@ -621,7 +615,7 @@ export const DatabaseViewer: React.FC = () => {
   const [sessions, setSessions] = useState<DatabaseSession[]>([]);
   const [settings, setSettings] = useState<DatabaseSetting[]>([]);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
-  
+
   const todayDateStr = useMemo(() => getIstDateString(Date.now()), []);
   const todayDateFormatted = useMemo(() => {
     return new Intl.DateTimeFormat("en-IN", {
@@ -846,7 +840,7 @@ export const DatabaseViewer: React.FC = () => {
       // 2. Search Query (Symbol, Strike, Reasoning, IDs, Tier, Action)
       if (debouncedSearch && debouncedSearch.trim()) {
         const q = debouncedSearch.trim().toLowerCase().replace(/^#/, "");
-        const matches = 
+        const matches =
           pair.id.toLowerCase().includes(q) ||
           pair.symbol.toLowerCase().includes(q) ||
           (pair.strike && pair.strike.toString().toLowerCase().includes(q)) ||
@@ -881,7 +875,7 @@ export const DatabaseViewer: React.FC = () => {
 
       // 3. Search query
       const q = searchQuery.toLowerCase();
-      const matchesSearch = 
+      const matchesSearch =
         (trade.reasoning && trade.reasoning.toLowerCase().includes(q)) ||
         (trade.symbol && trade.symbol.toLowerCase().includes(q)) ||
         (trade.strike && trade.strike.toLowerCase().includes(q)) ||
@@ -917,7 +911,7 @@ export const DatabaseViewer: React.FC = () => {
 
       // 3. Search query
       const q = searchQuery.toLowerCase();
-      const matchesSearch = 
+      const matchesSearch =
         (sig.reasoning && sig.reasoning.toLowerCase().includes(q)) ||
         (sig.strike_price && sig.strike_price.toString().includes(q)) ||
         (sig.type && sig.type.toLowerCase().includes(q));
@@ -1159,8 +1153,8 @@ export const DatabaseViewer: React.FC = () => {
     const t = tier || "SNIPER";
     if (t === "SNIPER") {
       return (
-        <span 
-          title="SNIPER Tier (Score ≥ 75%)" 
+        <span
+          title="SNIPER Tier (Score ≥ 75%)"
           className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-sm bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 shadow-sm shadow-emerald-500/10 cursor-help"
         >
           🎯
@@ -1169,8 +1163,8 @@ export const DatabaseViewer: React.FC = () => {
     }
     if (t === "BALANCED") {
       return (
-        <span 
-          title="BALANCED Tier (Score 60% - 74%)" 
+        <span
+          title="BALANCED Tier (Score 60% - 74%)"
           className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-sm bg-blue-500/15 border border-blue-500/30 text-blue-400 shadow-sm shadow-blue-500/10 cursor-help"
         >
           ⚖️
@@ -1178,8 +1172,8 @@ export const DatabaseViewer: React.FC = () => {
       );
     }
     return (
-      <span 
-        title="EXPLORATORY Tier (Score < 60%)" 
+      <span
+        title="EXPLORATORY Tier (Score < 60%)"
         className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-sm bg-amber-500/15 border border-amber-500/30 text-amber-400 shadow-sm shadow-amber-500/10 cursor-help"
       >
         🔬
@@ -1289,7 +1283,7 @@ export const DatabaseViewer: React.FC = () => {
 
   return (
     <div className="database-viewer flex flex-col gap-6 w-full pb-10">
-      
+
       {/* 3-Tier Multi-Track Performance Comparison Bar */}
       <div className="p-4 rounded-2xl bg-gradient-to-r from-white/[0.04] via-white/[0.02] to-white/[0.04] border border-white/10 flex flex-col gap-3">
         <div className="flex justify-between items-center">
@@ -1308,11 +1302,10 @@ export const DatabaseViewer: React.FC = () => {
         <div className="grid grid-cols-4 gap-3 pt-1">
           <button
             onClick={() => setSelectedTier("ALL")}
-            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
-              selectedTier === "ALL"
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${selectedTier === "ALL"
                 ? "bg-white/10 border-white/30 shadow-lg"
                 : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-white"
-            }`}
+              }`}
           >
             <div className="flex justify-between items-center text-xs font-bold">
               <span>🌐 All Tiers Combined</span>
@@ -1328,11 +1321,10 @@ export const DatabaseViewer: React.FC = () => {
 
           <button
             onClick={() => setSelectedTier("SNIPER")}
-            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
-              selectedTier === "SNIPER"
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${selectedTier === "SNIPER"
                 ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300 shadow-lg shadow-emerald-500/10"
                 : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-emerald-300"
-            }`}
+              }`}
           >
             <div className="flex justify-between items-center text-xs font-bold">
               <span className="flex items-center gap-1.5">🎯 Sniper Mode (≥75%)</span>
@@ -1349,11 +1341,10 @@ export const DatabaseViewer: React.FC = () => {
 
           <button
             onClick={() => setSelectedTier("BALANCED")}
-            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
-              selectedTier === "BALANCED"
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${selectedTier === "BALANCED"
                 ? "bg-blue-500/15 border-blue-500/40 text-blue-300 shadow-lg shadow-blue-500/10"
                 : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-blue-300"
-            }`}
+              }`}
           >
             <div className="flex justify-between items-center text-xs font-bold">
               <span className="flex items-center gap-1.5">⚖️ Balanced (60% - 74%)</span>
@@ -1370,11 +1361,10 @@ export const DatabaseViewer: React.FC = () => {
 
           <button
             onClick={() => setSelectedTier("EXPLORATORY")}
-            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${
-              selectedTier === "EXPLORATORY"
+            className={`p-3 rounded-xl border transition-all text-left cursor-pointer flex flex-col justify-between ${selectedTier === "EXPLORATORY"
                 ? "bg-amber-500/15 border-amber-500/40 text-amber-300 shadow-lg shadow-amber-500/10"
                 : "bg-white/[0.02] border-white/5 hover:bg-white/5 text-gray-400 hover:text-amber-300"
-            }`}
+              }`}
           >
             <div className="flex justify-between items-center text-xs font-bold">
               <span className="flex items-center gap-1.5">⚡ Exploratory (&lt;60%)</span>
@@ -1390,10 +1380,10 @@ export const DatabaseViewer: React.FC = () => {
           </button>
         </div>
       </div>
-      
+
       {/* Top Header Overview & Adaptive Machine Learning Analytics Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        
+
         {/* Card 1: Total PnL & Win Rate */}
         <div className="card p-4 rounded-xl bg-white/[0.03] border border-white/10 flex flex-col items-center text-center justify-between">
           <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg mb-2 shadow-inner ${isNetProfit ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400" : "bg-rose-500/10 border border-rose-500/20 text-rose-400"}`}>
@@ -1467,11 +1457,10 @@ export const DatabaseViewer: React.FC = () => {
               </button>
               <button
                 onClick={() => setAutoRefresh(!autoRefresh)}
-                className={`text-xs font-semibold py-1.5 px-3 rounded-lg border transition-all cursor-pointer ${
-                  autoRefresh 
-                    ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400" 
+                className={`text-xs font-semibold py-1.5 px-3 rounded-lg border transition-all cursor-pointer ${autoRefresh
+                    ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400"
                     : "bg-white/5 border-white/10 text-gray-400"
-                }`}
+                  }`}
               >
                 {autoRefresh ? "Live Sync ON" : "Live Sync OFF"}
               </button>
@@ -1483,19 +1472,18 @@ export const DatabaseViewer: React.FC = () => {
       {/* Main Database Table Container */}
       {/* Database Container */}
       <div className="card rounded-2xl bg-white/[0.02] border border-white/10 overflow-hidden shadow-2xl">
-        
+
         {/* Row 1: Primary Navigation Bar & Date Deck */}
         <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3.5 border-b border-white/10 bg-white/[0.02]">
-          
+
           {/* Left: Main Sub-Tab Segmented Control */}
           <div className="flex items-center gap-1 p-1 bg-black/40 border border-white/10 rounded-xl backdrop-blur-md">
             <button
               onClick={() => setActiveSubTab("trades")}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeSubTab === "trades"
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${activeSubTab === "trades"
                   ? "bg-emerald-500 text-black shadow-md font-extrabold"
                   : "text-gray-400 hover:text-white hover:bg-white/5"
-              }`}
+                }`}
             >
               <span>💼</span> Trades
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${activeSubTab === "trades" ? "bg-black/20 text-black font-bold" : "bg-white/10 text-gray-300"}`}>
@@ -1505,11 +1493,10 @@ export const DatabaseViewer: React.FC = () => {
 
             <button
               onClick={() => setActiveSubTab("signals")}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                activeSubTab === "signals"
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${activeSubTab === "signals"
                   ? "bg-indigo-500 text-white shadow-md font-extrabold"
                   : "text-gray-400 hover:text-white hover:bg-white/5"
-              }`}
+                }`}
             >
               <span>📋</span> Signals
               <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${activeSubTab === "signals" ? "bg-white/20 text-white font-bold" : "bg-white/10 text-gray-300"}`}>
@@ -1524,11 +1511,10 @@ export const DatabaseViewer: React.FC = () => {
               <div className="flex items-center gap-1.5 p-1 bg-black/40 border border-white/10 rounded-xl">
                 <button
                   onClick={() => setSelectedDate(todayDateStr)}
-                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                    selectedDate === todayDateStr
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${selectedDate === todayDateStr
                       ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm"
                       : "text-gray-400 hover:text-white"
-                  }`}
+                    }`}
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
                   Today ({todayDateFormatted})
@@ -1536,11 +1522,10 @@ export const DatabaseViewer: React.FC = () => {
 
                 <button
                   onClick={() => setSelectedDate("ALL")}
-                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                    selectedDate === "ALL"
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${selectedDate === "ALL"
                       ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-sm"
                       : "text-gray-400 hover:text-white"
-                  }`}
+                    }`}
                 >
                   All Dates
                 </button>
@@ -1569,28 +1554,26 @@ export const DatabaseViewer: React.FC = () => {
         {/* Row 2: Secondary Command Bar (View Mode on Left, Search & Filter Dropdown on Right) */}
         {(activeSubTab === "trades" || activeSubTab === "signals") && (
           <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3 border-b border-white/10 bg-white/[0.01]">
-            
+
             {/* Left: View Mode Toggle */}
             <div>
               {activeSubTab === "trades" && (
                 <div className="flex items-center gap-1 p-0.5 bg-black/40 border border-white/10 rounded-lg">
                   <button
                     onClick={() => setTradesViewMode("ledger")}
-                    className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                      tradesViewMode === "ledger"
+                    className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${tradesViewMode === "ledger"
                         ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shadow-sm"
                         : "text-gray-400 hover:text-white"
-                    }`}
+                      }`}
                   >
                     <span>📋</span> Ledger ({dbTradesTotal})
                   </button>
                   <button
                     onClick={() => setTradesViewMode("pairs")}
-                    className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                      tradesViewMode === "pairs"
+                    className={`px-3 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 ${tradesViewMode === "pairs"
                         ? "bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow-sm"
                         : "text-gray-400 hover:text-white"
-                    }`}
+                      }`}
                   >
                     <span>🔄</span> Cycles ({roundTripPairs.length})
                   </button>
@@ -1600,7 +1583,7 @@ export const DatabaseViewer: React.FC = () => {
 
             {/* Right: Search Box & Custom Filter Dropdown */}
             <div className="flex items-center gap-3 flex-1 justify-end max-w-lg">
-              
+
               {/* Search Box */}
               <div className="relative flex-1 max-w-xs flex items-center">
                 <span className="absolute left-3 text-gray-500 text-xs">🔍</span>
@@ -1644,8 +1627,8 @@ export const DatabaseViewer: React.FC = () => {
                       <th className="py-3 px-4">Tier</th>
                       <th className="py-3 px-4">Strike</th>
                       <th className="py-3 px-4">Qty</th>
-                      <th className="py-3 px-4">Entry Leg</th>
-                      <th className="py-3 px-4">Exit Leg</th>
+                      <th className="py-3 px-4">Entry</th>
+                      <th className="py-3 px-4">Exit</th>
                       <th className="py-3 px-4">Duration</th>
                       <th className="py-3 px-4">Pos. Status</th>
                       <th className="py-3 px-4">R. P&L</th>
