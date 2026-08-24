@@ -516,7 +516,6 @@ async function main() {
         totalPaperTrades: (db.prepare("SELECT COUNT(*) as count FROM paper_trades").get() as any)?.count || 0,
         totalSessions: (db.prepare("SELECT COUNT(*) as count FROM sessions").get() as any)?.count || 0,
         totalSettings: (db.prepare("SELECT COUNT(*) as count FROM settings").get() as any)?.count || 0,
-        dbPath: path.join(__dirname, "../data/state.db"),
         engineTime: Date.now()
       };
       res.json({ stats, signals, paperTrades, analytics, tierAnalytics, sessions, settings });
@@ -619,35 +618,6 @@ async function main() {
       const tier = req.query.tier as string | undefined;
       const analytics = DatabaseService.getTradeAnalytics(tier);
       res.json(analytics);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post("/api/database/clear-signals", (req, res) => {
-    try {
-      const db = DatabaseService.initialize();
-      db.prepare("DELETE FROM advisory_signals").run();
-      res.json({ success: true, message: "Cleared advisory signals history." });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post("/api/database/clear-paper-trades", (req, res) => {
-    try {
-      const db = DatabaseService.initialize();
-      db.prepare("DELETE FROM paper_trades").run();
-      res.json({ success: true, message: "Cleared paper trades ledger." });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
-  });
-
-  app.post("/api/database/purge-corrupted-trades", (req, res) => {
-    try {
-      const purged = DatabaseService.purgeCorruptedDummyTrades();
-      res.json({ success: true, count: purged, message: `Purged ${purged} corrupted dummy trades.` });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }

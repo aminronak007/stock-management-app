@@ -8,28 +8,20 @@ interface DatabaseSession {
   expires_at: number;
 }
 
-interface DatabaseSetting {
-  key: string;
-  value: string;
-}
-
 interface DatabaseStats {
   totalSignals: number;
   totalPaperTrades: number;
   totalSessions: number;
   totalSettings: number;
-  dbPath: string;
   engineTime: number;
 }
 
 export const SettingsViewer: React.FC = () => {
   const [sessions, setSessions] = useState<DatabaseSession[]>([]);
-  const [settings, setSettings] = useState<DatabaseSetting[]>([]);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<string>("");
   const [actionMessage, setActionMessage] = useState<{ text: string; type: "success" | "error" | "info" } | null>(null);
-  const [isProcessingAction, setIsProcessingAction] = useState(false);
 
   // Copied token state
   const [copiedToken, setCopiedToken] = useState(false);
@@ -41,7 +33,6 @@ export const SettingsViewer: React.FC = () => {
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions || []);
-        setSettings(data.settings || []);
         setStats(data.stats || null);
         setLastRefreshed(new Date().toLocaleTimeString());
       }
@@ -61,60 +52,6 @@ export const SettingsViewer: React.FC = () => {
     setTimeout(() => setActionMessage(null), 4000);
   };
 
-  const handleClearPaperTrades = async () => {
-    if (!window.confirm("⚠️ Are you sure you want to permanently clear the paper trading ledger from SQLite? This cannot be undone.")) return;
-    try {
-      setIsProcessingAction(true);
-      const res = await fetch("http://localhost:8080/api/database/clear-paper-trades", { method: "POST" });
-      if (res.ok) {
-        showToast("✅ Paper trading ledger has been successfully cleared.", "success");
-        await fetchSettingsData();
-      } else {
-        showToast("✖ Failed to clear paper trades.", "error");
-      }
-    } catch (e: any) {
-      showToast(`✖ Error: ${e.message}`, "error");
-    } finally {
-      setIsProcessingAction(false);
-    }
-  };
-
-  const handleClearSignals = async () => {
-    if (!window.confirm("⚠️ Are you sure you want to clear advisory signals history from SQLite?")) return;
-    try {
-      setIsProcessingAction(true);
-      const res = await fetch("http://localhost:8080/api/database/clear-signals", { method: "POST" });
-      if (res.ok) {
-        showToast("✅ Advisory signals history cleared.", "success");
-        await fetchSettingsData();
-      } else {
-        showToast("✖ Failed to clear signals.", "error");
-      }
-    } catch (e: any) {
-      showToast(`✖ Error: ${e.message}`, "error");
-    } finally {
-      setIsProcessingAction(false);
-    }
-  };
-
-  const handlePurgeCorrupted = async () => {
-    try {
-      setIsProcessingAction(true);
-      const res = await fetch("http://localhost:8080/api/database/purge-corrupted-trades", { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        showToast(`✅ Purged ${data.count} corrupted/dummy test records.`, "success");
-        await fetchSettingsData();
-      } else {
-        showToast("✖ Failed to purge records.", "error");
-      }
-    } catch (e: any) {
-      showToast(`✖ Error: ${e.message}`, "error");
-    } finally {
-      setIsProcessingAction(false);
-    }
-  };
-
   const activeFyersSession = sessions.find(s => s.provider?.toLowerCase().includes("fyers")) || sessions[0];
   const isSessionExpired = activeFyersSession ? Date.now() > activeFyersSession.expires_at : true;
 
@@ -127,8 +64,27 @@ export const SettingsViewer: React.FC = () => {
     }
   };
 
-  const handleOpenAuth = () => {
-    window.open("https://api-t1.fyers.in/api/v3/generate-authcode", "_blank");
+  const hasActiveSession = !isSessionExpired && !!activeFyersSession;
+
+  const openFyersAuth = () => {
+    const clientId = "W8C1B64UA9-200";
+    const redirect = encodeURIComponent("http://localhost:8080/api/fyers-callback");
+    window.open(
+      `https://api-t1.fyers.in/api/v3/generate-authcode?client_id=${clientId}&redirect_uri=${redirect}&response_type=code&state=state_code`,
+      "_blank"
+    );
+  };
+
+  const handleReAuth = async () => {
+    try {
+      if (hasActiveSession) {
+        await fetch("http://localhost:8080/api/logout", { method: "POST" });
+        await fetchSettingsData();
+      }
+      openFyersAuth();
+    } catch (e: any) {
+      showToast(`✖ Error: ${e.message}`, "error");
+    }
   };
 
   return (
@@ -245,10 +201,16 @@ export const SettingsViewer: React.FC = () => {
 
           <div className="mt-6 pt-4 border-t border-white/5 flex gap-3">
             <button
-              onClick={handleOpenAuth}
-              className="flex-1 py-2.5 px-4 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/40 text-indigo-300 hover:text-indigo-200 font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-2 shadow-lg"
+              onClick={handleReAuth}
+              title={hasActiveSession ? "Logout and re-authorize Fyers 2FA session" : "Authorize Fyers 2FA session"}
+              className={`flex-1 py-2.5 px-4 rounded-xl font-bold text-xs transition-all cursor-pointer flex items-center justify-center gap-2 shadow-lg ${
+                hasActiveSession
+                  ? "bg-white/10 hover:bg-rose-500/20 border border-white/10 hover:border-rose-500/30 text-gray-300 hover:text-white"
+                  : "bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 border border-indigo-500/40 text-white"
+              }`}
             >
-              <span>🔑</span> Re-Authenticate Broker (2FA Login)
+              <span>{hasActiveSession ? "🔄" : "🔒"}</span>
+              {hasActiveSession ? "Re-Auth" : "Login 2FA"}
             </button>
           </div>
         </div>
@@ -322,7 +284,7 @@ export const SettingsViewer: React.FC = () => {
           <span className="text-xs text-gray-400 font-mono">SQLite 3 (WAL Mode)</span>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 my-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 my-5">
           <div className="p-4 rounded-xl bg-black/40 border border-white/5 flex flex-col justify-between">
             <span className="text-[11px] font-semibold text-gray-400 uppercase">Recorded Paper Trades</span>
             <span className="text-2xl font-extrabold text-emerald-400 font-mono mt-2">{stats?.totalPaperTrades || 0}</span>
@@ -334,79 +296,6 @@ export const SettingsViewer: React.FC = () => {
             <span className="text-2xl font-extrabold text-indigo-400 font-mono mt-2">{stats?.totalSignals || 0}</span>
             <span className="text-[10px] text-gray-500 mt-1">Historical High-Probability Alerts</span>
           </div>
-
-          <div className="p-4 rounded-xl bg-black/40 border border-white/5 flex flex-col justify-between">
-            <span className="text-[11px] font-semibold text-gray-400 uppercase">Database File Path</span>
-            <span className="text-xs font-mono text-gray-300 mt-2 break-all">{stats?.dbPath || "backend/data/state.db"}</span>
-            <span className="text-[10px] text-emerald-400 font-semibold mt-1">● Synchronized</span>
-          </div>
-        </div>
-
-        {/* Action Controls */}
-        <div className="pt-4 border-t border-white/5 flex flex-wrap items-center gap-3">
-          <button
-            onClick={handleClearPaperTrades}
-            disabled={isProcessingAction}
-            className="px-4 py-2.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-400 font-bold text-xs transition-all cursor-pointer flex items-center gap-2 shadow-sm disabled:opacity-50"
-          >
-            <span>🧹</span> Clear Paper Trades Ledger
-          </button>
-
-          <button
-            onClick={handleClearSignals}
-            disabled={isProcessingAction}
-            className="px-4 py-2.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 font-bold text-xs transition-all cursor-pointer flex items-center gap-2 shadow-sm disabled:opacity-50"
-          >
-            <span>🗑️</span> Clear Signals History
-          </button>
-
-          <button
-            onClick={handlePurgeCorrupted}
-            disabled={isProcessingAction}
-            className="px-4 py-2.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 font-bold text-xs transition-all cursor-pointer flex items-center gap-2 shadow-sm disabled:opacity-50"
-          >
-            <span>⚡</span> Purge Corrupted/Dummy Records
-          </button>
-        </div>
-      </div>
-
-      {/* Section 4: System Parameters & Environment Keys */}
-      <div className="card p-6 rounded-2xl bg-white/[0.02] border border-white/10 shadow-xl">
-        <div className="flex items-center justify-between pb-4 border-b border-white/5">
-          <div className="flex items-center gap-2.5">
-            <span className="text-lg">📋</span>
-            <h2 className="text-sm font-bold uppercase tracking-wider text-gray-200">System Environment & Runtime Parameters</h2>
-          </div>
-          <span className="text-xs text-gray-400 font-mono">Port 8080 (REST + WS)</span>
-        </div>
-
-        <div className="overflow-x-auto mt-4">
-          <table className="w-full text-left border-collapse text-xs">
-            <thead>
-              <tr className="border-b border-white/10 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-                <th className="py-3 px-4">Configuration Key</th>
-                <th className="py-3 px-4">Database Value</th>
-                <th className="py-3 px-4">Description</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-white/5 font-outfit">
-              {settings.length > 0 ? (
-                settings.map((st, idx) => (
-                  <tr key={idx} className="hover:bg-white/[0.03] transition-colors">
-                    <td className="py-3 px-4 font-bold text-indigo-400 font-mono">{st.key}</td>
-                    <td className="py-3 px-4 text-emerald-400 font-bold">{st.value}</td>
-                    <td className="py-3 px-4 text-gray-400 font-sans">Persisted system runtime parameter</td>
-                  </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={3} className="py-8 text-center text-gray-500 text-sm font-sans">
-                    Default environment configurations loaded from <code className="text-gray-400 font-mono">backend/.env</code>.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
         </div>
       </div>
     </div>

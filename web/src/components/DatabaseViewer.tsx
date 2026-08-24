@@ -85,7 +85,6 @@ interface DatabaseStats {
   totalPaperTrades: number;
   totalSessions: number;
   totalSettings: number;
-  dbPath: string;
   engineTime: number;
 }
 
@@ -1066,26 +1065,6 @@ export const DatabaseViewer: React.FC = () => {
     const start = (cyclesPage - 1) * cyclesLimit;
     return roundTripPairs.slice(start, start + cyclesLimit);
   }, [roundTripPairs, cyclesPage, cyclesLimit]);
-
-  const handleClearPaperTrades = async () => {
-    if (!window.confirm("Are you sure you want to clear the paper trading ledger from SQLite?")) return;
-    try {
-      const res = await fetch("http://localhost:8080/api/database/clear-paper-trades", { method: "POST" });
-      if (res.ok) await fetchData();
-    } catch (e) {
-      console.error("Error clearing paper trades:", e);
-    }
-  };
-
-  const handleClearSignals = async () => {
-    if (!window.confirm("Are you sure you want to clear the advisory signals history from SQLite?")) return;
-    try {
-      const res = await fetch("http://localhost:8080/api/database/clear-signals", { method: "POST" });
-      if (res.ok) await fetchData();
-    } catch (e) {
-      console.error("Error clearing signals:", e);
-    }
-  };
 
   const handleExportTradesCSV = () => {
     if (paperTrades.length === 0) return;

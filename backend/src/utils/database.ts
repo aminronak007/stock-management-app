@@ -524,14 +524,6 @@ export class DatabaseService {
     return Object.values(stacks).flat().filter(t => t.status === "OPEN");
   }
 
-  public static purgeCorruptedDummyTrades(): number {
-    const db = this.initialize();
-    // Delete trades with the dummy hardcoded 100 entry price or linked theta exits
-    const res = db.prepare("DELETE FROM paper_trades WHERE price = 100.0 OR (reasoning LIKE '%Sideways chop%' AND pnl > 0)").run();
-    console.log(`[Database] Purged ${res.changes} corrupted/dummy trades from database.`);
-    return res.changes;
-  }
-
   public static getPaperTrades(limit: number = 150, tier?: string): PaperTradeRecord[] {
     const db = this.initialize();
     if (tier && tier !== "ALL") {
