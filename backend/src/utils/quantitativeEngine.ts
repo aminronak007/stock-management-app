@@ -44,7 +44,7 @@ export class QuantitativeEngine {
     atr: number
   ): MarketRegime {
     if (vix > 20) return "HIGH_VOLATILITY";
-    if (vix < 11) return "LOW_VOLATILITY";
+    if (vix < 10) return "LOW_VOLATILITY";
 
     if (candles5m.length >= NIFTY_OPTIONS_EMA_SLOW) {
       const closes = candles5m.map(c => c.close);
@@ -247,9 +247,15 @@ export class QuantitativeEngine {
       factors.optionsStructure.score += 8;
       factors.optionsStructure.factors.push(`PCR levels supportive for PUT buying (${pcr.toFixed(2)})`);
     }
-    // Static placeholder for strike wise concentration validation
-    factors.optionsStructure.score += 7;
-    factors.optionsStructure.factors.push("Supportive option chain open interest buildup");
+    // OI concentration: award points only when PCR skew is meaningful
+    if ((triggerType === "CALL_BUY" && pcr >= 0.90 && pcr <= 1.25) ||
+        (triggerType === "PUT_BUY" && pcr >= 0.70 && pcr <= 1.10)) {
+      factors.optionsStructure.score += 7;
+      factors.optionsStructure.factors.push(`Option chain OI concentration favourable (PCR=${pcr.toFixed(2)})`);
+    } else if (pcr > 0 && pcr < 5) {
+      factors.optionsStructure.score += 3;
+      factors.optionsStructure.factors.push(`Option chain OI present but skew is non-ideal (PCR=${pcr.toFixed(2)})`);
+    }
 
     // 5. Volatility (10 Points)
     if (vix >= 12 && vix <= 18) {

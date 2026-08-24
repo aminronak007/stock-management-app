@@ -1025,12 +1025,17 @@ export class AdvisoryManager {
       }
     }
 
-    // Theta Exit check: position is open > 12 minutes and sideways.
+    // Theta Exit check: position open too long in sideways chop.
+    // Tier-dependent timeout: high-conviction SNIPER trades get more room to develop.
     // Skip when entrySpot is unknown (restored from DB after restart) to avoid a false chop exit.
-    if (elapsed > 12 * 60 * 1000 && pos.entrySpot > 0) {
+    const thetaTimeoutMs = tier === "SNIPER" ? 25 * 60 * 1000
+                         : tier === "BALANCED" ? 18 * 60 * 1000
+                         : 12 * 60 * 1000;
+    if (elapsed > thetaTimeoutMs && pos.entrySpot > 0) {
       const percentageChange = Math.abs(spotMovementGain / spot) * 100;
       if (percentageChange < 0.15) {
-        this.triggerTierExit(tier, "THETA_EXIT", "Option premium decay warning. Sideways chop > 12 minutes.", timestamp, currentPremiumLtp);
+        const timeoutMins = Math.round(thetaTimeoutMs / 60000);
+        this.triggerTierExit(tier, "THETA_EXIT", `Option premium decay warning. Sideways chop > ${timeoutMins} minutes.`, timestamp, currentPremiumLtp);
         return;
       }
     }
