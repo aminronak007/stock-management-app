@@ -6,6 +6,11 @@ import { ExcelLogger } from "../utils/excelLogger";
 import { QuantitativeEngine } from "../utils/quantitativeEngine";
 import { DatabaseService, SignalTier } from "../utils/database";
 import { TelegramService } from "./telegramService";
+import {
+  getIntradayEmaTrend,
+  isClosedBarVolumeExpanded,
+  orbConfirmationBuffer
+} from "../utils/niftyOptionsSetup";
 
 export interface AdvisorySignal {
   type: "CALL_BUY" | "PUT_BUY" | "HOLD" | "EXIT_PROFIT" | "EXIT_STOP_LOSS" | "THETA_EXIT" | "SQUARE_OFF";
@@ -72,6 +77,7 @@ export class AdvisoryManager {
   private isSignalGeneratedToday: boolean = false;
   private lastBreakoutEvalAt: number = 0;
   private breakoutEvalInflight: boolean = false;
+  private lastSignalBlockReason: string = "";
 
   // 3-Tier Independent Position State Machines:
   // 1. SNIPER (Score >= 75%) -> Official Alert & Optional Real Execution
@@ -125,9 +131,13 @@ export class AdvisoryManager {
     }
   };
 
-  // Public getter for UI backwards-compatibility (returns official SNIPER signal)
+  // Public getter for UI: SNIPER first, then live BALANCED advisory so a valid breakdown is visible
   public get activeSignal(): AdvisorySignal | null {
-    return this.tierPositions.SNIPER.activeSignal;
+    const sniper = this.tierPositions.SNIPER.activeSignal;
+    if (sniper) return sniper;
+    const balanced = this.tierPositions.BALANCED.activeSignal;
+    if (balanced && balanced.type.includes("BUY")) return balanced;
+    return null;
   }
 
   // Risk parameters
@@ -190,6 +200,10 @@ export class AdvisoryManager {
         this.indexCandles = historical5m;
         console.log(`[AdvisoryManager] Initialized ${this.indexCandles.length} Nifty 5-minute historical candles.`);
         this.hydrateOrbFromHistory();
+        this.refreshSessionVwap();
+        if (this.currentVwap > 0) {
+          console.log(`[AdvisoryManager] Session VWAP (today 9:15 IST+): ${this.currentVwap.toFixed(2)}`);
+        }
       }
     } catch (e) {
       console.warn("[AdvisoryManager] Failed to load 5-minute Nifty history. Starting fresh.", e);
@@ -239,6 +253,51 @@ export class AdvisoryManager {
     console.log(
       `[AdvisoryManager] ORB hydrated from history (${orbCandles.length} bars): High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}`
     );
+  }
+
+  /**
+   * Today's NSE cash session bars only (9:15 AM IST onward). Session VWAP must not include prior days.
+   */
+  private getTodaySessionCandles(now: number = Date.now()): Candle[] {
+    const todayIst = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(new Date(now));
+
+    return this.indexCandles.filter((candle) => {
+      const istDate = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).format(new Date(candle.timestamp));
+      if (istDate !== todayIst) return false;
+
+      const istTime = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }).format(new Date(candle.timestamp));
+      const [hStr, mStr] = istTime.split(":");
+      const hours = parseInt(hStr, 10);
+      const minutes = parseInt(mStr, 10);
+      const totalMinutes = hours * 60 + minutes;
+      return totalMinutes >= 9 * 60 + 15 && totalMinutes < 15 * 60 + 30;
+    });
+  }
+
+  private refreshSessionVwap(now: number = Date.now(), fallbackSpot?: number): void {
+    const sessionCandles = this.getTodaySessionCandles(now);
+    if (sessionCandles.length > 0) {
+      this.currentVwap = Indicators.calculateVWAP(sessionCandles);
+      return;
+    }
+    if (fallbackSpot && fallbackSpot > 0) {
+      this.currentVwap = fallbackSpot;
+    }
   }
 
   /**
@@ -309,12 +368,8 @@ export class AdvisoryManager {
         }
       }
       
-      // Calculate true Volume Weighted Average Price (VWAP) for Nifty Index
-      if (this.indexCandles.length > 0) {
-        this.currentVwap = Indicators.calculateVWAP(this.indexCandles);
-      } else {
-        this.currentVwap = tick.ltp;
-      }
+      // Session VWAP: today's 9:15 AM IST bars only (not prior-day history)
+      this.refreshSessionVwap(timestamp, tick.ltp);
       
       // ORB range calculation (first 15 minutes of session: 9:15 - 9:30 AM IST)
       if (hours === 9 && minutes >= 15 && minutes < 30) {
@@ -409,40 +464,32 @@ export class AdvisoryManager {
     }
 
     const isAboveVwap = spot > this.currentVwap;
-
-    // Cheap local filters first — only fetch the option chain on a real ORB candidate
+    const buffer = orbConfirmationBuffer(spot);
     const closePrices = this.indexCandles.map(c => c.close);
-    const ema50List = Indicators.calculateEMA(closePrices, 50);
-    const ema200List = Indicators.calculateEMA(closePrices, 200);
-    const ema50 = ema50List.length > 0 ? ema50List[ema50List.length - 1] : 0;
-    const ema200 = ema200List.length > 0 ? ema200List[ema200List.length - 1] : 0;
-
-    const isTrendBullish = ema50 > 0 && ema200 > 0 ? (spot > ema50 && ema50 > ema200) : true;
-    const isTrendBearish = ema50 > 0 && ema200 > 0 ? (spot < ema50 && ema50 < ema200) : true;
-
-    const volumes = this.indexCandles.map(c => c.volume);
-    const prev5Volumes = volumes.slice(-6, -1); // exclude current bar
-    const avgVolume5 = prev5Volumes.length > 0 ? prev5Volumes.reduce((a, b) => a + b, 0) / prev5Volumes.length : 0;
-    const currentVolume = volumes[volumes.length - 1] || 0;
-    const isVolumeHigh = avgVolume5 > 0 ? currentVolume >= 1.5 * avgVolume5 : true;
+    const { trendBullish: isTrendBullish, trendBearish: isTrendBearish } = getIntradayEmaTrend(closePrices, spot);
 
     let candidate: "CALL_BUY" | "PUT_BUY" | null = null;
     let reasoning = "";
 
-    if (spot > this.orbHigh && isAboveVwap && isTrendBullish && isVolumeHigh) {
+    if (spot > this.orbHigh + buffer && isAboveVwap && isTrendBullish) {
       candidate = "CALL_BUY";
-      reasoning = `Bullish ORB Breakout above ${this.orbHigh.toFixed(2)}.`;
-    } else if (spot < this.orbLow && !isAboveVwap && isTrendBearish && isVolumeHigh) {
+      reasoning = `Bullish ORB breakout above ${this.orbHigh.toFixed(2)} with session VWAP and 9/21 EMA alignment.`;
+    } else if (spot < this.orbLow - buffer && !isAboveVwap && isTrendBearish) {
       candidate = "PUT_BUY";
-      reasoning = `Bearish ORB Breakdown below ${this.orbLow.toFixed(2)}.`;
+      reasoning = `Bearish ORB breakdown below ${this.orbLow.toFixed(2)} with session VWAP and 9/21 EMA alignment.`;
     }
 
     if (!candidate) {
+      this.lastSignalBlockReason = "";
       return;
     }
 
     const chain = await this.broker.getOptionChain("NSE:NIFTY50-INDEX");
-    if (chain.length === 0) return;
+    if (chain.length === 0) {
+      this.lastSignalBlockReason = "Breakdown is valid, but the Fyers option chain is empty so strike premiums cannot be priced.";
+      console.warn(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
+      return;
+    }
 
     let totalPutOi = 0;
     let totalCallOi = 0;
@@ -451,30 +498,36 @@ export class AdvisoryManager {
       totalCallOi += item.call.openInterest;
     });
     const pcr = totalCallOi > 0 ? totalPutOi / totalCallOi : 1.0;
+    const triggerType = candidate;
+    const strikeInterval = 50;
+    let selectedStrike = Math.round(spot / strikeInterval) * strikeInterval;
 
-    let triggerType: "CALL_BUY" | "PUT_BUY" | null = null;
-    if (candidate === "CALL_BUY" && pcr <= 1.35) {
-      triggerType = "CALL_BUY";
-    } else if (candidate === "PUT_BUY" && pcr >= 0.60) {
-      triggerType = "PUT_BUY";
-    }
+    const legFor = (strike: number) => {
+      const row = chain.find(item => item.strikePrice === strike);
+      return triggerType === "CALL_BUY" ? row?.call : row?.put;
+    };
 
-    if (triggerType) {
-      // Dynamic strike interval (100 for BankNifty/Sensex, 50 for Nifty)
-      const strikeInterval = 50;
-      let selectedStrike = Math.round(spot / strikeInterval) * strikeInterval;
-      
-      // Retrieve ATM option chain details
-      const atmChain = chain.find(item => item.strikePrice === selectedStrike);
-      const optionLeg = triggerType === "CALL_BUY" ? atmChain?.call : atmChain?.put;
-      const optionLtp = optionLeg?.ltp && optionLeg.ltp > 0 ? optionLeg.ltp : 0;
-
-      if (!optionLtp) {
-        console.warn(
-          `[AdvisoryManager] Missing live premium for strike ${selectedStrike} (${triggerType}). Skipping signal.`
-        );
-        return;
+    let atmChain = chain.find(item => item.strikePrice === selectedStrike);
+    let optionLeg = legFor(selectedStrike);
+    if (!optionLeg?.ltp || optionLeg.ltp <= 0) {
+      const nearest = [...chain].sort((a, b) => Math.abs(a.strikePrice - spot) - Math.abs(b.strikePrice - spot));
+      for (const row of nearest) {
+        const leg = triggerType === "CALL_BUY" ? row.call : row.put;
+        if (leg?.ltp && leg.ltp > 0) {
+          selectedStrike = row.strikePrice;
+          atmChain = row;
+          optionLeg = leg;
+          break;
+        }
       }
+    }
+    const optionLtp = optionLeg?.ltp && optionLeg.ltp > 0 ? optionLeg.ltp : 0;
+
+    if (!optionLtp) {
+      this.lastSignalBlockReason = `Breakdown is valid, but ATM ${triggerType === "PUT_BUY" ? "PE" : "CE"} premium is missing on the option chain.`;
+      console.warn(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
+      return;
+    }
 
       // Calculate dynamic expiry days from actual chain data
       const getDaysToExpiry = (expiryDateStr?: string): number => {
@@ -567,6 +620,10 @@ export class AdvisoryManager {
 
       // Strict rejection: zero trade on detected false breakout or score < 45
       if (scoreCard.isFalseBreakout || scoreCard.totalScore < 45) {
+        this.lastSignalBlockReason = scoreCard.isFalseBreakout
+          ? "Breakdown printed, then price returned inside the opening range (false breakout)."
+          : `Breakdown is valid, but confluence is ${scoreCard.totalScore}/100 (need at least 45).`;
+        console.warn(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
         return;
       }
 
@@ -599,10 +656,22 @@ export class AdvisoryManager {
       const targetPos = this.tierPositions[tier];
 
       // Check if this specific tier already has an active position or reached daily limits
-      if (targetPos.activeSignal) return;
-      if (targetPos.dailyTradesCount >= this.dailyMaxTrades) return;
-      if (targetPos.dailyProfitLoss <= this.dailyLossLimit) return;
-      if (timestamp < targetPos.stoppedCooldownUntil) return;
+      if (targetPos.activeSignal) {
+        this.lastSignalBlockReason = `A ${tier} position is already open. New entries on this tier are paused.`;
+        return;
+      }
+      if (targetPos.dailyTradesCount >= this.dailyMaxTrades) {
+        this.lastSignalBlockReason = `${tier} daily trade cap reached.`;
+        return;
+      }
+      if (targetPos.dailyProfitLoss <= this.dailyLossLimit) {
+        this.lastSignalBlockReason = `${tier} daily loss limit reached.`;
+        return;
+      }
+      if (timestamp < targetPos.stoppedCooldownUntil) {
+        this.lastSignalBlockReason = `${tier} is in cooldown after a stop.`;
+        return;
+      }
 
       const formattedReasoning = `[${tier} TIER] ${reasoning} Score: ${scoreCard.totalScore}/100. [Greeks Delta: ${delta.toFixed(2)}, SL=${scaledStopLoss.toFixed(1)}, T1=+${scaledTarget1.toFixed(1)}, T2=+${scaledTarget2.toFixed(1)}]`;
 
@@ -628,6 +697,7 @@ export class AdvisoryManager {
       targetPos.isTarget1Locked = false;
       targetPos.entryTime = timestamp;
       this.isSignalGeneratedToday = true;
+      this.lastSignalBlockReason = "";
 
       const optionSymbol = atmChain 
         ? (triggerType === "CALL_BUY" ? atmChain.call.symbol : atmChain.put.symbol)
@@ -693,17 +763,20 @@ export class AdvisoryManager {
         tier
       );
 
-      // Only notify UI and sound audio alarms for official SNIPER signals
-      if (tier === "SNIPER") {
+      // SNIPER: official alert + optional live routing. BALANCED: show on the advisory UI.
+      if (tier === "SNIPER" || tier === "BALANCED") {
         this.onSignalCallback(signalObj);
-        TelegramService.sendSignalAlert(signalObj).catch(err => {
-          console.warn("[AdvisoryManager] Failed to send Telegram signal alert:", err?.message || err);
-        });
-        console.log(`[AdvisoryManager] 🎯 [SNIPER TIER] OFFICIAL TRADE SIGNAL: ${triggerType} @ Strike ${selectedStrike}. Confluence: ${scoreCard.totalScore}/100.`);
+        if (tier === "SNIPER") {
+          TelegramService.sendSignalAlert(signalObj).catch(err => {
+            console.warn("[AdvisoryManager] Failed to send Telegram signal alert:", err?.message || err);
+          });
+          console.log(`[AdvisoryManager] 🎯 [SNIPER TIER] OFFICIAL TRADE SIGNAL: ${triggerType} @ Strike ${selectedStrike}. Confluence: ${scoreCard.totalScore}/100.`);
+        } else {
+          console.log(`[AdvisoryManager] 📊 [BALANCED TIER] Advisory signal published: ${triggerType} @ Strike ${selectedStrike}. Score: ${scoreCard.totalScore}/100.`);
+        }
       } else {
         console.log(`[AdvisoryManager] 📊 [${tier} TIER] Paper Trade initiated in background: ${triggerType} @ Strike ${selectedStrike}. Score: ${scoreCard.totalScore}/100.`);
       }
-    }
   }
 
   /**
@@ -946,6 +1019,7 @@ export class AdvisoryManager {
 
     const hasOrb = this.orbHigh > 0 && this.orbLow > 0;
     const spot = this.indexSpotPrice;
+    this.refreshSessionVwap(timestamp, spot);
     const isLunchBlock = totalMinutes >= 690 && totalMinutes <= 810;
     const insideCpr = !!(this.cpr && spot > 0 && CPR.isPriceInsideCPR(spot, this.cpr));
 
@@ -959,25 +1033,16 @@ export class AdvisoryManager {
     else if (hours < 9 || (hours === 9 && minutes < 15)) sessionPhase = "PRE_OPEN";
 
     const closePrices = this.indexCandles.map((c) => c.close);
-    const ema50List = Indicators.calculateEMA(closePrices, 50);
-    const ema200List = Indicators.calculateEMA(closePrices, 200);
-    const ema50 = ema50List.length > 0 ? ema50List[ema50List.length - 1] : 0;
-    const ema200 = ema200List.length > 0 ? ema200List[ema200List.length - 1] : 0;
-    const trendBullish = ema50 > 0 && ema200 > 0 ? spot > ema50 && ema50 > ema200 : true;
-    const trendBearish = ema50 > 0 && ema200 > 0 ? spot < ema50 && ema50 < ema200 : true;
-
-    const volumes = this.indexCandles.map((c) => c.volume);
-    const prev5Volumes = volumes.slice(-6, -1);
-    const avgVolume5 = prev5Volumes.length > 0 ? prev5Volumes.reduce((a, b) => a + b, 0) / prev5Volumes.length : 0;
-    const currentVolume = volumes[volumes.length - 1] || 0;
-    const volumeHigh = avgVolume5 > 0 ? currentVolume >= 1.5 * avgVolume5 : true;
+    const { trendBullish, trendBearish } = getIntradayEmaTrend(closePrices, spot);
+    const volumeHigh = isClosedBarVolumeExpanded(this.indexCandles.map((c) => c.volume));
     const aboveVwap = spot > this.currentVwap;
+    const buffer = orbConfirmationBuffer(spot);
 
     const ptsToCall = hasOrb ? this.orbHigh - spot : 0;
     const ptsToPut = hasOrb ? spot - this.orbLow : 0;
     const insideOrb = hasOrb && spot <= this.orbHigh && spot >= this.orbLow;
-    const brokeCall = hasOrb && spot > this.orbHigh;
-    const brokePut = hasOrb && spot < this.orbLow;
+    const brokeCall = hasOrb && spot > this.orbHigh + buffer;
+    const brokePut = hasOrb && spot < this.orbLow - buffer;
 
     let waitingReason = "Waiting for market data.";
     if (this.tierPositions.SNIPER.activeSignal?.type.includes("BUY")) {
@@ -996,20 +1061,21 @@ export class AdvisoryManager {
       waitingReason = "Spot is inside CPR. Breakout entries are withheld until price leaves the pivot range.";
     } else if (insideOrb) {
       waitingReason = `Nifty is inside the opening range. CALL needs a break above ${this.orbHigh.toFixed(2)}; PUT needs a break below ${this.orbLow.toFixed(2)}.`;
+    } else if (hasOrb && spot > this.orbHigh && !brokeCall) {
+      waitingReason = `ORB high tagged. CALL needs a confirmed hold ${buffer.toFixed(1)} pts above ${this.orbHigh.toFixed(2)}.`;
+    } else if (hasOrb && spot < this.orbLow && !brokePut) {
+      waitingReason = `ORB low tagged. PUT needs a confirmed hold ${buffer.toFixed(1)} pts below ${this.orbLow.toFixed(2)}.`;
     } else if (brokeCall && !aboveVwap) {
-      waitingReason = `ORB high is broken, but spot is still below VWAP (${this.currentVwap.toFixed(2)}). CALL is blocked.`;
+      waitingReason = `ORB high is broken, but spot is still below session VWAP (${this.currentVwap.toFixed(2)}). CALL is blocked.`;
     } else if (brokeCall && !trendBullish) {
-      waitingReason = "ORB high is broken, but 5-minute EMA trend is not bullish. CALL is blocked.";
-    } else if (brokeCall && !volumeHigh) {
-      waitingReason = "ORB high is broken, but breakout volume is below 1.5× the last five bars. CALL is blocked.";
+      waitingReason = "ORB high is broken, but 5-minute 9/21 EMA is not bullish. CALL is blocked.";
     } else if (brokePut && aboveVwap) {
-      waitingReason = `ORB low is broken, but spot is still above VWAP (${this.currentVwap.toFixed(2)}). PUT is blocked.`;
+      waitingReason = `ORB low is broken, but spot is still above session VWAP (${this.currentVwap.toFixed(2)}). PUT is blocked.`;
     } else if (brokePut && !trendBearish) {
-      waitingReason = "ORB low is broken, but 5-minute EMA trend is not bearish. PUT is blocked.";
-    } else if (brokePut && !volumeHigh) {
-      waitingReason = "ORB low is broken, but breakdown volume is below 1.5× the last five bars. PUT is blocked.";
+      waitingReason = "ORB low is broken, but 5-minute 9/21 EMA is not bearish. PUT is blocked.";
     } else if (brokeCall || brokePut) {
-      waitingReason = "ORB is broken and local filters passed. Waiting on PCR / confluence score before publishing targets.";
+      waitingReason = this.lastSignalBlockReason
+        || "ORB is broken and local filters passed. Pricing the option chain for strike and targets.";
     }
 
     return {
@@ -1025,7 +1091,7 @@ export class AdvisoryManager {
       isLunchBlock,
       sessionPhase,
       waitingReason,
-      hasActiveSignal: !!this.tierPositions.SNIPER.activeSignal,
+      hasActiveSignal: !!(this.tierPositions.SNIPER.activeSignal || this.tierPositions.BALANCED.activeSignal),
       filters: {
         hasOrb,
         aboveVwap,

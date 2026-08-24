@@ -1,5 +1,5 @@
-import { Indicators } from "./indicators";
 import { CPRValues } from "./cpr";
+import { getIntradayEmaTrend, isClosedBarVolumeExpanded, NIFTY_OPTIONS_EMA_SLOW } from "./niftyOptionsSetup";
 
 export type MarketRegime = 
   | "TREND_UP"
@@ -45,22 +45,16 @@ export class QuantitativeEngine {
     if (vix > 20) return "HIGH_VOLATILITY";
     if (vix < 11) return "LOW_VOLATILITY";
 
-    if (candles5m.length >= 50) {
+    if (candles5m.length >= NIFTY_OPTIONS_EMA_SLOW) {
       const closes = candles5m.map(c => c.close);
-      const ema50List = Indicators.calculateEMA(closes, 50);
-      const ema200List = Indicators.calculateEMA(closes, 200);
+      const { emaFast, emaSlow, ready } = getIntradayEmaTrend(closes, spot);
       
-      if (ema50List.length > 0 && ema200List.length > 0) {
-        const ema50 = ema50List[ema50List.length - 1];
-        const ema200 = ema200List[ema200List.length - 1];
-        
-        // If EMAs are extremely close (within 0.1% of spot), flag RANGE
-        const emaDiff = Math.abs(ema50 - ema200) / spot * 100;
-        if (emaDiff < 0.12) return "RANGE";
+      if (ready) {
+        const emaDiff = Math.abs(emaFast - emaSlow) / spot * 100;
+        if (emaDiff < 0.08) return "RANGE";
 
-        // Check strong trending alignment
-        if (spot > ema50 && ema50 > ema200) return "TREND_UP";
-        if (spot < ema50 && ema50 < ema200) return "TREND_DOWN";
+        if (spot > emaFast && emaFast > emaSlow) return "TREND_UP";
+        if (spot < emaFast && emaFast < emaSlow) return "TREND_DOWN";
       }
     }
 
@@ -89,30 +83,8 @@ export class QuantitativeEngine {
     // 1. Immediate rejection: breakout but price returned inside ORB
     if (triggerType === "CALL_BUY" && spot <= orbHigh) return true;
     if (triggerType === "PUT_BUY" && spot >= orbLow) return true;
-
-    // 2. Heavyweight disagreement: If major active heavyweights point opposite to breakout direction
-    let conformingHeavyweights = 0;
-    let validHeavyweightsCount = 0;
-    Object.keys(heavyweightsLtp).forEach(sym => {
-      const ltp = heavyweightsLtp[sym] || 0;
-      const vwap = heavyweightsVwap[sym] || 0;
-      if (ltp > 0 && vwap > 0) {
-        validHeavyweightsCount++;
-        if (triggerType === "CALL_BUY" && ltp > vwap) conformingHeavyweights++;
-        if (triggerType === "PUT_BUY" && ltp < vwap) conformingHeavyweights++;
-      }
-    });
-
-    if (validHeavyweightsCount >= 2 && conformingHeavyweights === 0) {
-      // 100% active heavyweight disagreement
-      return true;
-    }
-
-    // 3. Volumeless breakout: volume is less than 0.7x average previous volume
-    if (avgVolume5 > 0 && currentVolume > 0 && currentVolume < 0.7 * avgVolume5) {
-      return true;
-    }
-
+    // Index often leads stocks by several minutes. Heavyweight lag and the still-forming
+    // 5m bar are confluence penalties, not a veto of a real ORB + VWAP + 9/21 break.
     return false;
   }
 
@@ -172,17 +144,14 @@ export class QuantitativeEngine {
       avgVolume5
     );
 
-    // Multi-timeframe trend confirmation checks
+    // 5m 9/21 trend confirmation (Nifty options), not swing 50/200
     let isCounterTrend = false;
-    if (candles5m.length >= 50) {
+    if (candles5m.length >= NIFTY_OPTIONS_EMA_SLOW) {
       const closes = candles5m.map(c => c.close);
-      const ema50List = Indicators.calculateEMA(closes, 50);
-      const ema200List = Indicators.calculateEMA(closes, 200);
-      if (ema50List.length > 0 && ema200List.length > 0) {
-        const ema50 = ema50List[ema50List.length - 1];
-        const ema200 = ema200List[ema200List.length - 1];
-        if (triggerType === "CALL_BUY" && (spot < ema50 || ema50 < ema200)) isCounterTrend = true;
-        if (triggerType === "PUT_BUY" && (spot > ema50 || ema50 > ema200)) isCounterTrend = true;
+      const { emaFast, emaSlow, ready } = getIntradayEmaTrend(closes, spot);
+      if (ready) {
+        if (triggerType === "CALL_BUY" && (spot < emaFast || emaFast < emaSlow)) isCounterTrend = true;
+        if (triggerType === "PUT_BUY" && (spot > emaFast || emaFast > emaSlow)) isCounterTrend = true;
       }
     }
 
@@ -224,12 +193,13 @@ export class QuantitativeEngine {
     const isAboveVwap = spot > currentVwap;
     if ((triggerType === "CALL_BUY" && isAboveVwap) || (triggerType === "PUT_BUY" && !isAboveVwap)) {
       factors.vwapMomentum.score += 8;
-      factors.vwapMomentum.factors.push("Spot aligned with daily VWAP direction");
+      factors.vwapMomentum.factors.push("Spot aligned with session VWAP direction");
     }
-    if (currentVolume >= 1.3 * avgVolume5) {
+    const volumeExpanded = isClosedBarVolumeExpanded(candles5m.map(c => c.volume));
+    if (volumeExpanded) {
       factors.vwapMomentum.score += 7;
-      factors.vwapMomentum.factors.push(`Volume breakout confirmed (current Vol ${currentVolume.toFixed(0)} vs avg ${avgVolume5.toFixed(0)})`);
-    } else if (currentVolume >= 1.0 * avgVolume5) {
+      factors.vwapMomentum.factors.push("Closed-bar volume expanded vs recent 5m average (1.2×)");
+    } else if (currentVolume >= 1.0 * avgVolume5 && avgVolume5 > 0) {
       factors.vwapMomentum.score += 4;
       factors.vwapMomentum.factors.push("Volume above baseline threshold");
     }
@@ -353,7 +323,7 @@ export class QuantitativeEngine {
     // Build human readable explanation lists
     explanation.push(`Regime Classification: ${regime}`);
     explanation.push(`Calculated Signal Confluence: ${totalScore}/100 [Quality: ${qualityLabel.replace(/_/g, " ")}]`);
-    if (isCounterTrend) explanation.push("Trend context: Price moving against higher timeframe EMAs");
+    if (isCounterTrend) explanation.push("Trend context: Price moving against 5-minute 9/21 EMA");
 
     return {
       totalScore,

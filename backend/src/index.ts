@@ -241,7 +241,8 @@ async function main() {
         sl: signal.stopLossPrice ? `₹${signal.stopLossPrice.toFixed(2)}` : "₹--",
         t1: signal.targetPrice1 ? `₹${signal.targetPrice1.toFixed(2)}` : "₹--",
         t2: signal.targetPrice2 ? `₹${signal.targetPrice2.toFixed(2)}` : "₹--",
-        reasoning: signal.reasoning
+        reasoning: signal.reasoning,
+        scoreCard: signal.scoreCard
       }
     });
   });

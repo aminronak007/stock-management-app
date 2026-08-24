@@ -3,6 +3,7 @@ import { QuantitativeEngine } from "../utils/quantitativeEngine";
 import { CPR, CPRValues } from "../utils/cpr";
 import { Indicators } from "../utils/indicators";
 import { Greeks } from "../utils/greeks";
+import { getIntradayEmaTrend, orbConfirmationBuffer } from "../utils/niftyOptionsSetup";
 
 export interface BacktestTrade {
   id: number;
@@ -127,6 +128,8 @@ export class Backtester {
     let currentDayClose = 0;
     let calculatedDailyCpr: CPRValues | null = null;
 
+    let sessionTypicalVolume = 0;
+    let sessionVolume = 0;
     const feedCandles: Candle[] = [];
 
     for (let i = 0; i < activeCandlesList.length; i++) {
@@ -137,12 +140,15 @@ export class Backtester {
       const hours = barTime.getHours();
       const minutes = barTime.getMinutes();
       const currentDateStr = barTime.toDateString();
+      const totalMinutes = hours * 60 + minutes;
 
       // Reset ORB boundaries and roll CPR on new session morning
       if (currentDateStr !== lastDateStr) {
         orbHigh = 0;
         orbLow = 0;
         isOrbActive = false;
+        sessionTypicalVolume = 0;
+        sessionVolume = 0;
         
         if (currentDayHigh > 0 && currentDayLow > 0) {
           prevDayHigh = currentDayHigh;
@@ -173,8 +179,15 @@ export class Backtester {
         }
       }
 
-      // Evaluate breakout triggers post 9:30 AM
-      if ((hours === 9 && minutes >= 30) || hours > 9) {
+      if (totalMinutes >= 9 * 60 + 15 && totalMinutes < 15 * 60 + 30) {
+        const typical = (currentBar.high + currentBar.low + currentBar.close) / 3;
+        const vol = currentBar.volume > 0 ? currentBar.volume : 1;
+        sessionTypicalVolume += typical * vol;
+        sessionVolume += vol;
+      }
+
+      // Evaluate breakout triggers post 9:30 AM (skip lunch 11:30–13:30 and 15:15 square-off)
+      if (((hours === 9 && minutes >= 30) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) && !(totalMinutes >= 690 && totalMinutes <= 810)) {
         isOrbActive = false;
         
         // Evaluate setup if no active trade
@@ -185,19 +198,14 @@ export class Backtester {
           let triggerType: "CALL_BUY" | "PUT_BUY" | null = null;
           
           const closePrices = feedCandles.map(c => c.close);
-          const ema50List = Indicators.calculateEMA(closePrices, 50);
-          const ema200List = Indicators.calculateEMA(closePrices, 200);
-          const ema50 = ema50List.length > 0 ? ema50List[ema50List.length - 1] : 0;
-          const ema200 = ema200List.length > 0 ? ema200List[ema200List.length - 1] : 0;
-          
-          const isTrendBullish = ema50 > 0 && ema200 > 0 ? (currentBar.close > ema50 && ema50 > ema200) : true;
-          const isTrendBearish = ema50 > 0 && ema200 > 0 ? (currentBar.close < ema50 && ema50 < ema200) : true;
+          const { trendBullish: isTrendBullish, trendBearish: isTrendBearish } = getIntradayEmaTrend(closePrices, currentBar.close);
+          const buffer = orbConfirmationBuffer(currentBar.close);
+          const currentVwap = sessionVolume > 0 ? sessionTypicalVolume / sessionVolume : currentBar.close;
+          const isAboveVwap = currentBar.close > currentVwap;
 
-          const currentVwap = currentBar.close - 2.5; // proxy
-
-          if (currentBar.close > orbHigh && isTrendBullish) {
+          if (currentBar.close > orbHigh + buffer && isTrendBullish && isAboveVwap) {
             triggerType = "CALL_BUY";
-          } else if (currentBar.close < orbLow && isTrendBearish) {
+          } else if (currentBar.close < orbLow - buffer && isTrendBearish && !isAboveVwap) {
             triggerType = "PUT_BUY";
           }
 

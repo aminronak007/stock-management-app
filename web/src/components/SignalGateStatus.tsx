@@ -108,9 +108,9 @@ export const SignalGateStatus: React.FC<SignalGateStatusProps> = ({
         <div className="flex flex-wrap gap-1.5">
           {[
             { on: status.filters.aboveVwap, label: "Above VWAP" },
-            { on: status.filters.trendBullish, label: "Bullish EMA" },
-            { on: status.filters.trendBearish, label: "Bearish EMA" },
-            { on: status.filters.volumeHigh, label: "Volume 1.5x" },
+            { on: status.filters.trendBullish, label: "Bullish 9/21" },
+            { on: status.filters.trendBearish, label: "Bearish 9/21" },
+            { on: status.filters.volumeHigh, label: "Volume 1.2x" },
             { on: !status.insideCpr, label: "Outside CPR" },
             { on: !status.isLunchBlock, label: "Session open" }
           ].map((chip) => (
