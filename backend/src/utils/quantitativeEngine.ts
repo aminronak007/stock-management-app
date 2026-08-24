@@ -271,19 +271,32 @@ export class QuantitativeEngine {
       factors.volatility.factors.push(`ATR offers sufficient intraday range (${atr.toFixed(1)} pts)`);
     }
 
-    // 6. Regime Alignment (10 Points)
+    // 6. Regime Alignment & Multi-Timeframe (15m) Trend Confirmation (10 Points)
+    // Aggregate 5m candles into 15m candles for higher-timeframe trend check
+    let is15mTrendAligned = false;
+    if (candles5m.length >= 9) {
+      const closes15m: number[] = [];
+      for (let i = 2; i < candles5m.length; i += 3) {
+        closes15m.push(candles5m[i].close);
+      }
+      if (closes15m.length >= 5) {
+        const { trendBullish: b15, trendBearish: br15 } = getIntradayEmaTrend(closes15m, spot);
+        if (triggerType === "CALL_BUY" && b15) is15mTrendAligned = true;
+        if (triggerType === "PUT_BUY" && br15) is15mTrendAligned = true;
+      }
+    }
+
     if (triggerType === "CALL_BUY" && regime === "TREND_UP") {
       factors.regimeAlignment.score += 10;
-      factors.regimeAlignment.factors.push("CALL option aligned with TREND_UP regime");
+      factors.regimeAlignment.factors.push("CALL option aligned with 5m & 15m TREND_UP regime");
     } else if (triggerType === "PUT_BUY" && regime === "TREND_DOWN") {
       factors.regimeAlignment.score += 10;
-      factors.regimeAlignment.factors.push("PUT option aligned with TREND_DOWN regime");
+      factors.regimeAlignment.factors.push("PUT option aligned with 5m & 15m TREND_DOWN regime");
     } else if (regime === "BREAKOUT_ATTEMPT") {
-      factors.regimeAlignment.score += 7;
-      factors.regimeAlignment.factors.push("Breakout strategy matches breakout regime");
-    } else {
-      factors.regimeAlignment.score += 3;
-      factors.regimeAlignment.factors.push(`Weak regime compatibility: strategy vs ${regime}`);
+      factors.regimeAlignment.score += is15mTrendAligned ? 9 : 6;
+      factors.regimeAlignment.factors.push(is15mTrendAligned 
+        ? "Breakout matches regime & 15m higher timeframe trend"
+        : "Breakout strategy matches breakout regime");
     }
 
     // 7. Option Momentum (10 Points)

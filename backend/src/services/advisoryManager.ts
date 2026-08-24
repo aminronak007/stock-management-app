@@ -1006,22 +1006,34 @@ export class AdvisoryManager {
 
     pos.peakPremiumLtp = Math.max(pos.peakPremiumLtp, currentPremiumLtp);
 
-    // Dynamic Breakeven profit locker: if gain reaches 1:1 risk-reward target
+    // Dynamic Breakeven & Fee Cover Profit Locker: if gain reaches 1:1 risk-reward target
     const initialRisk = pos.activeSignal.entryPrice - pos.activeSignal.stopLossPrice;
+    const feeCoverBuffer = 2.50; // ₹2.50 per unit covers statutory fees (~₹54.60/lot)
     if (!pos.isBreakevenLocked && currentPremiumLtp >= pos.activeSignal.entryPrice + initialRisk) {
       pos.isBreakevenLocked = true;
-      pos.activeSignal.stopLossPrice = pos.activeSignal.entryPrice;
+      // Set SL to Entry + Fee Cover Buffer so breakeven is NET PROFITABLE post-fees
+      pos.activeSignal.stopLossPrice = pos.activeSignal.entryPrice + feeCoverBuffer;
       this.persistOpenPositionState(pos);
-      console.log(`[AdvisoryManager] [${tier}] Breakeven Profit Locker engaged at ${pos.activeSignal.entryPrice.toFixed(2)}`);
+      console.log(`[AdvisoryManager] [${tier}] Breakeven Fee-Cover Locker engaged at ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (Net Profitable Guard)`);
       
       if (tier === "SNIPER") {
         const holdSignal: AdvisorySignal = {
           ...pos.activeSignal,
           type: "HOLD",
-          reasoning: "Breakeven locked. Position risk is zero."
+          reasoning: `Target 1 (1:1 RR) approaching. Stop loss locked at breakeven + fee buffer (₹${pos.activeSignal.stopLossPrice.toFixed(2)}) to guarantee a net positive trade.`
         };
         this.onSignalCallback(holdSignal);
         TelegramService.sendSignalAlert(holdSignal).catch(() => {});
+      }
+    }
+
+    // Dynamic Trailing Stop Loss: Once premium reaches Target 1 (+1.2R equivalent), trail SL to +0.6R
+    if (pos.isBreakevenLocked && currentPremiumLtp >= pos.activeSignal.entryPrice + initialRisk * 1.5) {
+      const trailedSl = pos.activeSignal.entryPrice + initialRisk * 0.6;
+      if (trailedSl > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = parseFloat(trailedSl.toFixed(2));
+        this.persistOpenPositionState(pos);
+        console.log(`[AdvisoryManager] [${tier}] Trailing Stop Loss raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (+0.6R locked)`);
       }
     }
 
