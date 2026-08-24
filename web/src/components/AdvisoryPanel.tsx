@@ -2,6 +2,12 @@
 
 import React from "react";
 
+interface ConfluenceBreakdown {
+  score: number;
+  max: number;
+  factors: string[];
+}
+
 interface SignalData {
   type: string;
   strike: string;
@@ -10,6 +16,24 @@ interface SignalData {
   t1: string;
   t2: string;
   reasoning: string;
+  scoreCard?: {
+    totalScore: number;
+    qualityLabel: string;
+    regime: string;
+    isFalseBreakout: boolean;
+    isCounterTrend: boolean;
+    factors: {
+      marketStructure: ConfluenceBreakdown;
+      vwapMomentum: ConfluenceBreakdown;
+      heavyweights: ConfluenceBreakdown;
+      optionsStructure: ConfluenceBreakdown;
+      volatility: ConfluenceBreakdown;
+      regimeAlignment: ConfluenceBreakdown;
+      optionMomentum: ConfluenceBreakdown;
+      riskReward: ConfluenceBreakdown;
+    };
+    explanation: string[];
+  };
 }
 
 interface AdvisoryPanelProps {
@@ -43,12 +67,13 @@ export const AdvisoryPanel: React.FC<AdvisoryPanelProps> = ({
   const slVal = signal ? signal.sl : "₹--";
   const t1Val = signal ? signal.t1 : "₹--";
   const t2Val = signal ? signal.t2 : "₹--";
+  const scoreCard = signal?.scoreCard;
 
   return (
-    <div className="advisory-grid grid grid-cols-1 lg:grid-cols-2 gap-6 w-full">
-      
+    <div className="advisory-grid flex flex-col gap-6 w-full">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
       {/* 1. Active Signal Card */}
-      <div className="card signal-card">
+      <div className="card signal-card h-full">
         <div className="card-header flex justify-between items-center mb-4 pb-3 border-b border-white/5">
           <h3 className="font-outfit text-sm font-semibold tracking-wider">ACTIVE TRADE SIGNAL</h3>
           <span id="signal-state-badge" className={getBadgeClass(signalType)}>
@@ -94,7 +119,73 @@ export const AdvisoryPanel: React.FC<AdvisoryPanelProps> = ({
         )}
       </div>
 
-      {/* 2. System Terminal Logs Card */}
+      {/* 2. Confluence Scoring Engine */}
+      <div className="card p-5 rounded-xl border border-white/5 bg-[#12141a]/90 relative h-full flex flex-col justify-between">
+        <div>
+          <span className="text-[10px] text-indigo-400 font-semibold tracking-wider uppercase">Confluence Scoring Engine</span>
+
+          <div className="flex justify-between items-center mt-3">
+            <div className="flex flex-col">
+              <span className="text-3xl font-extrabold text-white font-outfit">
+                {scoreCard ? scoreCard.totalScore : "0"}
+                <span className="text-sm font-normal text-gray-500">/100</span>
+              </span>
+              <span className={`text-[10px] font-bold mt-1 tracking-wide uppercase px-2 py-0.5 rounded border inline-block ${scoreCard?.qualityLabel === "VERY_HIGH_QUALITY" ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" :
+                  scoreCard?.qualityLabel === "HIGH_QUALITY" ? "bg-indigo-500/10 border-indigo-500/20 text-indigo-400" :
+                    scoreCard?.qualityLabel === "WEAK_SETUP" ? "bg-amber-500/10 border-amber-500/20 text-amber-400" :
+                      "bg-rose-500/10 border-rose-500/20 text-rose-400"
+                }`}>
+                {scoreCard ? scoreCard.qualityLabel.replace(/_/g, " ") : "NO SETUP"}
+              </span>
+            </div>
+
+            <div className="flex flex-col items-end text-xs text-gray-400">
+              <div className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full ${scoreCard?.isFalseBreakout ? "bg-rose-500" : "bg-emerald-500"}`}></span>
+                <span>False Breakout: {scoreCard?.isFalseBreakout ? "DETECTED" : "CLEAR"}</span>
+              </div>
+              <div className="flex items-center gap-1.5 mt-1">
+                <span className={`w-2 h-2 rounded-full ${scoreCard?.isCounterTrend ? "bg-amber-500" : "bg-emerald-500"}`}></span>
+                <span>Counter Trend: {scoreCard?.isCounterTrend ? "YES" : "NO"}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-col gap-2">
+            {scoreCard ? (
+              <>
+                <div className="flex justify-between items-center text-xs border-b border-white/5 pb-1.5">
+                  <span className="text-gray-400">Market Structure</span>
+                  <span className="font-semibold text-white">{scoreCard.factors.marketStructure.score}/{scoreCard.factors.marketStructure.max}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs border-b border-white/5 pb-1.5">
+                  <span className="text-gray-400">VWAP & Momentum</span>
+                  <span className="font-semibold text-white">{scoreCard.factors.vwapMomentum.score}/{scoreCard.factors.vwapMomentum.max}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs border-b border-white/5 pb-1.5">
+                  <span className="text-gray-400">Heavyweights Alignment</span>
+                  <span className="font-semibold text-white">{scoreCard.factors.heavyweights.score}/{scoreCard.factors.heavyweights.max}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs border-b border-white/5 pb-1.5">
+                  <span className="text-gray-400">Options Structure & PCR</span>
+                  <span className="font-semibold text-white">{scoreCard.factors.optionsStructure.score}/{scoreCard.factors.optionsStructure.max}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-gray-400">Risk/Reward Validation</span>
+                  <span className="font-semibold text-white">{scoreCard.factors.riskReward.score}/{scoreCard.factors.riskReward.max}</span>
+                </div>
+              </>
+            ) : (
+              <div className="text-center py-6 text-gray-600 text-xs leading-relaxed">
+                No active advisory signal.<br />Monitoring Nifty 50 spot breakout conditions...
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      </div>
+
+      {/* 3. System Terminal Logs Card */}
       <div className="card logs-card">
         <div className="card-header flex justify-between items-center mb-4 pb-3 border-b border-white/5">
           <h3 className="font-outfit text-sm font-semibold tracking-wider">SYSTEM CONSOLE LOGS</h3>

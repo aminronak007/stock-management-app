@@ -543,12 +543,10 @@ export default function Home() {
                   activeSignal={activeSignal}
                   engineStatus={engineStatus}
                 />
-                <div className="border-t border-white/5 pt-4">
-                  <AdvisoryPanel 
-                    signal={activeSignal} 
-                    logs={logs}
-                  />
-                </div>
+                <AdvisoryPanel 
+                  signal={activeSignal} 
+                  logs={logs}
+                />
               </div>
             ) : activeTab === "database" ? (
               <DatabaseViewer />
