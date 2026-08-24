@@ -107,7 +107,8 @@ async function main() {
         activeSignal: advisory.activeSignal,
         enableSimulator: process.env.ENABLE_SIMULATOR === "true",
         autoExecution: process.env.AUTO_ORDER_EXECUTION === "true",
-        brokerAuthenticated: (broker as any).useLiveApi === true
+        brokerAuthenticated: (broker as any).useLiveApi === true,
+        engineStatus: advisory.getEngineStatus()
       }
     }));
 
@@ -404,6 +405,10 @@ async function main() {
     });
   });
 
+  app.get("/api/engine-status", (req, res) => {
+    res.json(advisory.getEngineStatus());
+  });
+
   app.get("/api/session", (req, res) => {
     const session = DatabaseService.getSession("FYERS");
     res.json({
@@ -425,7 +430,8 @@ async function main() {
         activeSignal: advisory.activeSignal,
         enableSimulator: process.env.ENABLE_SIMULATOR === "true",
         autoExecution: process.env.AUTO_ORDER_EXECUTION === "true",
-        brokerAuthenticated: false
+        brokerAuthenticated: false,
+        engineStatus: advisory.getEngineStatus()
       }
     });
     res.json({ success: true, message: "Logged out from broker." });
@@ -646,6 +652,14 @@ async function main() {
   resolveHistoricalClosePrices().catch((err: any) => {
     console.warn("[Broker] Error during initial historical resolution:", err?.message || err);
   });
+
+  // Push live ORB / wait-reason status so the UI can explain missing signals
+  setInterval(() => {
+    broadcast({
+      type: "ENGINE_STATUS",
+      payload: advisory.getEngineStatus()
+    });
+  }, 2000);
 
   const port = process.env.PORT || 8080;
   server.listen(port, () => {

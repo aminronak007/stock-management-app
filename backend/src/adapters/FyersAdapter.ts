@@ -8,7 +8,12 @@ export class FyersAdapter implements IBrokerAdapter {
   private tickCallbacks: ((tick: CompactTick) => void)[] = [];
   private subscribedSymbols: Set<string> = new Set();
   private latestTicks: { [symbol: string]: number } = {};
-  private optionChainCache: { [symbol: string]: { data: OptionChainItem[]; expiryTime: number } } = {};
+  private optionChainCache: { [symbol: string]: { data: OptionChainItem[]; expiryTime: number; fetchedAt: number } } = {};
+  private optionChainInflight: { [symbol: string]: Promise<OptionChainItem[]> } = {};
+  private optionChainBackoffUntil: { [symbol: string]: number } = {};
+  private static readonly OPTION_CHAIN_TTL_MS = 30_000;
+  private static readonly OPTION_CHAIN_STALE_MS = 5 * 60_000;
+  private static readonly OPTION_CHAIN_BACKOFF_MS = 30_000;
   
   // Real Fyers API clients
   private fyersClient: any = null;
@@ -437,46 +442,28 @@ export class FyersAdapter implements IBrokerAdapter {
   }
 
   public async getOptionChain(underlying: string): Promise<OptionChainItem[]> {
-    const cached = this.optionChainCache[underlying];
     const now = Date.now();
+    const cached = this.optionChainCache[underlying];
     if (cached && cached.expiryTime > now && cached.data.length > 0) {
       return cached.data;
     }
 
+    const inflight = this.optionChainInflight[underlying];
+    if (inflight) {
+      return inflight;
+    }
+
+    const backoffUntil = this.optionChainBackoffUntil[underlying] || 0;
+    if (now < backoffUntil && cached && cached.data.length > 0) {
+      return cached.data;
+    }
+
     if (this.useLiveApi && this.fyersClient) {
-      try {
-        console.log(`[FyersAdapter] Fetching real Option Chain for: ${underlying}`);
-        const params = {
-          symbol: underlying,
-          strikecount: 10
-        };
-        
-        const res = await this.fyersClient.getOptionChain(params);
-        const chainPayload = res?.data;
-        const optionsChain = chainPayload?.optionsChain;
-        const isOk = res && (res.s === "ok" || chainPayload?.code === 200);
-
-        if (isOk && Array.isArray(optionsChain) && optionsChain.length > 0) {
-          const expiry = this.resolveFyersChainExpiry(chainPayload);
-          const chain = this.parseFyersOptionsChain(optionsChain, expiry, underlying);
-
-          if (chain.length > 0) {
-            // Cache for 3 seconds to prevent rate limiting
-            this.optionChainCache[underlying] = {
-              data: chain,
-              expiryTime: now + 3000
-            };
-            return chain;
-          }
-
-          console.warn(`[FyersAdapter] Option chain parsed to 0 strikes for ${underlying}.`);
-        }
-      } catch (err: any) {
-        console.warn(`[FyersAdapter] Option chain query rejected for ${underlying}:`, err?.message || err);
-      }
-
-      // In live broker mode, never generate synthetic fake options; return [] so callers safely skip signals
-      return [];
+      const fetchPromise = this.fetchLiveOptionChain(underlying).finally(() => {
+        delete this.optionChainInflight[underlying];
+      });
+      this.optionChainInflight[underlying] = fetchPromise;
+      return fetchPromise;
     }
 
     // Option Chain Fallback ONLY for offline simulated/sandbox mode
@@ -513,6 +500,80 @@ export class FyersAdapter implements IBrokerAdapter {
       });
     }
     return options;
+  }
+
+  private isOptionChainRateLimited(res: any, err?: any): boolean {
+    const nested = res?.Error || res?.data?.Error || {};
+    const message = String(
+      err?.message ||
+      res?.message ||
+      nested.message ||
+      res?.data?.message ||
+      ""
+    ).toLowerCase();
+    const code = res?.code ?? nested.code ?? res?.data?.code;
+    return (
+      code === 429 ||
+      message.includes("request limit") ||
+      message.includes("rate limit") ||
+      message.includes("error 1015")
+    );
+  }
+
+  private serveStaleOptionChain(underlying: string, reason: string): OptionChainItem[] {
+    const cached = this.optionChainCache[underlying];
+    const now = Date.now();
+    if (cached && cached.data.length > 0 && now - cached.fetchedAt <= FyersAdapter.OPTION_CHAIN_STALE_MS) {
+      console.warn(`[FyersAdapter] ${reason}. Serving stale option chain for ${underlying}.`);
+      return cached.data;
+    }
+    return [];
+  }
+
+  private async fetchLiveOptionChain(underlying: string): Promise<OptionChainItem[]> {
+    const now = Date.now();
+    try {
+      console.log(`[FyersAdapter] Fetching real Option Chain for: ${underlying}`);
+      const res = await this.fyersClient.getOptionChain({
+        symbol: underlying,
+        strikecount: 10
+      });
+
+      if (this.isOptionChainRateLimited(res)) {
+        this.optionChainBackoffUntil[underlying] = now + FyersAdapter.OPTION_CHAIN_BACKOFF_MS;
+        return this.serveStaleOptionChain(underlying, "Option chain rate-limited");
+      }
+
+      const chainPayload = res?.data;
+      const optionsChain = chainPayload?.optionsChain;
+      const isOk = res && (res.s === "ok" || chainPayload?.code === 200 || res?.code === 200);
+
+      if (isOk && Array.isArray(optionsChain) && optionsChain.length > 0) {
+        const expiry = this.resolveFyersChainExpiry(chainPayload);
+        const chain = this.parseFyersOptionsChain(optionsChain, expiry, underlying);
+
+        if (chain.length > 0) {
+          this.optionChainCache[underlying] = {
+            data: chain,
+            expiryTime: now + FyersAdapter.OPTION_CHAIN_TTL_MS,
+            fetchedAt: now
+          };
+          this.optionChainBackoffUntil[underlying] = 0;
+          return chain;
+        }
+
+        console.warn(`[FyersAdapter] Option chain parsed to 0 strikes for ${underlying}.`);
+      }
+    } catch (err: any) {
+      if (this.isOptionChainRateLimited(null, err)) {
+        this.optionChainBackoffUntil[underlying] = now + FyersAdapter.OPTION_CHAIN_BACKOFF_MS;
+        return this.serveStaleOptionChain(underlying, "Option chain rate-limited");
+      }
+      console.warn(`[FyersAdapter] Option chain query rejected for ${underlying}:`, err?.message || err);
+      return this.serveStaleOptionChain(underlying, "Option chain query failed");
+    }
+
+    return this.serveStaleOptionChain(underlying, "Option chain unavailable");
   }
 
   public async placeOptionOrder(

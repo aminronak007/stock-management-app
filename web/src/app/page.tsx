@@ -7,6 +7,7 @@ import { AdvisoryPanel } from "../components/AdvisoryPanel";
 import { SimulatorSandbox } from "../components/SimulatorSandbox";
 import { QuantitativePanels } from "../components/QuantitativePanels";
 import { DatabaseViewer } from "../components/DatabaseViewer";
+import { SignalGateStatus, EngineStatus } from "../components/SignalGateStatus";
 
 interface TickData {
   symbol: string;
@@ -40,6 +41,7 @@ export default function Home() {
   const [autoExecution, setAutoExecution] = useState<boolean>(false);
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [isBrokerAuth, setIsBrokerAuth] = useState<boolean>(false);
+  const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
 
   const [activeWlTab, setActiveWlTab] = useState<number>(1);
   const [watchlistTabs, setWatchlistTabs] = useState<{ [tabId: number]: string[] }>({
@@ -126,6 +128,11 @@ export default function Home() {
         setLogs(prev => [...prev, `[System] CPR initialized: Pivot=${data.pivot?.toFixed(2) || "--"}`]);
       })
       .catch(() => setLogs(prev => [...prev, "[System] Failed to fetch CPR parameters."]));
+
+    fetch("http://localhost:8080/api/engine-status")
+      .then(res => res.json())
+      .then(data => setEngineStatus(data))
+      .catch(() => {});
   }, []);
 
   // WebSocket live ticks & signals pipeline
@@ -182,6 +189,11 @@ export default function Home() {
             if (message.payload.activeSignal) {
               setActiveSignal(message.payload.activeSignal);
             }
+            if (message.payload.engineStatus) {
+              setEngineStatus(message.payload.engineStatus);
+            }
+          } else if (message.type === "ENGINE_STATUS") {
+            setEngineStatus(message.payload);
           }
         } catch (e) {
           console.error("Failed to parse WebSocket message:", e);
@@ -516,9 +528,7 @@ export default function Home() {
                         </div>
                       )
                     ) : (
-                      <div className="text-center py-8 text-gray-600 text-xs leading-relaxed">
-                        No active trade signal.<br />Monitoring Nifty 50 spot breakout...
-                      </div>
+                      <SignalGateStatus status={engineStatus} compact />
                     )}
                   </div>
 
@@ -531,11 +541,12 @@ export default function Home() {
                   spotPrice={activeLtp}
                   vixValue={parseFloat(vixLtp) || 14.5}
                   activeSignal={activeSignal}
+                  engineStatus={engineStatus}
                 />
                 <div className="border-t border-white/5 pt-4">
                   <AdvisoryPanel 
                     signal={activeSignal} 
-                    logs={logs} 
+                    logs={logs}
                   />
                 </div>
               </div>

@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { SignalGateStatus, EngineStatus } from "./SignalGateStatus";
 
 interface ConfluenceBreakdown {
   score: number;
@@ -38,12 +39,14 @@ interface QuantitativePanelsProps {
       explanation: string[];
     };
   } | null;
+  engineStatus?: EngineStatus | null;
 }
 
 export const QuantitativePanels: React.FC<QuantitativePanelsProps> = ({
   spotPrice,
   vixValue,
-  activeSignal
+  activeSignal,
+  engineStatus
 }) => {
   // Calculate Expected Move (volatility cone range)
   const expectedDailyMove = spotPrice * ((vixValue || 14.5) / 100 / Math.sqrt(365));
@@ -58,6 +61,10 @@ export const QuantitativePanels: React.FC<QuantitativePanelsProps> = ({
 
       {/* COLUMN 1: Regime & Volatility Expected Move Barrier */}
       <div className="flex flex-col gap-6">
+
+        <div className="card p-5 rounded-xl border border-white/5 bg-[#12141a]/90">
+          <SignalGateStatus status={engineStatus || null} />
+        </div>
 
         {/* Regime Classification */}
         <div className="card bg-gradient-to-br from-[#12141a]/90 to-[#181b24]/90 p-5 rounded-xl border border-white/5 relative overflow-hidden">

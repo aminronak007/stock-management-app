@@ -70,6 +70,8 @@ export class AdvisoryManager {
   private orbHigh: number = 0;
   private orbLow: number = 0;
   private isSignalGeneratedToday: boolean = false;
+  private lastBreakoutEvalAt: number = 0;
+  private breakoutEvalInflight: boolean = false;
 
   // 3-Tier Independent Position State Machines:
   // 1. SNIPER (Score >= 75%) -> Official Alert & Optional Real Execution
@@ -187,10 +189,56 @@ export class AdvisoryManager {
       if (historical5m && historical5m.length > 0) {
         this.indexCandles = historical5m;
         console.log(`[AdvisoryManager] Initialized ${this.indexCandles.length} Nifty 5-minute historical candles.`);
+        this.hydrateOrbFromHistory();
       }
     } catch (e) {
       console.warn("[AdvisoryManager] Failed to load 5-minute Nifty history. Starting fresh.", e);
     }
+  }
+
+  /**
+   * Rebuilds today's 9:15–9:30 IST opening range from loaded 5-minute bars so a mid-session
+   * restart still has ORB high/low instead of treating them as 0.
+   */
+  private hydrateOrbFromHistory(): void {
+    if (this.indexCandles.length === 0) return;
+
+    const todayIst = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(new Date());
+
+    const orbCandles = this.indexCandles.filter((candle) => {
+      const istDate = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).format(new Date(candle.timestamp));
+      if (istDate !== todayIst) return false;
+
+      const istTime = new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Kolkata",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }).format(new Date(candle.timestamp));
+      const [hStr, mStr] = istTime.split(":");
+      const hours = parseInt(hStr, 10);
+      const minutes = parseInt(mStr, 10);
+      return hours === 9 && minutes >= 15 && minutes < 30;
+    });
+
+    if (orbCandles.length === 0) return;
+
+    this.orbHigh = Math.max(...orbCandles.map((c) => c.high));
+    this.orbLow = Math.min(...orbCandles.map((c) => c.low));
+    this.isOrbActive = false;
+    console.log(
+      `[AdvisoryManager] ORB hydrated from history (${orbCandles.length} bars): High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}`
+    );
   }
 
   /**
@@ -271,20 +319,32 @@ export class AdvisoryManager {
       // ORB range calculation (first 15 minutes of session: 9:15 - 9:30 AM IST)
       if (hours === 9 && minutes >= 15 && minutes < 30) {
         if (!this.isOrbActive) {
-          this.orbHigh = tick.ltp;
-          this.orbLow = tick.ltp;
+          if (this.orbHigh <= 0 || this.orbLow <= 0) {
+            this.orbHigh = tick.ltp;
+            this.orbLow = tick.ltp;
+          }
           this.isOrbActive = true;
           console.log(`[AdvisoryManager] 9:15 AM ORB range active. Starting boundaries tracking.`);
-        } else {
-          this.orbHigh = Math.max(this.orbHigh, tick.ltp);
-          this.orbLow = Math.min(this.orbLow, tick.ltp);
         }
+        this.orbHigh = Math.max(this.orbHigh, tick.ltp);
+        this.orbLow = Math.min(this.orbLow, tick.ltp);
       }
 
       // Check breakout triggers post 9:30 AM IST
       if ((hours === 9 && minutes >= 30) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
         this.isOrbActive = false; // ORB creation range completed
-        await this.evaluateBreakoutSignals(tick.ltp, timestamp);
+        // One evaluation at a time, at most once per second — never stampede Fyers on every tick
+        if (!this.breakoutEvalInflight && timestamp - this.lastBreakoutEvalAt >= 1000) {
+          this.lastBreakoutEvalAt = timestamp;
+          this.breakoutEvalInflight = true;
+          this.evaluateBreakoutSignals(tick.ltp, timestamp)
+            .catch((err) => {
+              console.error("[AdvisoryManager] Breakout evaluation failed:", err);
+            })
+            .finally(() => {
+              this.breakoutEvalInflight = false;
+            });
+        }
       }
 
       // Monitor active position risk parameters across all 3 tiers independently
@@ -343,22 +403,14 @@ export class AdvisoryManager {
       return;
     }
 
+    // Without a captured ORB, do not evaluate (and do not hit the option-chain API)
+    if (this.orbHigh <= 0 || this.orbLow <= 0) {
+      return;
+    }
+
     const isAboveVwap = spot > this.currentVwap;
-    
-    // Check Open Interest and PCR
-    const chain = await this.broker.getOptionChain("NSE:NIFTY50-INDEX");
-    if (chain.length === 0) return;
 
-    // Calculate Put-Call Ratio
-    let totalPutOi = 0;
-    let totalCallOi = 0;
-    chain.forEach(item => {
-      totalPutOi += item.put.openInterest;
-      totalCallOi += item.call.openInterest;
-    });
-    const pcr = totalCallOi > 0 ? totalPutOi / totalCallOi : 1.0;
-
-    // Calculate EMAs (50 and 200 EMA) for Trend-Alignment Filter
+    // Cheap local filters first — only fetch the option chain on a real ORB candidate
     const closePrices = this.indexCandles.map(c => c.close);
     const ema50List = Indicators.calculateEMA(closePrices, 50);
     const ema200List = Indicators.calculateEMA(closePrices, 200);
@@ -368,22 +420,43 @@ export class AdvisoryManager {
     const isTrendBullish = ema50 > 0 && ema200 > 0 ? (spot > ema50 && ema50 > ema200) : true;
     const isTrendBearish = ema50 > 0 && ema200 > 0 ? (spot < ema50 && ema50 < ema200) : true;
 
-    // Calculate Volume Breakout Filter
     const volumes = this.indexCandles.map(c => c.volume);
     const prev5Volumes = volumes.slice(-6, -1); // exclude current bar
     const avgVolume5 = prev5Volumes.length > 0 ? prev5Volumes.reduce((a, b) => a + b, 0) / prev5Volumes.length : 0;
     const currentVolume = volumes[volumes.length - 1] || 0;
     const isVolumeHigh = avgVolume5 > 0 ? currentVolume >= 1.5 * avgVolume5 : true;
 
-    let triggerType: "CALL_BUY" | "PUT_BUY" | null = null;
+    let candidate: "CALL_BUY" | "PUT_BUY" | null = null;
     let reasoning = "";
 
-    if (spot > this.orbHigh && isAboveVwap && pcr <= 1.35 && isTrendBullish && isVolumeHigh) {
-      triggerType = "CALL_BUY";
+    if (spot > this.orbHigh && isAboveVwap && isTrendBullish && isVolumeHigh) {
+      candidate = "CALL_BUY";
       reasoning = `Bullish ORB Breakout above ${this.orbHigh.toFixed(2)}.`;
-    } else if (spot < this.orbLow && !isAboveVwap && pcr >= 0.60 && isTrendBearish && isVolumeHigh) {
-      triggerType = "PUT_BUY";
+    } else if (spot < this.orbLow && !isAboveVwap && isTrendBearish && isVolumeHigh) {
+      candidate = "PUT_BUY";
       reasoning = `Bearish ORB Breakdown below ${this.orbLow.toFixed(2)}.`;
+    }
+
+    if (!candidate) {
+      return;
+    }
+
+    const chain = await this.broker.getOptionChain("NSE:NIFTY50-INDEX");
+    if (chain.length === 0) return;
+
+    let totalPutOi = 0;
+    let totalCallOi = 0;
+    chain.forEach(item => {
+      totalPutOi += item.put.openInterest;
+      totalCallOi += item.call.openInterest;
+    });
+    const pcr = totalCallOi > 0 ? totalPutOi / totalCallOi : 1.0;
+
+    let triggerType: "CALL_BUY" | "PUT_BUY" | null = null;
+    if (candidate === "CALL_BUY" && pcr <= 1.35) {
+      triggerType = "CALL_BUY";
+    } else if (candidate === "PUT_BUY" && pcr >= 0.60) {
+      triggerType = "PUT_BUY";
     }
 
     if (triggerType) {
@@ -857,6 +930,110 @@ export class AdvisoryManager {
 
   public getIndiaVixValue(): number {
     return this.indiaVixValue;
+  }
+
+  public getEngineStatus(timestamp: number = Date.now()) {
+    const ist = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date(timestamp));
+    const [hStr, mStr] = ist.split(":");
+    const hours = parseInt(hStr, 10);
+    const minutes = parseInt(mStr, 10);
+    const totalMinutes = hours * 60 + minutes;
+
+    const hasOrb = this.orbHigh > 0 && this.orbLow > 0;
+    const spot = this.indexSpotPrice;
+    const isLunchBlock = totalMinutes >= 690 && totalMinutes <= 810;
+    const insideCpr = !!(this.cpr && spot > 0 && CPR.isPriceInsideCPR(spot, this.cpr));
+
+    let sessionPhase = "CLOSED";
+    if (hours === 9 && minutes >= 15 && minutes < 30) sessionPhase = "ORB";
+    else if (hours === 9 && minutes >= 30) sessionPhase = "ACTIVE";
+    else if (hours >= 10 && hours < 15 && !isLunchBlock) sessionPhase = "ACTIVE";
+    else if (isLunchBlock) sessionPhase = "LUNCH";
+    else if (hours === 15 && minutes < 15) sessionPhase = "ACTIVE";
+    else if (hours === 15 && minutes >= 15) sessionPhase = "SQUARE_OFF";
+    else if (hours < 9 || (hours === 9 && minutes < 15)) sessionPhase = "PRE_OPEN";
+
+    const closePrices = this.indexCandles.map((c) => c.close);
+    const ema50List = Indicators.calculateEMA(closePrices, 50);
+    const ema200List = Indicators.calculateEMA(closePrices, 200);
+    const ema50 = ema50List.length > 0 ? ema50List[ema50List.length - 1] : 0;
+    const ema200 = ema200List.length > 0 ? ema200List[ema200List.length - 1] : 0;
+    const trendBullish = ema50 > 0 && ema200 > 0 ? spot > ema50 && ema50 > ema200 : true;
+    const trendBearish = ema50 > 0 && ema200 > 0 ? spot < ema50 && ema50 < ema200 : true;
+
+    const volumes = this.indexCandles.map((c) => c.volume);
+    const prev5Volumes = volumes.slice(-6, -1);
+    const avgVolume5 = prev5Volumes.length > 0 ? prev5Volumes.reduce((a, b) => a + b, 0) / prev5Volumes.length : 0;
+    const currentVolume = volumes[volumes.length - 1] || 0;
+    const volumeHigh = avgVolume5 > 0 ? currentVolume >= 1.5 * avgVolume5 : true;
+    const aboveVwap = spot > this.currentVwap;
+
+    const ptsToCall = hasOrb ? this.orbHigh - spot : 0;
+    const ptsToPut = hasOrb ? spot - this.orbLow : 0;
+    const insideOrb = hasOrb && spot <= this.orbHigh && spot >= this.orbLow;
+    const brokeCall = hasOrb && spot > this.orbHigh;
+    const brokePut = hasOrb && spot < this.orbLow;
+
+    let waitingReason = "Waiting for market data.";
+    if (this.tierPositions.SNIPER.activeSignal?.type.includes("BUY")) {
+      waitingReason = "Active SNIPER signal is live. Targets are on the signal card.";
+    } else if (!hasOrb) {
+      waitingReason = "Opening range is not captured yet. ORB is built from 9:15–9:30 AM IST.";
+    } else if (sessionPhase === "PRE_OPEN") {
+      waitingReason = "Session has not opened. Signals start after the 9:15–9:30 AM ORB window.";
+    } else if (sessionPhase === "ORB") {
+      waitingReason = `Building opening range. CALL above ${this.orbHigh.toFixed(2)}, PUT below ${this.orbLow.toFixed(2)}.`;
+    } else if (sessionPhase === "LUNCH") {
+      waitingReason = "Lunch dead zone (11:30 AM–1:30 PM IST). New entries are blocked.";
+    } else if (sessionPhase === "SQUARE_OFF" || sessionPhase === "CLOSED") {
+      waitingReason = "New entries are closed for the day (3:15 PM square-off).";
+    } else if (insideCpr) {
+      waitingReason = "Spot is inside CPR. Breakout entries are withheld until price leaves the pivot range.";
+    } else if (insideOrb) {
+      waitingReason = `Nifty is inside the opening range. CALL needs a break above ${this.orbHigh.toFixed(2)}; PUT needs a break below ${this.orbLow.toFixed(2)}.`;
+    } else if (brokeCall && !aboveVwap) {
+      waitingReason = `ORB high is broken, but spot is still below VWAP (${this.currentVwap.toFixed(2)}). CALL is blocked.`;
+    } else if (brokeCall && !trendBullish) {
+      waitingReason = "ORB high is broken, but 5-minute EMA trend is not bullish. CALL is blocked.";
+    } else if (brokeCall && !volumeHigh) {
+      waitingReason = "ORB high is broken, but breakout volume is below 1.5× the last five bars. CALL is blocked.";
+    } else if (brokePut && aboveVwap) {
+      waitingReason = `ORB low is broken, but spot is still above VWAP (${this.currentVwap.toFixed(2)}). PUT is blocked.`;
+    } else if (brokePut && !trendBearish) {
+      waitingReason = "ORB low is broken, but 5-minute EMA trend is not bearish. PUT is blocked.";
+    } else if (brokePut && !volumeHigh) {
+      waitingReason = "ORB low is broken, but breakdown volume is below 1.5× the last five bars. PUT is blocked.";
+    } else if (brokeCall || brokePut) {
+      waitingReason = "ORB is broken and local filters passed. Waiting on PCR / confluence score before publishing targets.";
+    }
+
+    return {
+      spot,
+      vwap: this.currentVwap,
+      vix: this.indiaVixValue,
+      orbHigh: this.orbHigh,
+      orbLow: this.orbLow,
+      ptsToCall,
+      ptsToPut,
+      insideOrb,
+      insideCpr,
+      isLunchBlock,
+      sessionPhase,
+      waitingReason,
+      hasActiveSignal: !!this.tierPositions.SNIPER.activeSignal,
+      filters: {
+        hasOrb,
+        aboveVwap,
+        volumeHigh,
+        trendBullish,
+        trendBearish
+      }
+    };
   }
 
   public getTierPositions() {
