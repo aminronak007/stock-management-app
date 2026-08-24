@@ -1,4 +1,5 @@
 import { CPRValues } from "./cpr";
+import { Indicators } from "./indicators";
 import { getIntradayEmaTrend, isClosedBarVolumeExpanded, NIFTY_OPTIONS_EMA_SLOW } from "./niftyOptionsSetup";
 
 export type MarketRegime = 
@@ -47,14 +48,19 @@ export class QuantitativeEngine {
 
     if (candles5m.length >= NIFTY_OPTIONS_EMA_SLOW) {
       const closes = candles5m.map(c => c.close);
+      const highs = candles5m.map(c => c.high);
+      const lows = candles5m.map(c => c.low);
       const { emaFast, emaSlow, ready } = getIntradayEmaTrend(closes, spot);
       
       if (ready) {
         const emaDiff = Math.abs(emaFast - emaSlow) / spot * 100;
-        if (emaDiff < 0.08) return "RANGE";
+        const adxList = Indicators.calculateADX(highs, lows, closes, 14);
+        const currentAdx = adxList.length > 0 ? adxList[adxList.length - 1] : 20;
 
-        if (spot > emaFast && emaFast > emaSlow) return "TREND_UP";
-        if (spot < emaFast && emaFast < emaSlow) return "TREND_DOWN";
+        if (emaDiff < 0.08 || currentAdx < 18) return "RANGE";
+
+        if (spot > emaFast && emaFast > emaSlow && currentAdx >= 20) return "TREND_UP";
+        if (spot < emaFast && emaFast < emaSlow && currentAdx >= 20) return "TREND_DOWN";
       }
     }
 
@@ -302,15 +308,31 @@ export class QuantitativeEngine {
       factors.optionMomentum.score +
       factors.riskReward.score;
 
+    // ADX Trend Strength Check (Choppiness filter)
+    const highs = candles5m.map(c => c.high);
+    const lows = candles5m.map(c => c.low);
+    const closes = candles5m.map(c => c.close);
+    const adxList = Indicators.calculateADX(highs, lows, closes, 14);
+    const currentAdx = adxList.length > 0 ? adxList[adxList.length - 1] : 20;
+
+    const isChoppyAdx = currentAdx < 18;
+
     // Apply strict penalties
     if (isCounterTrend) {
       totalScore = Math.max(0, totalScore - 15);
       explanation.push("⚠ COUNTER TREND TRADE PENALTY (-15 points applied)");
     }
 
-    if (isFalseBreakout) {
+    if (isChoppyAdx) {
+      totalScore = Math.max(0, totalScore - 15);
+      explanation.push(`⚠ CHOPPY MARKET PENALTY (ADX=${currentAdx.toFixed(1)} < 18: -15 points applied)`);
+    }
+
+    if (isFalseBreakout || currentAdx < 14) {
       totalScore = 0;
-      explanation.push("✕ FALSE BREAKOUT DETECTED: Signal score reset to zero.");
+      explanation.push(isFalseBreakout
+        ? "✕ FALSE BREAKOUT DETECTED: Signal score reset to zero."
+        : `✕ SEVERE CHOP DETECTED (ADX=${currentAdx.toFixed(1)} < 14): Signal score reset to zero.`);
     }
 
     // Quality labeling

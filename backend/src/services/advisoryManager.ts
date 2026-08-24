@@ -146,7 +146,7 @@ export class AdvisoryManager {
 
   // Risk parameters
   private dailyLossLimit: number = -2.0; // max -2R daily drawdown
-  private dailyMaxTrades: number = 5;
+  private dailyMaxTrades: number = 3; // max 3 trades per tier per day to prevent fee accumulation
 
   // Callback to alert Electron/Web UI (only for SNIPER Tier)
   private onSignalCallback: (signal: AdvisorySignal) => void = () => {};
@@ -353,9 +353,12 @@ export class AdvisoryManager {
     if (openBuys.length === 0) return;
 
     const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
-    for (const trade of openBuys) {
-      const tier = (trade.tier as SignalTier) || "SNIPER";
-      if (!allTiers.includes(tier)) continue;
+    for (const tier of allTiers) {
+      const tierBuys = openBuys.filter(t => (t.tier || "SNIPER") === tier);
+      if (tierBuys.length === 0) continue;
+
+      // Keep latest open buy for live RAM state monitoring
+      const trade = tierBuys[tierBuys.length - 1];
       const pos = this.tierPositions[tier];
       if (pos.activeSignal) continue;
 
@@ -388,6 +391,15 @@ export class AdvisoryManager {
           `[AdvisoryManager] [${tier}] Restored open paper position #${trade.id} ${trade.symbol} @ ₹${trade.price} from SQLite`
         );
         this.broker.subscribeTicks([trade.symbol]);
+      }
+
+      // Flatten any older orphaned open trades in DB to prevent duplicate state
+      if (tierBuys.length > 1) {
+        const orphans = tierBuys.slice(0, -1);
+        console.warn(`[AdvisoryManager] [${tier}] Flattening ${orphans.length} orphaned open trade(s) from previous server sessions.`);
+        for (const orphan of orphans) {
+          DatabaseService.markPaperTradeClosed(orphan.id, { pnl: 0, fees: 0, netPnl: 0 });
+        }
       }
     }
   }
@@ -628,6 +640,13 @@ export class AdvisoryManager {
     const closePrices = this.indexCandles.map(c => c.close);
     const { trendBullish: isTrendBullish, trendBearish: isTrendBearish } = getIntradayEmaTrend(closePrices, spot);
 
+    // VWAP Pullback / Extension Filter for late session signals (> 10:00 AM IST)
+    const vwapDistance = Math.abs(spot - this.currentVwap);
+    if (istTotalMinutes >= 600 && vwapDistance > 60) {
+      this.lastSignalBlockReason = `Price is over-extended (${vwapDistance.toFixed(1)} pts from session VWAP). Waiting for VWAP pullback confirmation.`;
+      return;
+    }
+
     let candidate: "CALL_BUY" | "PUT_BUY" | null = null;
     let reasoning = "";
 
@@ -821,15 +840,31 @@ export class AdvisoryManager {
         return;
       }
       if (targetPos.dailyTradesCount >= this.dailyMaxTrades) {
-        this.lastSignalBlockReason = `${tier} daily trade cap reached.`;
+        this.lastSignalBlockReason = `${tier} daily trade cap (${this.dailyMaxTrades}) reached.`;
         return;
       }
       if (targetPos.dailyProfitLoss <= this.dailyLossLimit) {
         this.lastSignalBlockReason = `${tier} daily loss limit reached.`;
         return;
       }
+
+      // 2-Consecutive-Loss Circuit Breaker
+      const consecutiveLosses = DatabaseService.getConsecutiveLossesCountByTier(tier, timestamp);
+      if (consecutiveLosses >= 2 || targetPos.dailyLossesCount >= 2) {
+        this.lastSignalBlockReason = `${tier} 2-Consecutive-Loss Circuit Breaker active. Trading halted for session.`;
+        return;
+      }
+
+      // Max entries per direction cap (max 2 entries per CALL/PUT direction per day)
+      const directionEntries = DatabaseService.getDailyEntriesCountByDirection(tier, triggerType, timestamp);
+      if (directionEntries >= 2) {
+        this.lastSignalBlockReason = `${tier} reached max limit (2) for ${triggerType} entries today.`;
+        return;
+      }
+
       if (timestamp < targetPos.stoppedCooldownUntil) {
-        this.lastSignalBlockReason = `${tier} is in cooldown after a stop.`;
+        const remainingMins = Math.ceil((targetPos.stoppedCooldownUntil - timestamp) / 60000);
+        this.lastSignalBlockReason = `${tier} is in cooldown after exit (${remainingMins}m remaining).`;
         return;
       }
 
@@ -1064,7 +1099,9 @@ export class AdvisoryManager {
       const initialRisk = entry - (pos.activeSignal.stopLossPrice || 0);
       const ratio = initialRisk > 0 ? (pnl / initialRisk) : 0;
       pos.dailyProfitLoss += ratio;
-      pos.stoppedCooldownUntil = timestamp + 5 * 60 * 1000;
+      // 30 minute cooldown after Theta Exit to prevent continuous chop re-entry loop
+      const cooldownMs = type === "THETA_EXIT" ? 30 * 60 * 1000 : 5 * 60 * 1000;
+      pos.stoppedCooldownUntil = timestamp + cooldownMs;
       console.log(`[Risk Engine] [${tier}] ${type} triggered (${ratio >= 0 ? '+' : ''}${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}.`);
     }
 

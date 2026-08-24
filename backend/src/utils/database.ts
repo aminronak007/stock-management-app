@@ -394,6 +394,45 @@ export class DatabaseService {
     return snapshots;
   }
 
+  public static getDailyEntriesCountByDirection(
+    tier: SignalTier,
+    direction: "CALL_BUY" | "PUT_BUY",
+    now: number = Date.now()
+  ): number {
+    const db = this.initialize();
+    const today = this.getIstDateKey(now);
+    const trades = db.prepare(
+      "SELECT timestamp FROM paper_trades WHERE tier = ? AND type = ?"
+    ).all(tier, direction) as { timestamp: number }[];
+
+    return trades.filter(t => this.getIstDateKey(t.timestamp) === today).length;
+  }
+
+  public static getConsecutiveLossesCountByTier(
+    tier: SignalTier,
+    now: number = Date.now()
+  ): number {
+    const db = this.initialize();
+    const today = this.getIstDateKey(now);
+    const trades = db.prepare(
+      "SELECT type, pnl, net_pnl, timestamp FROM paper_trades WHERE tier = ? ORDER BY id DESC"
+    ).all(tier) as PaperTradeRecord[];
+
+    let consecutiveLosses = 0;
+    for (const t of trades) {
+      if (this.getIstDateKey(t.timestamp) !== today) break;
+      if (!this.isExitType(t.type)) continue;
+
+      const pnlVal = t.net_pnl !== undefined && t.net_pnl !== null ? t.net_pnl : (t.pnl || 0);
+      if (pnlVal < 0 || t.type === "EXIT_STOP_LOSS") {
+        consecutiveLosses++;
+      } else if (pnlVal > 0) {
+        break; // Stop counting on first winning trade
+      }
+    }
+    return consecutiveLosses;
+  }
+
   public static markPaperTradeClosed(
     id: number,
     data: { pnl: number; fees?: number; netPnl?: number }

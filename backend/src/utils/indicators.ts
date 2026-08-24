@@ -146,4 +146,86 @@ export class Indicators {
 
     return cumulativeVolume > 0 ? (cumulativeTypicalVolume / cumulativeVolume) : (candles[candles.length - 1].close || 0);
   }
+
+  /**
+   * Calculates Average Directional Index (ADX)
+   */
+  public static calculateADX(
+    highs: number[],
+    lows: number[],
+    closes: number[],
+    period: number = 14
+  ): number[] {
+    const adx: number[] = [];
+    const len = highs.length;
+    if (len < period * 2) return adx;
+
+    const trs: number[] = [];
+    const plusDMs: number[] = [];
+    const minusDMs: number[] = [];
+
+    for (let i = 1; i < len; i++) {
+      const upMove = highs[i] - highs[i - 1];
+      const downMove = lows[i - 1] - lows[i];
+
+      const plusDM = upMove > downMove && upMove > 0 ? upMove : 0;
+      const minusDM = downMove > upMove && downMove > 0 ? downMove : 0;
+
+      const tr = Math.max(
+        highs[i] - lows[i],
+        Math.abs(highs[i] - closes[i - 1]),
+        Math.abs(lows[i] - closes[i - 1])
+      );
+
+      trs.push(tr);
+      plusDMs.push(plusDM);
+      minusDMs.push(minusDM);
+    }
+
+    if (trs.length < period) return adx;
+
+    let smoothTR = 0;
+    let smoothPlusDM = 0;
+    let smoothMinusDM = 0;
+
+    for (let i = 0; i < period; i++) {
+      smoothTR += trs[i];
+      smoothPlusDM += plusDMs[i];
+      smoothMinusDM += minusDMs[i];
+    }
+
+    const dxList: number[] = [];
+
+    const getDx = (sTR: number, sP: number, sM: number) => {
+      const plusDI = sTR > 0 ? (sP / sTR) * 100 : 0;
+      const minusDI = sTR > 0 ? (sM / sTR) * 100 : 0;
+      const sum = plusDI + minusDI;
+      return sum > 0 ? (Math.abs(plusDI - minusDI) / sum) * 100 : 0;
+    };
+
+    dxList.push(getDx(smoothTR, smoothPlusDM, smoothMinusDM));
+
+    for (let i = period; i < trs.length; i++) {
+      smoothTR = smoothTR - smoothTR / period + trs[i];
+      smoothPlusDM = smoothPlusDM - smoothPlusDM / period + plusDMs[i];
+      smoothMinusDM = smoothMinusDM - smoothMinusDM / period + minusDMs[i];
+      dxList.push(getDx(smoothTR, smoothPlusDM, smoothMinusDM));
+    }
+
+    if (dxList.length < period) return adx;
+
+    let adxVal = 0;
+    for (let i = 0; i < period; i++) {
+      adxVal += dxList[i];
+    }
+    adxVal /= period;
+    adx.push(adxVal);
+
+    for (let i = period; i < dxList.length; i++) {
+      adxVal = (adxVal * (period - 1) + dxList[i]) / period;
+      adx.push(adxVal);
+    }
+
+    return adx;
+  }
 }
