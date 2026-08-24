@@ -39,8 +39,9 @@ export class ExcelLogger {
       pnl?: number;
       marketRegime?: string;
       confluenceScore?: number;
+      entrySpot?: number;
     } = {}
-  ): Promise<void> {
+  ): Promise<number> {
     const tier = additionalData.tier || "SNIPER";
     const investedCapital = price * qty;
 
@@ -71,9 +72,10 @@ export class ExcelLogger {
       reasoning
     };
 
-    // 1. Persist into SQLite Database (paper_trades table for Dashboard UI)
+    let tradeId = 0;
+    // 1. Persist into SQLite immediately so a restart can restore the open position
     try {
-      DatabaseService.logPaperTrade({
+      tradeId = DatabaseService.logPaperTrade({
         type,
         tier,
         symbol,
@@ -88,18 +90,20 @@ export class ExcelLogger {
         netPnl: netPnlVal,
         reasoning,
         marketRegime: additionalData.marketRegime,
-        confluenceScore: additionalData.confluenceScore
+        confluenceScore: additionalData.confluenceScore,
+        entrySpot: additionalData.entrySpot,
+        peakPremium: price
       });
       console.log(`[TradeLogger] Trade saved to SQLite Database.`);
     } catch (e: any) {
       console.error("[TradeLogger] Failed to log trade to SQLite database:", e.message);
     }
 
-    // 2. Stream Directly to Google Sheets (Cloud Only)
-    try {
-      await GoogleSheetsService.logTradeToGoogleSheets(tradeRow);
-    } catch (err: any) {
+    // 2. Stream to Google Sheets without blocking the SQLite row id
+    GoogleSheetsService.logTradeToGoogleSheets(tradeRow).catch((err: any) => {
       console.error("[TradeLogger] Error logging trade to Google Sheets:", err.message);
-    }
+    });
+
+    return tradeId;
   }
 }

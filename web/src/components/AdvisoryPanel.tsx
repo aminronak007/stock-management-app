@@ -10,11 +10,16 @@ interface ConfluenceBreakdown {
 
 interface SignalData {
   type: string;
-  strike: string;
-  entry: string;
-  sl: string;
-  t1: string;
-  t2: string;
+  strike?: string;
+  strikePrice?: number | string;
+  entry?: string;
+  entryPrice?: number | string;
+  sl?: string;
+  stopLossPrice?: number | string;
+  t1?: string;
+  targetPrice1?: number | string;
+  t2?: string;
+  targetPrice2?: number | string;
   reasoning: string;
   scoreCard?: {
     totalScore: number;
@@ -57,16 +62,25 @@ export const AdvisoryPanel: React.FC<AdvisoryPanelProps> = ({
     return "signal-direction-box";
   };
 
+  const formatPrice = (value: unknown) => {
+    if (value === undefined || value === null || value === "") return "₹--";
+    if (typeof value === "number" && Number.isFinite(value)) return `₹${value.toFixed(2)}`;
+    return String(value);
+  };
+
   // Safe checks for default UI display
   const signalType = signal ? signal.type : "WAITING";
   const directionText = signal 
     ? (signal.type === "CALL_BUY" ? "CALL OPTION TARGET" : signal.type === "PUT_BUY" ? "PUT OPTION TARGET" : "EXIT POSITION") 
     : "NO SIGNAL";
-  const strikeText = signal ? `Nifty ${signal.strike}` : "Monitoring Nifty Spot Breakout";
-  const entryVal = signal ? signal.entry : "₹--";
-  const slVal = signal ? signal.sl : "₹--";
-  const t1Val = signal ? signal.t1 : "₹--";
-  const t2Val = signal ? signal.t2 : "₹--";
+  const strikeLabel = signal?.strike || signal?.strikePrice;
+  const strikeText = signal
+    ? (strikeLabel ? `Nifty ${strikeLabel}` : "Nifty ATM")
+    : "Monitoring Nifty Spot Breakout";
+  const entryVal = signal ? formatPrice(signal.entry ?? signal.entryPrice) : "₹--";
+  const slVal = signal ? formatPrice(signal.sl ?? signal.stopLossPrice) : "₹--";
+  const t1Val = signal ? formatPrice(signal.t1 ?? signal.targetPrice1) : "₹--";
+  const t2Val = signal ? formatPrice(signal.t2 ?? signal.targetPrice2) : "₹--";
   const scoreCard = signal?.scoreCard;
 
   return (

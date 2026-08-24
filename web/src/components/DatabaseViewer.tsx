@@ -87,7 +87,7 @@ interface DatabaseStats {
 
 export const DatabaseViewer: React.FC = () => {
   const [activeSubTab, setActiveSubTab] = useState<"trades" | "signals" | "sessions" | "settings">("trades");
-  const [selectedTier, setSelectedTier] = useState<"ALL" | "SNIPER" | "BALANCED" | "EXPLORATORY">("ALL");
+  const [selectedTier, setSelectedTier] = useState<"ALL" | "SNIPER" | "BALANCED" | "EXPLORATORY">("SNIPER");
   const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([]);
   const [signals, setSignals] = useState<DatabaseSignal[]>([]);
   const [analytics, setAnalytics] = useState<TradeAnalytics | null>(null);
@@ -157,7 +157,7 @@ export const DatabaseViewer: React.FC = () => {
       if (filterType === "PROFIT") matchesFilter = (trade.pnl || 0) > 0;
       else if (filterType === "LOSS") matchesFilter = (trade.pnl || 0) < 0;
       else if (filterType === "BUY") matchesFilter = trade.type.includes("BUY");
-      else if (filterType === "EXIT") matchesFilter = trade.type.includes("EXIT");
+      else if (filterType === "EXIT") matchesFilter = trade.type.includes("EXIT") || trade.type === "SQUARE_OFF";
       else if (filterType === "CALL") matchesFilter = trade.type.includes("CALL") || (trade.symbol ? trade.symbol.includes("CE") : false);
       else if (filterType === "PUT") matchesFilter = trade.type.includes("PUT") || (trade.symbol ? trade.symbol.includes("PE") : false);
 
@@ -241,6 +241,7 @@ export const DatabaseViewer: React.FC = () => {
     if (type === "EXIT_PROFIT") return "bg-teal-500/15 border-teal-500/30 text-teal-400";
     if (type === "EXIT_STOP_LOSS") return "bg-red-500/15 border-red-500/30 text-red-400";
     if (type === "THETA_EXIT") return "bg-amber-500/15 border-amber-500/30 text-amber-400";
+    if (type === "SQUARE_OFF") return "bg-indigo-500/15 border-indigo-500/30 text-indigo-300";
     return "bg-indigo-500/15 border-indigo-500/30 text-indigo-400";
   };
 
@@ -610,6 +611,7 @@ export const DatabaseViewer: React.FC = () => {
                   <th className="py-3 px-4">Stop Loss</th>
                   <th className="py-3 px-4">Targets (T1 / T2)</th>
                   <th className="py-3 px-4">Invested Capital</th>
+                  <th className="py-3 px-4">Status</th>
                   <th className="py-3 px-4">Realized P&L</th>
                   <th className="py-3 px-4">Regime / Confluence</th>
                   <th className="py-3 px-4">Reasoning</th>
@@ -619,6 +621,7 @@ export const DatabaseViewer: React.FC = () => {
                 {filteredPaperTrades.length > 0 ? (
                   filteredPaperTrades.map((t) => {
                     const hasPnl = t.pnl !== undefined && t.pnl !== null;
+                    const isOpen = t.status === "OPEN" || (!hasPnl && t.type.includes("BUY"));
                     const isProfit = hasPnl && t.pnl! >= 0;
                     return (
                       <tr key={t.id} className="hover:bg-white/[0.03] transition-colors">
@@ -655,7 +658,20 @@ export const DatabaseViewer: React.FC = () => {
                           ₹{t.invested_capital.toFixed(2)}
                         </td>
                         <td className="py-3 px-4 whitespace-nowrap">
-                          {hasPnl ? (
+                          {isOpen ? (
+                            <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-amber-500/15 border-amber-500/40 text-amber-300">
+                              OPEN
+                            </span>
+                          ) : (
+                            <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-white/5 border-white/10 text-gray-400">
+                              CLOSED
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap">
+                          {isOpen ? (
+                            <span className="text-gray-500 italic">Position Open</span>
+                          ) : hasPnl ? (
                             <div className={`font-bold ${isProfit ? "text-emerald-400" : "text-rose-400"}`}>
                               {isProfit ? `+₹${t.pnl!.toFixed(2)}` : `-₹${Math.abs(t.pnl!).toFixed(2)}`}
                               {t.pnl_percent !== undefined && t.pnl_percent !== null && (
@@ -665,7 +681,7 @@ export const DatabaseViewer: React.FC = () => {
                               )}
                             </div>
                           ) : (
-                            <span className="text-gray-500 italic">Position Open</span>
+                            <span className="text-gray-500">—</span>
                           )}
                         </td>
                         <td className="py-3 px-4 whitespace-nowrap">
@@ -686,7 +702,7 @@ export const DatabaseViewer: React.FC = () => {
                   })
                 ) : (
                   <tr>
-                    <td colSpan={13} className="py-16 text-center text-gray-500 text-sm font-sans">
+                    <td colSpan={14} className="py-16 text-center text-gray-500 text-sm font-sans">
                       {isLoading ? "Loading paper trading ledger from SQLite..." : `No ${selectedTier !== "ALL" ? selectedTier : ""} paper trades recorded yet. Ticks will automatically simulate Buy & Exit transactions here and in CSV.`}
                     </td>
                   </tr>

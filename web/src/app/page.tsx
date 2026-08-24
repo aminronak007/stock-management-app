@@ -26,6 +26,35 @@ interface SignalData {
   t1: string;
   t2: string;
   reasoning: string;
+  scoreCard?: unknown;
+}
+
+function formatRupee(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "₹--";
+  if (typeof value === "string") {
+    if (value.startsWith("₹")) return value;
+    const parsed = Number(value.replace(/[₹,]/g, ""));
+    return Number.isFinite(parsed) ? `₹${parsed.toFixed(2)}` : value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `₹${value.toFixed(2)}`;
+  }
+  return "₹--";
+}
+
+function normalizeSignal(raw: any): SignalData | null {
+  if (!raw || !raw.type) return null;
+  const strike = raw.strike ?? raw.strikePrice;
+  return {
+    type: raw.type,
+    strike: strike != null && strike !== "" ? String(strike) : "",
+    entry: formatRupee(raw.entry ?? raw.entryPrice),
+    sl: formatRupee(raw.sl ?? raw.stopLossPrice),
+    t1: formatRupee(raw.t1 ?? raw.targetPrice1),
+    t2: formatRupee(raw.t2 ?? raw.targetPrice2),
+    reasoning: raw.reasoning || "",
+    scoreCard: raw.scoreCard
+  };
 }
 
 export default function Home() {
@@ -164,7 +193,8 @@ export default function Home() {
               [tick.symbol]: tick
             }));
           } else if (message.type === "SIGNAL") {
-            const signal: SignalData = message.payload;
+            const signal = normalizeSignal(message.payload);
+            if (!signal) return;
             setActiveSignal(signal);
             
             let alertMsg = `>>> [UI ALERT - ${signal.type}] Strikes: Nifty ${signal.strike || "Spot"} | Entry: ${signal.entry || "--"} | SL: ${signal.sl || "--"}`;
@@ -187,7 +217,7 @@ export default function Home() {
             setAutoExecution(message.payload.autoExecution === true);
             setIsBrokerAuth(message.payload.brokerAuthenticated === true);
             if (message.payload.activeSignal) {
-              setActiveSignal(message.payload.activeSignal);
+              setActiveSignal(normalizeSignal(message.payload.activeSignal));
             }
             if (message.payload.engineStatus) {
               setEngineStatus(message.payload.engineStatus);
@@ -492,7 +522,7 @@ export default function Home() {
                               {activeSignal.type === "CALL_BUY" ? "CALL BUY ADVISORY" : "PUT BUY ADVISORY"}
                             </span>
                             <span className="text-[11px] text-gray-400 font-semibold mt-1">
-                              Strike: Nifty {activeSignal.strike}
+                              Strike: Nifty {activeSignal.strike || "ATM"}
                             </span>
                           </div>
 

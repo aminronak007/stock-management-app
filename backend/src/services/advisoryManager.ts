@@ -36,6 +36,7 @@ interface TierPositionState {
   entryTime: number;
   activeOptionSymbol: string;
   activeOrderId: string;
+  openTradeId: number;
   dailyTradesCount: number;
   dailyLossesCount: number;
   dailyProfitLoss: number;
@@ -94,6 +95,7 @@ export class AdvisoryManager {
       entryTime: 0,
       activeOptionSymbol: "",
       activeOrderId: "",
+      openTradeId: 0,
       dailyTradesCount: 0,
       dailyLossesCount: 0,
       dailyProfitLoss: 0,
@@ -109,6 +111,7 @@ export class AdvisoryManager {
       entryTime: 0,
       activeOptionSymbol: "",
       activeOrderId: "",
+      openTradeId: 0,
       dailyTradesCount: 0,
       dailyLossesCount: 0,
       dailyProfitLoss: 0,
@@ -124,6 +127,7 @@ export class AdvisoryManager {
       entryTime: 0,
       activeOptionSymbol: "",
       activeOrderId: "",
+      openTradeId: 0,
       dailyTradesCount: 0,
       dailyLossesCount: 0,
       dailyProfitLoss: 0,
@@ -208,6 +212,8 @@ export class AdvisoryManager {
     } catch (e) {
       console.warn("[AdvisoryManager] Failed to load 5-minute Nifty history. Starting fresh.", e);
     }
+
+    this.hydrateOrFlattenOpenPositions();
   }
 
   /**
@@ -289,6 +295,164 @@ export class AdvisoryManager {
     });
   }
 
+  private isIntradaySquareOffWindow(timestamp: number = Date.now()): boolean {
+    const istTimeStr = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date(timestamp));
+    const [hoursStr, minutesStr] = istTimeStr.split(":");
+    const hours = parseInt(hoursStr, 10);
+    const minutes = parseInt(minutesStr, 10);
+    return hours > 15 || (hours === 15 && minutes >= 15);
+  }
+
+  private isPreOpenSession(timestamp: number = Date.now()): boolean {
+    const istTimeStr = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date(timestamp));
+    const [hoursStr, minutesStr] = istTimeStr.split(":");
+    const hours = parseInt(hoursStr, 10);
+    const minutes = parseInt(minutesStr, 10);
+    return hours < 9 || (hours === 9 && minutes < 15);
+  }
+
+  /**
+   * After a restart the RAM position is empty, but paper_trades may still have
+   * unmatched BUY rows. Restore them during market hours, or flatten them once
+   * the 3:15 IST square-off window has started.
+   */
+  private hydrateOrFlattenOpenPositions(): void {
+    const now = Date.now();
+    if (this.isIntradaySquareOffWindow(now) || this.isPreOpenSession(now)) {
+      this.enforceMandatorySquareOff(now);
+      return;
+    }
+    this.hydrateDailyRiskFromDb();
+    this.hydrateOpenPositionsFromDb();
+  }
+
+  private hydrateDailyRiskFromDb(): void {
+    const snapshots = DatabaseService.getSessionRiskByTier();
+    (["SNIPER", "BALANCED", "EXPLORATORY"] as SignalTier[]).forEach((tier) => {
+      const snap = snapshots[tier];
+      const pos = this.tierPositions[tier];
+      pos.dailyTradesCount = snap.dailyTradesCount;
+      pos.dailyLossesCount = snap.dailyLossesCount;
+      pos.dailyProfitLoss = snap.dailyProfitLoss;
+      pos.stoppedCooldownUntil = snap.stoppedCooldownUntil;
+    });
+  }
+
+  private hydrateOpenPositionsFromDb(): void {
+    const openBuys = DatabaseService.getOpenBuyTrades();
+    if (openBuys.length === 0) return;
+
+    const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
+    for (const trade of openBuys) {
+      const tier = (trade.tier as SignalTier) || "SNIPER";
+      if (!allTiers.includes(tier)) continue;
+      const pos = this.tierPositions[tier];
+      if (pos.activeSignal) continue;
+
+      const buyType = trade.type === "CALL_BUY" || trade.type === "PUT_BUY" ? trade.type : null;
+      if (!buyType) continue;
+
+      pos.activeSignal = {
+        type: buyType,
+        tier,
+        strikePrice: trade.strike ? Number(trade.strike) : undefined,
+        entryPrice: trade.price,
+        stopLossPrice: trade.stop_loss,
+        targetPrice1: trade.target1,
+        targetPrice2: trade.target2,
+        reasoning: trade.reasoning,
+        timestamp: trade.timestamp,
+        regime: trade.market_regime
+      };
+      pos.entrySpot = trade.entry_spot && trade.entry_spot > 0 ? trade.entry_spot : 0;
+      pos.peakPremiumLtp = trade.peak_premium && trade.peak_premium > 0 ? trade.peak_premium : trade.price;
+      pos.isBreakevenLocked = !!trade.is_breakeven_locked;
+      pos.isTarget1Locked = !!trade.is_target1_locked;
+      pos.entryTime = trade.timestamp;
+      pos.activeOptionSymbol = trade.symbol;
+      pos.liveOptionLtp = trade.price;
+      pos.openTradeId = trade.id;
+
+      if (trade.symbol) {
+        console.log(
+          `[AdvisoryManager] [${tier}] Restored open paper position #${trade.id} ${trade.symbol} @ ₹${trade.price} from SQLite`
+        );
+        this.broker.subscribeTicks([trade.symbol]);
+      }
+    }
+  }
+
+  /**
+   * Flatten every live tier plus any leftover unmatched BUY rows in SQLite.
+   * Idempotent: a second call is a no-op once the ledger is paired.
+   */
+  public enforceMandatorySquareOff(timestamp: number = Date.now()): void {
+    if (!this.isIntradaySquareOffWindow(timestamp) && !this.isPreOpenSession(timestamp)) {
+      return;
+    }
+    const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
+    for (const t of allTiers) {
+      if (this.tierPositions[t].activeSignal) {
+        this.triggerTierExit(
+          t,
+          "SQUARE_OFF",
+          "Universal 3:15 PM Square-off Alert. Terminate open positions.",
+          timestamp
+        );
+      }
+    }
+    this.squareOffUnmatchedFromDb();
+  }
+
+  private squareOffUnmatchedFromDb(): void {
+    const unmatched = DatabaseService.getUnmatchedBuyTrades();
+    if (unmatched.length === 0) return;
+
+    console.log(`[AdvisoryManager] Found ${unmatched.length} unmatched BUY row(s) with no square-off. Flattening ledger.`);
+    for (const buy of unmatched) {
+      const tier = (buy.tier as SignalTier) || "SNIPER";
+      const qty = buy.qty || 25;
+      const perUnitPnl = buy.pnl != null && qty > 0 ? buy.pnl / qty : 0;
+      const exitPrice = parseFloat((buy.price + perUnitPnl).toFixed(2));
+      const reasoning = `[${tier} TIER] Catch-up 3:15 PM square-off. BUY #${buy.id} was left open in the ledger after an engine restart, so RAM never flattened it.`;
+
+      const fees = ExcelLogger.calculateStatutoryFees(exitPrice, qty);
+      const grossPnl = perUnitPnl * qty;
+      DatabaseService.markPaperTradeClosed(buy.id, {
+        pnl: grossPnl,
+        fees,
+        netPnl: grossPnl - fees
+      });
+
+      ExcelLogger.logTransaction(
+        "SQUARE_OFF",
+        buy.symbol,
+        buy.strike || "",
+        qty,
+        exitPrice,
+        reasoning,
+        {
+          tier,
+          pnl: perUnitPnl,
+          marketRegime: buy.market_regime,
+          confluenceScore: buy.confluence_score
+        }
+      ).catch((err) => {
+        console.error("[AdvisoryManager] Failed to log catch-up square-off:", err?.message || err);
+      });
+    }
+  }
+
   private refreshSessionVwap(now: number = Date.now(), fallbackSpot?: number): void {
     const sessionCandles = this.getTodaySessionCandles(now);
     if (sessionCandles.length > 0) {
@@ -318,13 +482,9 @@ export class AdvisoryManager {
     const hours = parseInt(hoursStr, 10);
     const minutes = parseInt(minutesStr, 10);
 
-    // Universal Hard Square-Off at 15:15 IST across all tiers
-    if (hours === 15 && minutes >= 15) {
-      for (const t of allTiers) {
-        if (this.tierPositions[t].activeSignal) {
-          this.triggerTierExit(t, "SQUARE_OFF", "Universal 3:15 PM Square-off Alert. Terminate open positions.", timestamp);
-        }
-      }
+    // Universal Hard Square-Off at 15:15 IST across all tiers (and any tick after that)
+    if (this.isIntradaySquareOffWindow(timestamp)) {
+      this.enforceMandatorySquareOff(timestamp);
       return;
     }
 
@@ -656,7 +816,7 @@ export class AdvisoryManager {
       const targetPos = this.tierPositions[tier];
 
       // Check if this specific tier already has an active position or reached daily limits
-      if (targetPos.activeSignal) {
+      if (targetPos.activeSignal || DatabaseService.tierHasOpenBuy(tier)) {
         this.lastSignalBlockReason = `A ${tier} position is already open. New entries on this tier are paused.`;
         return;
       }
@@ -689,24 +849,48 @@ export class AdvisoryManager {
         regime: scoreCard.regime
       };
 
-      // Populate position state for this tier
+      const optionSymbol = atmChain 
+        ? (triggerType === "CALL_BUY" ? atmChain.call.symbol : atmChain.put.symbol)
+        : this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
+
+      // Persist the BUY to SQLite first. RAM is only a cache of that row.
+      const logQtyStr = process.env.ORDER_QTY || "25";
+      const logQty = parseInt(logQtyStr, 10) || 25;
+      const openTradeId = await ExcelLogger.logTransaction(
+        triggerType,
+        optionSymbol,
+        selectedStrike,
+        logQty,
+        entryPrice,
+        formattedReasoning,
+        {
+          tier,
+          sl: stopLossPrice,
+          t1: targetPrice1,
+          t2: targetPrice2,
+          marketRegime: scoreCard.regime,
+          confluenceScore: scoreCard.totalScore,
+          entrySpot: spot
+        }
+      );
+      if (!openTradeId) {
+        this.lastSignalBlockReason = `Could not persist the ${tier} BUY to SQLite. Entry aborted.`;
+        console.error(`[AdvisoryManager] [${tier}] Refusing to hold an in-memory-only position.`);
+        return;
+      }
+
       targetPos.activeSignal = signalObj;
       targetPos.entrySpot = spot;
       targetPos.peakPremiumLtp = entryPrice;
       targetPos.isBreakevenLocked = false;
       targetPos.isTarget1Locked = false;
       targetPos.entryTime = timestamp;
+      targetPos.activeOptionSymbol = optionSymbol;
+      targetPos.liveOptionLtp = entryPrice;
+      targetPos.openTradeId = openTradeId;
       this.isSignalGeneratedToday = true;
       this.lastSignalBlockReason = "";
 
-      const optionSymbol = atmChain 
-        ? (triggerType === "CALL_BUY" ? atmChain.call.symbol : atmChain.put.symbol)
-        : this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
-
-      targetPos.activeOptionSymbol = optionSymbol;
-      targetPos.liveOptionLtp = entryPrice;
-
-      // Dynamically subscribe live option contract to broker WebSocket for real-time tick streaming
       if (optionSymbol) {
         console.log(`[AdvisoryManager] [${tier}] Subscribing live WebSocket to active option contract: ${optionSymbol}`);
         this.broker.subscribeTicks([optionSymbol]);
@@ -730,26 +914,6 @@ export class AdvisoryManager {
             console.error(`[AdvisoryManager] AUTO ORDER EXECUTION FAILED:`, err.message);
           });
       }
-
-      // Log BUY transaction into CSV with Tier tag
-      const logQtyStr = process.env.ORDER_QTY || "25";
-      const logQty = parseInt(logQtyStr, 10) || 25;
-      ExcelLogger.logTransaction(
-        triggerType,
-        optionSymbol,
-        selectedStrike,
-        logQty,
-        entryPrice,
-        formattedReasoning,
-        {
-          tier,
-          sl: stopLossPrice,
-          t1: targetPrice1,
-          t2: targetPrice2,
-          marketRegime: scoreCard.regime,
-          confluenceScore: scoreCard.totalScore
-        }
-      );
 
       // Log signal into SQLite database
       DatabaseService.logSignal(
@@ -812,6 +976,7 @@ export class AdvisoryManager {
     if (!pos.isBreakevenLocked && currentPremiumLtp >= pos.activeSignal.entryPrice + initialRisk) {
       pos.isBreakevenLocked = true;
       pos.activeSignal.stopLossPrice = pos.activeSignal.entryPrice;
+      this.persistOpenPositionState(pos);
       console.log(`[AdvisoryManager] [${tier}] Breakeven Profit Locker engaged at ${pos.activeSignal.entryPrice.toFixed(2)}`);
       
       if (tier === "SNIPER") {
@@ -825,8 +990,9 @@ export class AdvisoryManager {
       }
     }
 
-    // Theta Exit check: position is open > 12 minutes and sideways
-    if (elapsed > 12 * 60 * 1000) {
+    // Theta Exit check: position is open > 12 minutes and sideways.
+    // Skip when entrySpot is unknown (restored from DB after restart) to avoid a false chop exit.
+    if (elapsed > 12 * 60 * 1000 && pos.entrySpot > 0) {
       const percentageChange = Math.abs(spotMovementGain / spot) * 100;
       if (percentageChange < 0.15) {
         this.triggerTierExit(tier, "THETA_EXIT", "Option premium decay warning. Sideways chop > 12 minutes.", timestamp, currentPremiumLtp);
@@ -851,6 +1017,7 @@ export class AdvisoryManager {
       pos.isTarget1Locked = true;
       const profitLockPrice = pos.activeSignal.entryPrice + (pos.activeSignal.targetPrice1 - pos.activeSignal.entryPrice) * 0.5;
       pos.activeSignal.stopLossPrice = parseFloat(profitLockPrice.toFixed(2));
+      this.persistOpenPositionState(pos);
       console.log(`[AdvisoryManager] [${tier}] Target 1 crossed! Trailing stop stepped up to ₹${profitLockPrice.toFixed(2)}`);
       
       if (tier === "SNIPER") {
@@ -903,6 +1070,18 @@ export class AdvisoryManager {
 
     const qtyStr = process.env.ORDER_QTY || "25";
     const qty = parseInt(qtyStr, 10) || 25;
+    const grossPnl = pnl * qty;
+    const fees = ExcelLogger.calculateStatutoryFees(exit, qty);
+    const netPnl = grossPnl - fees;
+
+    let openTradeId = pos.openTradeId;
+    if (!openTradeId) {
+      const openBuys = DatabaseService.getOpenBuyTrades(tier);
+      openTradeId = openBuys.length > 0 ? openBuys[openBuys.length - 1].id : 0;
+    }
+    if (openTradeId) {
+      DatabaseService.markPaperTradeClosed(openTradeId, { pnl: grossPnl, fees, netPnl });
+    }
 
     // Auto Execution SELL exit only for SNIPER Tier
     if (tier === "SNIPER" && process.env.AUTO_ORDER_EXECUTION === "true" && optionSymbol) {
@@ -987,10 +1166,21 @@ export class AdvisoryManager {
     pos.liveOptionLtp = 0;
     pos.activeOptionSymbol = "";
     pos.activeOrderId = "";
+    pos.openTradeId = 0;
     pos.isBreakevenLocked = false;
     pos.isTarget1Locked = false;
     pos.peakPremiumLtp = 0;
     pos.entryTime = 0;
+  }
+
+  private persistOpenPositionState(pos: TierPositionState): void {
+    if (!pos.openTradeId || !pos.activeSignal) return;
+    DatabaseService.updateOpenPaperTradeState(pos.openTradeId, {
+      stopLoss: pos.activeSignal.stopLossPrice,
+      peakPremium: pos.peakPremiumLtp,
+      isBreakevenLocked: pos.isBreakevenLocked,
+      isTarget1Locked: pos.isTarget1Locked
+    });
   }
 
   public getCpr(): CPRValues | null {
@@ -1044,9 +1234,16 @@ export class AdvisoryManager {
     const brokeCall = hasOrb && spot > this.orbHigh + buffer;
     const brokePut = hasOrb && spot < this.orbLow - buffer;
 
+    const dbOpenBuys = DatabaseService.getOpenBuyTrades();
+    const openBuyTier = (["SNIPER", "BALANCED", "EXPLORATORY"] as const).find(
+      (t) => this.tierPositions[t].activeSignal?.type.includes("BUY")
+    ) || (dbOpenBuys[0]?.tier as SignalTier | undefined);
+
     let waitingReason = "Waiting for market data.";
-    if (this.tierPositions.SNIPER.activeSignal?.type.includes("BUY")) {
-      waitingReason = "Active SNIPER signal is live. Targets are on the signal card.";
+    if (openBuyTier) {
+      waitingReason = isLunchBlock
+        ? `Open ${openBuyTier} trade is still managed through lunch (stop-loss, targets, theta). New entries stay blocked until 1:30 PM.`
+        : `Active ${openBuyTier} signal is live. Targets are on the signal card.`;
     } else if (!hasOrb) {
       waitingReason = "Opening range is not captured yet. ORB is built from 9:15–9:30 AM IST.";
     } else if (sessionPhase === "PRE_OPEN") {
@@ -1054,7 +1251,7 @@ export class AdvisoryManager {
     } else if (sessionPhase === "ORB") {
       waitingReason = `Building opening range. CALL above ${this.orbHigh.toFixed(2)}, PUT below ${this.orbLow.toFixed(2)}.`;
     } else if (sessionPhase === "LUNCH") {
-      waitingReason = "Lunch dead zone (11:30 AM–1:30 PM IST). New entries are blocked.";
+      waitingReason = "Lunch dead zone (11:30 AM–1:30 PM IST). New entries are blocked. Open trades would still exit on stop-loss, targets, or theta.";
     } else if (sessionPhase === "SQUARE_OFF" || sessionPhase === "CLOSED") {
       waitingReason = "New entries are closed for the day (3:15 PM square-off).";
     } else if (insideCpr) {
@@ -1091,7 +1288,12 @@ export class AdvisoryManager {
       isLunchBlock,
       sessionPhase,
       waitingReason,
-      hasActiveSignal: !!(this.tierPositions.SNIPER.activeSignal || this.tierPositions.BALANCED.activeSignal),
+      hasActiveSignal: !!(
+        this.tierPositions.SNIPER.activeSignal
+        || this.tierPositions.BALANCED.activeSignal
+        || this.tierPositions.EXPLORATORY.activeSignal
+        || dbOpenBuys.length > 0
+      ),
       filters: {
         hasOrb,
         aboveVwap,

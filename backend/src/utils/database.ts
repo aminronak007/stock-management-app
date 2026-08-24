@@ -26,6 +26,17 @@ export interface PaperTradeRecord {
   market_regime?: string;
   confluence_score?: number;
   status: string;
+  entry_spot?: number;
+  peak_premium?: number;
+  is_breakeven_locked?: number;
+  is_target1_locked?: number;
+}
+
+export interface SessionRiskSnapshot {
+  dailyTradesCount: number;
+  dailyLossesCount: number;
+  dailyProfitLoss: number;
+  stoppedCooldownUntil: number;
 }
 
 export interface TradeAnalytics {
@@ -150,8 +161,50 @@ export class DatabaseService {
     try {
       this.db.exec("ALTER TABLE advisory_signals ADD COLUMN tier TEXT DEFAULT 'SNIPER'");
     } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN entry_spot REAL");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN peak_premium REAL");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN is_breakeven_locked INTEGER DEFAULT 0");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN is_target1_locked INTEGER DEFAULT 0");
+    } catch {}
+
+    try {
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_trades_one_open_per_tier
+        ON paper_trades(tier)
+        WHERE status = 'OPEN' AND type LIKE '%BUY%'
+      `);
+    } catch (e) {
+      console.warn("[Database] Could not create one-open-per-tier index:", e);
+    }
 
     console.log("[Database] Database tables and tier schema verified/created successfully.");
+  }
+
+  public static isBuyType(type: string): boolean {
+    return type.includes("BUY");
+  }
+
+  public static isExitType(type: string): boolean {
+    return type === "EXIT_PROFIT"
+      || type === "EXIT_STOP_LOSS"
+      || type === "THETA_EXIT"
+      || type === "SQUARE_OFF";
+  }
+
+  public static getIstDateKey(timestamp: number = Date.now()): string {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(new Date(timestamp));
   }
 
   public static saveSession(provider: string, token: string, expiresAt: number): void {
@@ -221,7 +274,9 @@ export class DatabaseService {
     reasoning: string;
     marketRegime?: string;
     confluenceScore?: number;
-  }): void {
+    entrySpot?: number;
+    peakPremium?: number;
+  }): number {
     const db = this.initialize();
     const timestamp = Date.now();
     const datetime = new Date().toLocaleString("en-IN");
@@ -240,11 +295,12 @@ export class DatabaseService {
       INSERT INTO paper_trades (
         timestamp, datetime, type, tier, symbol, strike, qty, price,
         stop_loss, target1, target2, invested_capital, pnl, pnl_percent,
-        fees, net_pnl, reasoning, market_regime, confluence_score, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        fees, net_pnl, reasoning, market_regime, confluence_score, status,
+        entry_spot, peak_premium, is_breakeven_locked, is_target1_locked
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(
+    const result = stmt.run(
       timestamp,
       datetime,
       data.type,
@@ -264,8 +320,139 @@ export class DatabaseService {
       data.reasoning,
       data.marketRegime ?? null,
       data.confluenceScore ?? null,
-      data.type.includes("BUY") ? "OPEN" : "CLOSED"
+      this.isBuyType(data.type) ? "OPEN" : "CLOSED",
+      data.entrySpot ?? null,
+      data.peakPremium ?? data.price,
+      0,
+      0
     );
+    return Number(result.lastInsertRowid);
+  }
+
+  public static updateOpenPaperTradeState(
+    id: number,
+    data: {
+      stopLoss?: number;
+      peakPremium?: number;
+      isBreakevenLocked?: boolean;
+      isTarget1Locked?: boolean;
+    }
+  ): void {
+    const db = this.initialize();
+    db.prepare(`
+      UPDATE paper_trades
+      SET stop_loss = COALESCE(?, stop_loss),
+          peak_premium = COALESCE(?, peak_premium),
+          is_breakeven_locked = COALESCE(?, is_breakeven_locked),
+          is_target1_locked = COALESCE(?, is_target1_locked)
+      WHERE id = ? AND status = 'OPEN'
+    `).run(
+      data.stopLoss ?? null,
+      data.peakPremium ?? null,
+      data.isBreakevenLocked === undefined ? null : (data.isBreakevenLocked ? 1 : 0),
+      data.isTarget1Locked === undefined ? null : (data.isTarget1Locked ? 1 : 0),
+      id
+    );
+  }
+
+  public static getSessionRiskByTier(now: number = Date.now()): { [tier in SignalTier]: SessionRiskSnapshot } {
+    const empty = (): SessionRiskSnapshot => ({
+      dailyTradesCount: 0,
+      dailyLossesCount: 0,
+      dailyProfitLoss: 0,
+      stoppedCooldownUntil: 0
+    });
+    const snapshots: { [tier in SignalTier]: SessionRiskSnapshot } = {
+      SNIPER: empty(),
+      BALANCED: empty(),
+      EXPLORATORY: empty()
+    };
+
+    const db = this.initialize();
+    const today = this.getIstDateKey(now);
+    const trades = db.prepare("SELECT * FROM paper_trades ORDER BY id ASC").all() as PaperTradeRecord[];
+
+    for (const trade of trades) {
+      if (this.getIstDateKey(trade.timestamp) !== today) continue;
+      if (!this.isExitType(trade.type)) continue;
+      const tier = (trade.tier as SignalTier) || "SNIPER";
+      if (!snapshots[tier]) continue;
+      const snap = snapshots[tier];
+      snap.dailyTradesCount++;
+      if (trade.type === "EXIT_STOP_LOSS") {
+        snap.dailyLossesCount++;
+        snap.dailyProfitLoss -= 1.0;
+        snap.stoppedCooldownUntil = Math.max(snap.stoppedCooldownUntil, trade.timestamp + 15 * 60 * 1000);
+      } else if (trade.type === "EXIT_PROFIT") {
+        snap.dailyProfitLoss += 1.5;
+        snap.stoppedCooldownUntil = Math.max(snap.stoppedCooldownUntil, trade.timestamp + 5 * 60 * 1000);
+      } else {
+        snap.stoppedCooldownUntil = Math.max(snap.stoppedCooldownUntil, trade.timestamp + 5 * 60 * 1000);
+      }
+    }
+
+    return snapshots;
+  }
+
+  public static markPaperTradeClosed(
+    id: number,
+    data: { pnl: number; fees?: number; netPnl?: number }
+  ): void {
+    const db = this.initialize();
+    const row = db.prepare("SELECT invested_capital FROM paper_trades WHERE id = ?").get(id) as
+      | { invested_capital: number }
+      | undefined;
+    const investedCapital = row?.invested_capital || 0;
+    const netPnl = data.netPnl !== undefined ? data.netPnl : data.pnl;
+    const pnlPercent = investedCapital > 0 ? (netPnl / investedCapital) * 100 : null;
+    db.prepare(`
+      UPDATE paper_trades
+      SET status = 'CLOSED', pnl = ?, fees = ?, net_pnl = ?, pnl_percent = ?
+      WHERE id = ?
+    `).run(data.pnl, data.fees ?? 0.0, netPnl, pnlPercent, id);
+  }
+
+  public static getOpenBuyTrades(tier?: string): PaperTradeRecord[] {
+    const db = this.initialize();
+    if (tier && tier !== "ALL") {
+      return db.prepare(
+        "SELECT * FROM paper_trades WHERE status = 'OPEN' AND type LIKE '%BUY%' AND tier = ? ORDER BY id ASC"
+      ).all(tier) as PaperTradeRecord[];
+    }
+    return db.prepare(
+      "SELECT * FROM paper_trades WHERE status = 'OPEN' AND type LIKE '%BUY%' ORDER BY id ASC"
+    ).all() as PaperTradeRecord[];
+  }
+
+  public static tierHasOpenBuy(tier: string): boolean {
+    const db = this.initialize();
+    const row = db.prepare(
+      "SELECT id FROM paper_trades WHERE status = 'OPEN' AND type LIKE '%BUY%' AND tier = ? LIMIT 1"
+    ).get(tier) as { id: number } | undefined;
+    return !!row;
+  }
+
+  /**
+   * BUY rows that never received a matching exit. Uses LIFO per tier so an exit
+   * closes the current in-memory position (the latest buy), which is how the
+   * engine actually behaves across restarts.
+   */
+  public static getUnmatchedBuyTrades(): PaperTradeRecord[] {
+    const db = this.initialize();
+    const trades = db.prepare("SELECT * FROM paper_trades ORDER BY id ASC").all() as PaperTradeRecord[];
+    const stacks: { [tier: string]: PaperTradeRecord[] } = {};
+
+    for (const trade of trades) {
+      const tier = trade.tier || "SNIPER";
+      if (!stacks[tier]) stacks[tier] = [];
+      if (this.isBuyType(trade.type)) {
+        stacks[tier].push(trade);
+      } else if (this.isExitType(trade.type) && stacks[tier].length > 0) {
+        stacks[tier].pop();
+      }
+    }
+
+    return Object.values(stacks).flat();
   }
 
   public static purgeCorruptedDummyTrades(): number {
@@ -290,9 +477,10 @@ export class DatabaseService {
    */
   public static getTradeAnalytics(tier?: string): TradeAnalytics {
     const db = this.initialize();
+    // Count realized closes only. BUY rows are entries; including them double-counts PnL.
     const trades = (tier && tier !== "ALL")
-      ? (db.prepare("SELECT * FROM paper_trades WHERE pnl IS NOT NULL AND tier = ?").all(tier) as PaperTradeRecord[])
-      : (db.prepare("SELECT * FROM paper_trades WHERE pnl IS NOT NULL").all() as PaperTradeRecord[]);
+      ? (db.prepare("SELECT * FROM paper_trades WHERE pnl IS NOT NULL AND type NOT LIKE '%BUY%' AND tier = ?").all(tier) as PaperTradeRecord[])
+      : (db.prepare("SELECT * FROM paper_trades WHERE pnl IS NOT NULL AND type NOT LIKE '%BUY%'").all() as PaperTradeRecord[]);
 
     let totalGrossPnl = 0;
     let totalFees = 0;

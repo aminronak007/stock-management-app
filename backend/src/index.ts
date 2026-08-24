@@ -9,13 +9,31 @@ import cors from "cors";
 dotenv.config({ path: path.join(__dirname, "../.env") });
 
 import { BrokerFactory } from "./adapters/BrokerFactory";
-import { AdvisoryManager } from "./services/advisoryManager";
+import { AdvisoryManager, AdvisorySignal } from "./services/advisoryManager";
 import { Backtester } from "./services/backtester";
 import { ParameterOptimizer } from "./services/optimizer";
 import { DatabaseService } from "./utils/database";
 import { ExcelLogger } from "./utils/excelLogger";
 import { GoogleSheetsService } from "./services/googleSheetsService";
 import { TelegramService } from "./services/telegramService";
+
+function rupee(value?: number): string {
+  return typeof value === "number" && Number.isFinite(value) ? `₹${value.toFixed(2)}` : "₹--";
+}
+
+function toUiSignalPayload(signal: AdvisorySignal | null) {
+  if (!signal) return null;
+  return {
+    type: signal.type,
+    strike: signal.strikePrice != null ? String(signal.strikePrice) : "",
+    entry: rupee(signal.entryPrice),
+    sl: rupee(signal.stopLossPrice),
+    t1: rupee(signal.targetPrice1),
+    t2: rupee(signal.targetPrice2),
+    reasoning: signal.reasoning,
+    scoreCard: signal.scoreCard
+  };
+}
 
 async function main() {
   console.log("=================================================");
@@ -104,7 +122,7 @@ async function main() {
       type: "WELCOME",
       payload: {
         provider: process.env.BROKER_PROVIDER || "FYERS",
-        activeSignal: advisory.activeSignal,
+        activeSignal: toUiSignalPayload(advisory.activeSignal),
         enableSimulator: process.env.ENABLE_SIMULATOR === "true",
         autoExecution: process.env.AUTO_ORDER_EXECUTION === "true",
         brokerAuthenticated: (broker as any).useLiveApi === true,
@@ -234,16 +252,7 @@ async function main() {
 
     broadcast({
       type: "SIGNAL",
-      payload: {
-        type: signal.type,
-        strike: signal.strikePrice?.toString() || "",
-        entry: signal.entryPrice ? `₹${signal.entryPrice.toFixed(2)}` : "₹--",
-        sl: signal.stopLossPrice ? `₹${signal.stopLossPrice.toFixed(2)}` : "₹--",
-        t1: signal.targetPrice1 ? `₹${signal.targetPrice1.toFixed(2)}` : "₹--",
-        t2: signal.targetPrice2 ? `₹${signal.targetPrice2.toFixed(2)}` : "₹--",
-        reasoning: signal.reasoning,
-        scoreCard: signal.scoreCard
-      }
+      payload: toUiSignalPayload(signal)
     });
   });
 
@@ -428,7 +437,7 @@ async function main() {
       type: "WELCOME",
       payload: {
         provider: process.env.BROKER_PROVIDER || "FYERS",
-        activeSignal: advisory.activeSignal,
+        activeSignal: toUiSignalPayload(advisory.activeSignal),
         enableSimulator: process.env.ENABLE_SIMULATOR === "true",
         autoExecution: process.env.AUTO_ORDER_EXECUTION === "true",
         brokerAuthenticated: false,
@@ -661,6 +670,11 @@ async function main() {
       payload: advisory.getEngineStatus()
     });
   }, 2000);
+
+  // Don't rely only on a Nifty tick arriving at 15:15 — flatten leftover paper positions on a timer
+  setInterval(() => {
+    advisory.enforceMandatorySquareOff();
+  }, 15000);
 
   const port = process.env.PORT || 8080;
   server.listen(port, () => {
