@@ -26,17 +26,38 @@ export interface AdvisorySignal {
   regime?: string;
 }
 
+export interface ActivePositionInfo {
+  tier: SignalTier;
+  symbol: string;
+  strike: number | string;
+  type: string;
+  qty: number;
+  entryPrice: number;
+  currentLtp: number;
+  pnl: number;
+  pnlPercent: number;
+  stopLoss: number;
+  target1?: number;
+  target2?: number;
+  isBreakevenLocked: boolean;
+  isTarget1Locked: boolean;
+  entryTime: number;
+  entrySpot?: number;
+  currentSpot?: number;
+  openTradeId?: number | null;
+}
+
 interface TierPositionState {
   activeSignal: AdvisorySignal | null;
   entrySpot: number;
-  liveOptionLtp?: number;
+  liveOptionLtp?: number | null;
   peakPremiumLtp: number;
   isBreakevenLocked: boolean;
   isTarget1Locked: boolean;
   entryTime: number;
-  activeOptionSymbol: string;
-  activeOrderId: string;
-  openTradeId: number;
+  activeOptionSymbol?: string | null;
+  activeOrderId?: string | null;
+  openTradeId?: number | null;
   dailyTradesCount: number;
   dailyLossesCount: number;
   dailyProfitLoss: number;
@@ -86,6 +107,8 @@ export class AdvisoryManager {
     CALL_BUY: 0,
     PUT_BUY: 0
   };
+  private sampleActiveTiers: Set<SignalTier> = new Set<SignalTier>();
+  private sessionRealizedPnl: number = 0;
 
   // 3-Tier Independent Position State Machines:
   // 1. SNIPER (Score >= 75%) -> Official Alert & Optional Real Execution
@@ -95,14 +118,14 @@ export class AdvisoryManager {
     SNIPER: {
       activeSignal: null,
       entrySpot: 0,
-      liveOptionLtp: 0,
+      liveOptionLtp: null,
       peakPremiumLtp: 0,
       isBreakevenLocked: false,
       isTarget1Locked: false,
       entryTime: 0,
-      activeOptionSymbol: "",
-      activeOrderId: "",
-      openTradeId: 0,
+      activeOptionSymbol: null,
+      activeOrderId: null,
+      openTradeId: null,
       dailyTradesCount: 0,
       dailyLossesCount: 0,
       dailyProfitLoss: 0,
@@ -111,14 +134,14 @@ export class AdvisoryManager {
     BALANCED: {
       activeSignal: null,
       entrySpot: 0,
-      liveOptionLtp: 0,
+      liveOptionLtp: null,
       peakPremiumLtp: 0,
       isBreakevenLocked: false,
       isTarget1Locked: false,
       entryTime: 0,
-      activeOptionSymbol: "",
-      activeOrderId: "",
-      openTradeId: 0,
+      activeOptionSymbol: null,
+      activeOrderId: null,
+      openTradeId: null,
       dailyTradesCount: 0,
       dailyLossesCount: 0,
       dailyProfitLoss: 0,
@@ -127,14 +150,14 @@ export class AdvisoryManager {
     EXPLORATORY: {
       activeSignal: null,
       entrySpot: 0,
-      liveOptionLtp: 0,
+      liveOptionLtp: null,
       peakPremiumLtp: 0,
       isBreakevenLocked: false,
       isTarget1Locked: false,
       entryTime: 0,
-      activeOptionSymbol: "",
-      activeOrderId: "",
-      openTradeId: 0,
+      activeOptionSymbol: null,
+      activeOrderId: null,
+      openTradeId: null,
       dailyTradesCount: 0,
       dailyLossesCount: 0,
       dailyProfitLoss: 0,
@@ -344,6 +367,7 @@ export class AdvisoryManager {
   }
 
   private hydrateDailyRiskFromDb(): void {
+    this.sessionRealizedPnl = DatabaseService.getTodayRealizedPnl();
     const snapshots = DatabaseService.getSessionRiskByTier();
     (["SNIPER", "BALANCED", "EXPLORATORY"] as SignalTier[]).forEach((tier) => {
       const snap = snapshots[tier];
@@ -1193,6 +1217,8 @@ export class AdvisoryManager {
             {
               tier,
               pnl,
+              parentTradeId: openTradeId,
+              entryPrice: entry,
               marketRegime: pos.activeSignal?.regime,
               confluenceScore: pos.activeSignal?.scoreCard?.totalScore
             }
@@ -1221,6 +1247,8 @@ export class AdvisoryManager {
         {
           tier,
           pnl,
+          parentTradeId: openTradeId,
+          entryPrice: entry,
           marketRegime: pos.activeSignal?.regime,
           confluenceScore: pos.activeSignal?.scoreCard?.totalScore
         }
@@ -1400,6 +1428,86 @@ export class AdvisoryManager {
 
   public getTierPositions() {
     return this.tierPositions;
+  }
+
+  public getActivePositions(): ActivePositionInfo[] {
+    const positions: ActivePositionInfo[] = [];
+    const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
+    const qtyStr = process.env.ORDER_QTY || "25";
+    const qty = parseInt(qtyStr, 10) || 25;
+
+    for (const t of allTiers) {
+      const pos = this.tierPositions[t];
+      if (pos.activeSignal && pos.activeSignal.type.includes("BUY") && pos.activeSignal.entryPrice) {
+        const entry = pos.activeSignal.entryPrice;
+        let currentLtp: number;
+        if (pos.liveOptionLtp && pos.liveOptionLtp > 0) {
+          currentLtp = pos.liveOptionLtp;
+        } else if (pos.entrySpot > 0 && this.indexSpotPrice > 0) {
+          const deltaMultiplier = 0.50;
+          const spotMove = pos.activeSignal.type.includes("CALL")
+            ? (this.indexSpotPrice - pos.entrySpot)
+            : (pos.entrySpot - this.indexSpotPrice);
+          currentLtp = parseFloat(Math.max(0.50, entry + (spotMove * deltaMultiplier)).toFixed(2));
+        } else {
+          currentLtp = entry;
+        }
+        const pnl = parseFloat(((currentLtp - entry) * qty).toFixed(2));
+        const pnlPercent = parseFloat((((currentLtp - entry) / entry) * 100).toFixed(2));
+        const strike = pos.activeSignal.strikePrice || (pos.activeOptionSymbol ? pos.activeOptionSymbol.replace(/[^0-9]/g, "") : "--");
+
+        positions.push({
+          tier: t,
+          symbol: pos.activeOptionSymbol || `NSE:NIFTY_${strike}_${pos.activeSignal.type.includes("CALL") ? "CE" : "PE"}`,
+          strike,
+          type: pos.activeSignal.type,
+          qty,
+          entryPrice: entry,
+          currentLtp,
+          pnl,
+          pnlPercent,
+          stopLoss: pos.activeSignal.stopLossPrice || 0,
+          target1: pos.activeSignal.targetPrice1,
+          target2: pos.activeSignal.targetPrice2,
+          isBreakevenLocked: pos.isBreakevenLocked,
+          isTarget1Locked: pos.isTarget1Locked,
+          entryTime: pos.entryTime,
+          entrySpot: pos.entrySpot,
+          currentSpot: this.indexSpotPrice,
+          openTradeId: pos.openTradeId
+        });
+      }
+    }
+
+    return positions;
+  }
+
+  public getTodayRealizedPnl(): number {
+    return parseFloat(this.sessionRealizedPnl.toFixed(2));
+  }
+
+  public setSamplePositionsActive(active: boolean) {
+    if (!active) {
+      this.sampleActiveTiers.clear();
+    } else {
+      this.sampleActiveTiers = new Set(["SNIPER", "BALANCED", "EXPLORATORY"]);
+    }
+  }
+
+  public manualExitPosition(tier: SignalTier, exitReason: string = "Manual user exit from Positions Dashboard"): boolean {
+    this.sampleActiveTiers.delete(tier);
+    const pos = this.tierPositions[tier];
+    if (pos && pos.activeSignal) {
+      const currentLtp = (pos.liveOptionLtp && pos.liveOptionLtp > 0) ? pos.liveOptionLtp : (pos.activeSignal.entryPrice || 0);
+      this.triggerTierExit(
+        tier,
+        "EXIT_PROFIT",
+        `[MANUAL EXIT] ${exitReason}`,
+        Date.now(),
+        currentLtp
+      );
+    }
+    return true;
   }
 
   private formatFyersOptionSymbol(strike: number, type: "CALL_BUY" | "PUT_BUY", timestamp: number): string {

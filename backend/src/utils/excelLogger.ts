@@ -40,6 +40,8 @@ export class ExcelLogger {
       marketRegime?: string;
       confluenceScore?: number;
       entrySpot?: number;
+      parentTradeId?: number;
+      entryPrice?: number;
     } = {}
   ): Promise<number> {
     const tier = additionalData.tier || "SNIPER";
@@ -92,7 +94,9 @@ export class ExcelLogger {
         marketRegime: additionalData.marketRegime,
         confluenceScore: additionalData.confluenceScore,
         entrySpot: additionalData.entrySpot,
-        peakPremium: price
+        peakPremium: price,
+        parentTradeId: additionalData.parentTradeId,
+        entryPrice: additionalData.entryPrice
       });
       console.log(`[TradeLogger] Trade saved to SQLite Database.`);
     } catch (e: any) {

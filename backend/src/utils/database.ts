@@ -30,6 +30,8 @@ export interface PaperTradeRecord {
   peak_premium?: number;
   is_breakeven_locked?: number;
   is_target1_locked?: number;
+  parent_trade_id?: number;
+  entry_price?: number;
 }
 
 export interface SessionRiskSnapshot {
@@ -173,6 +175,12 @@ export class DatabaseService {
     try {
       this.db.exec("ALTER TABLE paper_trades ADD COLUMN is_target1_locked INTEGER DEFAULT 0");
     } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN parent_trade_id INTEGER");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN entry_price REAL");
+    } catch {}
 
     try {
       this.db.exec(`
@@ -276,6 +284,8 @@ export class DatabaseService {
     confluenceScore?: number;
     entrySpot?: number;
     peakPremium?: number;
+    parentTradeId?: number;
+    entryPrice?: number;
   }): number {
     const db = this.initialize();
     const timestamp = Date.now();
@@ -296,8 +306,9 @@ export class DatabaseService {
         timestamp, datetime, type, tier, symbol, strike, qty, price,
         stop_loss, target1, target2, invested_capital, pnl, pnl_percent,
         fees, net_pnl, reasoning, market_regime, confluence_score, status,
-        entry_spot, peak_premium, is_breakeven_locked, is_target1_locked
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        entry_spot, peak_premium, is_breakeven_locked, is_target1_locked,
+        parent_trade_id, entry_price
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
@@ -324,7 +335,9 @@ export class DatabaseService {
       data.entrySpot ?? null,
       data.peakPremium ?? data.price,
       0,
-      0
+      0,
+      data.parentTradeId ?? null,
+      data.entryPrice ?? null
     );
     return Number(result.lastInsertRowid);
   }
@@ -406,6 +419,23 @@ export class DatabaseService {
     ).all(tier, direction) as { timestamp: number }[];
 
     return trades.filter(t => this.getIstDateKey(t.timestamp) === today).length;
+  }
+
+  public static getTodayRealizedPnl(now: number = Date.now()): number {
+    const db = this.initialize();
+    const today = this.getIstDateKey(now);
+    const trades = db.prepare("SELECT * FROM paper_trades WHERE status = 'CLOSED'").all() as PaperTradeRecord[];
+    let total = 0;
+    for (const trade of trades) {
+      if (this.getIstDateKey(trade.timestamp) === today) {
+        if (trade.net_pnl !== undefined && trade.net_pnl !== null) {
+          total += trade.net_pnl;
+        } else if (trade.pnl !== undefined && trade.pnl !== null) {
+          total += trade.pnl;
+        }
+      }
+    }
+    return parseFloat(total.toFixed(2));
   }
 
   public static getConsecutiveLossesCountByTier(

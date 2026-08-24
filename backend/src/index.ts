@@ -41,7 +41,7 @@ async function main() {
   console.log("=================================================");
 
   // Initialize Google Sheets Auth in background if credentials exist
-  GoogleSheetsService.initializeAuth().catch(() => {});
+  GoogleSheetsService.initializeAuth().catch(() => { });
 
   // 1. SEBI Whitelisted IP Egress Check
   const verifyIp = process.env.VERIFY_STATIC_IP === "true";
@@ -111,6 +111,14 @@ async function main() {
         timestamp: tick.timestamp || Date.now()
       }
     });
+
+    const activePositions = advisory.getActivePositions();
+    if (activePositions.length > 0) {
+      broadcast({
+        type: "POSITIONS",
+        payload: activePositions
+      });
+    }
   });
 
   wss.on("connection", (ws) => {
@@ -123,6 +131,7 @@ async function main() {
       payload: {
         provider: process.env.BROKER_PROVIDER || "FYERS",
         activeSignal: toUiSignalPayload(advisory.activeSignal),
+        positions: advisory.getActivePositions(),
         enableSimulator: process.env.ENABLE_SIMULATOR === "true",
         autoExecution: process.env.AUTO_ORDER_EXECUTION === "true",
         brokerAuthenticated: (broker as any).useLiveApi === true,
@@ -419,6 +428,39 @@ async function main() {
     res.json(advisory.getEngineStatus());
   });
 
+  app.get("/api/positions", (req, res) => {
+    res.json({
+      success: true,
+      positions: advisory.getActivePositions(),
+      realizedPnl: advisory.getTodayRealizedPnl()
+    });
+  });
+
+  app.post("/api/positions/exit", (req, res) => {
+    try {
+      const { tier, reason } = req.body;
+      const success = advisory.manualExitPosition(
+        tier || "SNIPER",
+        reason || "Manual user exit from Positions Dashboard"
+      );
+      const updatedPositions = advisory.getActivePositions();
+      const realizedPnl = advisory.getTodayRealizedPnl();
+      broadcast({
+        type: "POSITIONS",
+        payload: updatedPositions,
+        realizedPnl
+      });
+      res.json({
+        success,
+        message: success ? "Position exited successfully." : "No active open position found for this tier.",
+        positions: updatedPositions,
+        realizedPnl
+      });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
   app.get("/api/session", (req, res) => {
     const session = DatabaseService.getSession("FYERS");
     res.json({
@@ -537,7 +579,7 @@ async function main() {
       const { symbol, minScore, slippageMultiplier, fromDate, toDate, useWfo } = req.body;
       const backtester = new Backtester(broker);
       const result = await backtester.runBacktest({
-        symbol: symbol || "NSE:NIFTY50-INDEX",
+        symbol: symbol || "NSE:NIFTY 50",
         minScore: minScore || 80,
         slippageMultiplier: slippageMultiplier !== undefined ? slippageMultiplier : 0.005,
         fromDate: fromDate || "2026-08-01",

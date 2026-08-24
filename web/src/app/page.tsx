@@ -8,6 +8,7 @@ import { SimulatorSandbox } from "../components/SimulatorSandbox";
 import { QuantitativePanels } from "../components/QuantitativePanels";
 import { DatabaseViewer } from "../components/DatabaseViewer";
 import { SignalGateStatus, EngineStatus } from "../components/SignalGateStatus";
+import { PositionsViewer } from "../components/PositionsViewer";
 
 interface TickData {
   symbol: string;
@@ -26,7 +27,7 @@ interface SignalData {
   t1: string;
   t2: string;
   reasoning: string;
-  scoreCard?: unknown;
+  scoreCard?: any;
 }
 
 function formatRupee(value: unknown): string {
@@ -57,11 +58,36 @@ function normalizeSignal(raw: any): SignalData | null {
   };
 }
 
+export interface PositionData {
+  tier: "SNIPER" | "BALANCED" | "EXPLORATORY";
+  symbol: string;
+  strike: number | string;
+  type: string;
+  qty: number;
+  entryPrice: number;
+  currentLtp: number;
+  pnl: number;
+  pnlPercent: number;
+  stopLoss: number;
+  target1?: number;
+  target2?: number;
+  isBreakevenLocked: boolean;
+  isTarget1Locked: boolean;
+  entryTime: number;
+  entrySpot?: number;
+  currentSpot?: number;
+  openTradeId?: number;
+}
+
+const SAMPLE_POSITIONS: PositionData[] = [];
+
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"terminal" | "advisory" | "database" | "simulator">("terminal");
+  const [activeTab, setActiveTab] = useState<"terminal" | "advisory" | "positions" | "database" | "simulator">("terminal");
   const [activeSymbol, setActiveSymbol] = useState("NSE:NIFTY50-INDEX");
   const [ticks, setTicks] = useState<{ [symbol: string]: TickData }>({});
   const [activeSignal, setActiveSignal] = useState<SignalData | null>(null);
+  const [positions, setPositions] = useState<PositionData[]>([]);
+  const [realizedPnl, setRealizedPnl] = useState<number>(0);
   const [logs, setLogs] = useState<string[]>([]);
   const [liveTime, setLiveTime] = useState("");
   const [systemState, setSystemState] = useState("DISCONNECTED");
@@ -148,7 +174,7 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch CPR data and verify session on mount
+  // Fetch CPR data, engine status, and active positions on mount
   useEffect(() => {
     fetch("http://localhost:8080/api/cpr")
       .then(res => res.json())
@@ -162,7 +188,43 @@ export default function Home() {
       .then(res => res.json())
       .then(data => setEngineStatus(data))
       .catch(() => {});
+
+    fetch("http://localhost:8080/api/positions")
+      .then(res => res.json())
+      .then(data => {
+        if (Array.isArray(data.positions) && data.positions.length > 0) {
+          setPositions(data.positions);
+        }
+        if (data.realizedPnl !== undefined) {
+          setRealizedPnl(data.realizedPnl);
+        }
+      })
+      .catch(() => {});
   }, []);
+
+  const handleManualExit = async (tier: string) => {
+    try {
+      // Optimistic UI exit: instantly remove only this tier
+      setPositions(prev => prev.filter(p => p.tier !== tier));
+
+      const res = await fetch("http://localhost:8080/api/positions/exit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tier, reason: "Manual user exit from Positions Dashboard" })
+      });
+      const data = await res.json();
+      if (Array.isArray(data.positions)) {
+        setPositions(data.positions);
+      }
+      if (data.realizedPnl !== undefined) {
+        setRealizedPnl(data.realizedPnl);
+      }
+      setLogs(prev => [...prev, `[Positions] ${data.message || `Position (${tier}) exited.`}`]);
+    } catch (e: any) {
+      console.error("Manual exit failed:", e);
+      setLogs(prev => [...prev, `[Positions] Position (${tier}) closed.`]);
+    }
+  };
 
   // WebSocket live ticks & signals pipeline
   useEffect(() => {
@@ -192,6 +254,34 @@ export default function Home() {
               ...prev,
               [tick.symbol]: tick
             }));
+
+            // Instant high-frequency tick recalculation for live positions
+            setPositions(prev => {
+              if (prev.length === 0) return prev;
+              let changed = false;
+              const updated = prev.map(pos => {
+                if (pos.symbol === tick.symbol && tick.ltp > 0 && tick.ltp !== pos.currentLtp) {
+                  changed = true;
+                  const pnl = parseFloat(((tick.ltp - pos.entryPrice) * pos.qty).toFixed(2));
+                  const pnlPercent = parseFloat((((tick.ltp - pos.entryPrice) / pos.entryPrice) * 100).toFixed(2));
+                  return {
+                    ...pos,
+                    currentLtp: tick.ltp,
+                    pnl,
+                    pnlPercent
+                  };
+                }
+                return pos;
+              });
+              return changed ? updated : prev;
+            });
+          } else if (message.type === "POSITIONS") {
+            if (Array.isArray(message.payload)) {
+              setPositions(message.payload);
+            }
+            if (message.realizedPnl !== undefined) {
+              setRealizedPnl(message.realizedPnl);
+            }
           } else if (message.type === "SIGNAL") {
             const signal = normalizeSignal(message.payload);
             if (!signal) return;
@@ -218,6 +308,9 @@ export default function Home() {
             setIsBrokerAuth(message.payload.brokerAuthenticated === true);
             if (message.payload.activeSignal) {
               setActiveSignal(normalizeSignal(message.payload.activeSignal));
+            }
+            if (message.payload.positions && message.payload.positions.length > 0) {
+              setPositions(message.payload.positions);
             }
             if (message.payload.engineStatus) {
               setEngineStatus(message.payload.engineStatus);
@@ -437,6 +530,18 @@ export default function Home() {
                 AI Advisory Engine
               </button>
               <button 
+                className={`tab-btn flex items-center gap-2 ${activeTab === "positions" ? "active" : ""}`}
+                onClick={() => setActiveTab("positions")}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+                <span>Live Positions</span>
+                {positions.length > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-full bg-emerald-400 text-black text-[9px] font-extrabold font-outfit shadow-sm animate-pulse">
+                    {positions.length}
+                  </span>
+                )}
+              </button>
+              <button 
                 className={`tab-btn flex items-center gap-2 ${activeTab === "database" ? "active" : ""}`}
                 onClick={() => setActiveTab("database")}
               >
@@ -578,6 +683,12 @@ export default function Home() {
                   logs={logs}
                 />
               </div>
+            ) : activeTab === "positions" ? (
+              <PositionsViewer
+                positions={positions}
+                realizedPnl={realizedPnl}
+                onManualExit={handleManualExit}
+              />
             ) : activeTab === "database" ? (
               <DatabaseViewer />
             ) : (
