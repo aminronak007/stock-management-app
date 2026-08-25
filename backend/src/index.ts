@@ -266,6 +266,13 @@ async function main() {
   });
 
   // 5. Expose REST endpoints
+  app.get("/api/fyers-auth-url", (req, res) => {
+    const clientId = process.env.FYERS_CLIENT_ID || "W8C1B64UA9-200";
+    const redirect = encodeURIComponent(process.env.FYERS_REDIRECT_URL || "http://localhost:8080/api/fyers-callback");
+    const url = `https://api-t1.fyers.in/api/v3/generate-authcode?client_id=${clientId}&redirect_uri=${redirect}&response_type=code&state=state_code`;
+    res.json({ url, clientId });
+  });
+
   app.get("/api/fyers-callback", async (req, res) => {
     const authCode = req.query.auth_code as string;
     if (!authCode) {

@@ -467,6 +467,14 @@ export default function Home() {
                         await fetch("http://localhost:8080/api/logout", { method: "POST" });
                         setIsBrokerAuth(false);
                         setLogs(prev => [...prev, "[Broker] Logged out. Session cleared."]);
+                        const authRes = await fetch("http://localhost:8080/api/fyers-auth-url");
+                        if (authRes.ok) {
+                          const authData = await authRes.json();
+                          if (authData.url) {
+                            window.open(authData.url, "_blank");
+                            return;
+                          }
+                        }
                         const clientId = "W8C1B64UA9-200";
                         const redirect = encodeURIComponent("http://localhost:8080/api/fyers-callback");
                         window.open(`https://api-t1.fyers.in/api/v3/generate-authcode?client_id=${clientId}&redirect_uri=${redirect}&response_type=code&state=state_code`, "_blank");
@@ -482,7 +490,17 @@ export default function Home() {
                 </>
               ) : (
                 <button
-                  onClick={() => {
+                  onClick={async () => {
+                    try {
+                      const authRes = await fetch("http://localhost:8080/api/fyers-auth-url");
+                      if (authRes.ok) {
+                        const authData = await authRes.json();
+                        if (authData.url) {
+                          window.open(authData.url, "_blank");
+                          return;
+                        }
+                      }
+                    } catch {}
                     const clientId = "W8C1B64UA9-200";
                     const redirect = encodeURIComponent("http://localhost:8080/api/fyers-callback");
                     window.open(`https://api-t1.fyers.in/api/v3/generate-authcode?client_id=${clientId}&redirect_uri=${redirect}&response_type=code&state=state_code`, "_blank");

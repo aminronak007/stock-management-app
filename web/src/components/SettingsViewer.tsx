@@ -66,7 +66,17 @@ export const SettingsViewer: React.FC = () => {
 
   const hasActiveSession = !isSessionExpired && !!activeFyersSession;
 
-  const openFyersAuth = () => {
+  const openFyersAuth = async () => {
+    try {
+      const res = await fetch("http://localhost:8080/api/fyers-auth-url");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.url) {
+          window.open(data.url, "_blank");
+          return;
+        }
+      }
+    } catch {}
     const clientId = "W8C1B64UA9-200";
     const redirect = encodeURIComponent("http://localhost:8080/api/fyers-callback");
     window.open(
