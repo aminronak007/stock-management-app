@@ -276,6 +276,39 @@ export default function Home() {
               });
               return changed ? updated : prev;
             });
+          } else if (message.type === "TICK_BATCH") {
+            // Batched tick delivery: process all ticks in a single React state update
+            const tickBatch: TickData[] = message.payload;
+            if (Array.isArray(tickBatch) && tickBatch.length > 0) {
+              setTicks(prev => {
+                const next = { ...prev };
+                for (const tick of tickBatch) {
+                  next[tick.symbol] = tick;
+                }
+                return next;
+              });
+
+              // Update positions from batched ticks
+              setPositions(prev => {
+                if (prev.length === 0) return prev;
+                let changed = false;
+                const tickMap: { [symbol: string]: TickData } = {};
+                for (const tick of tickBatch) {
+                  tickMap[tick.symbol] = tick;
+                }
+                const updated = prev.map(pos => {
+                  const tick = tickMap[pos.symbol];
+                  if (tick && tick.ltp > 0 && tick.ltp !== pos.currentLtp) {
+                    changed = true;
+                    const pnl = parseFloat(((tick.ltp - pos.entryPrice) * pos.qty).toFixed(2));
+                    const pnlPercent = parseFloat((((tick.ltp - pos.entryPrice) / pos.entryPrice) * 100).toFixed(2));
+                    return { ...pos, currentLtp: tick.ltp, pnl, pnlPercent };
+                  }
+                  return pos;
+                });
+                return changed ? updated : prev;
+              });
+            }
           } else if (message.type === "POSITIONS") {
             if (Array.isArray(message.payload)) {
               setPositions(message.payload);

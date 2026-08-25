@@ -87,37 +87,75 @@ async function main() {
     });
   };
 
-  // Forward all live incoming broker ticks to brokerTickCache, Advisory Engine, and all active UI WebSocket clients
+  // Tick Batching & Throttling for ultra-low-latency UI delivery
+  // Instead of broadcasting every individual tick (50-200/sec), we batch ticks and flush at 150ms intervals.
+  // This reduces WebSocket message count by ~95% while maintaining sub-200ms visual latency.
+  let pendingTickBatch: { [symbol: string]: any } = {};
+  let tickBatchTimer: NodeJS.Timeout | null = null;
+  const TICK_BATCH_INTERVAL_MS = 150; // Flush every 150ms (≈7 batches/sec — feels instant to human eye)
+
+  let lastPositionBroadcastAt = 0;
+  const POSITION_BROADCAST_INTERVAL_MS = 500; // Positions update at most 2x/sec
+
+  const flushTickBatch = () => {
+    const symbols = Object.keys(pendingTickBatch);
+    if (symbols.length === 0) return;
+
+    // Send all accumulated ticks in a single batched WebSocket frame
+    const batchPayload = JSON.stringify({
+      type: "TICK_BATCH",
+      payload: Object.values(pendingTickBatch)
+    });
+    clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(batchPayload);
+      }
+    });
+    pendingTickBatch = {};
+  };
+
+  // Forward all live incoming broker ticks to brokerTickCache, Advisory Engine, and batched UI delivery
   broker.onTick((tick) => {
     brokerTickCache[tick.symbol] = {
       ltp: tick.ltp,
       change: tick.netChangePercent
     };
 
-    // Feed real-time ticks to the Advisory Strategy Engine
+    // Feed real-time ticks to the Advisory Strategy Engine (full speed, no throttling)
     advisory.processTick(tick).catch((err) => {
       console.error("[AdvisoryManager] Error processing tick:", err);
     });
 
-    broadcast({
-      type: "TICK",
-      payload: {
-        symbol: tick.symbol,
-        ltp: tick.ltp,
-        netChangePercent: tick.netChangePercent,
-        bidPrice: tick.bidPrice || tick.ltp,
-        askPrice: tick.askPrice || tick.ltp,
-        volume: tick.volume || 0,
-        timestamp: tick.timestamp || Date.now()
-      }
-    });
+    // Queue tick for next batch flush (overwrites previous tick for same symbol — latest wins)
+    pendingTickBatch[tick.symbol] = {
+      symbol: tick.symbol,
+      ltp: tick.ltp,
+      netChangePercent: tick.netChangePercent,
+      bidPrice: tick.bidPrice || tick.ltp,
+      askPrice: tick.askPrice || tick.ltp,
+      volume: tick.volume || 0,
+      timestamp: tick.timestamp || Date.now()
+    };
 
-    const activePositions = advisory.getActivePositions();
-    if (activePositions.length > 0) {
-      broadcast({
-        type: "POSITIONS",
-        payload: activePositions
-      });
+    // Start batch timer if not already running
+    if (!tickBatchTimer) {
+      tickBatchTimer = setTimeout(() => {
+        flushTickBatch();
+        tickBatchTimer = null;
+      }, TICK_BATCH_INTERVAL_MS);
+    }
+
+    // Throttled position broadcast (only when positions exist and interval elapsed)
+    const now = Date.now();
+    if (now - lastPositionBroadcastAt >= POSITION_BROADCAST_INTERVAL_MS) {
+      const activePositions = advisory.getActivePositions();
+      if (activePositions.length > 0) {
+        lastPositionBroadcastAt = now;
+        broadcast({
+          type: "POSITIONS",
+          payload: activePositions
+        });
+      }
     }
   });
 
