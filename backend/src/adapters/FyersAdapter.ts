@@ -1,5 +1,7 @@
 import { IBrokerAdapter, Candle, CompactTick, OptionChainItem } from "./IBrokerAdapter";
 import { DatabaseService } from "../utils/database";
+import * as path from "path";
+import * as fs from "fs";
 
 const fyers = require("fyers-api-v3");
 
@@ -11,6 +13,7 @@ export class FyersAdapter implements IBrokerAdapter {
   private optionChainCache: { [symbol: string]: { data: OptionChainItem[]; expiryTime: number; fetchedAt: number } } = {};
   private optionChainInflight: { [symbol: string]: Promise<OptionChainItem[]> } = {};
   private optionChainBackoffUntil: { [symbol: string]: number } = {};
+  private historyCache: { [key: string]: { candles: Candle[]; expiry: number } } = {};
   private static readonly OPTION_CHAIN_TTL_MS = 30_000;
   private static readonly OPTION_CHAIN_STALE_MS = 5 * 60_000;
   private static readonly OPTION_CHAIN_BACKOFF_MS = 30_000;
@@ -78,11 +81,23 @@ export class FyersAdapter implements IBrokerAdapter {
     console.log("[FyersAdapter] Establishing live WebSocket stream...");
     
     try {
+      const logsDir = path.join(__dirname, "../../logs");
+      if (!fs.existsSync(logsDir)) {
+        fs.mkdirSync(logsDir, { recursive: true });
+      }
+
       this.dataSocket = fyers.fyersDataSocket.getInstance(
         `${clientId}:${this.accessToken}`,
-        "./",
+        logsDir,
         false
       );
+
+      if (typeof this.dataSocket.removeAllListeners === "function") {
+        this.dataSocket.removeAllListeners("connect");
+        this.dataSocket.removeAllListeners("message");
+        this.dataSocket.removeAllListeners("error");
+        this.dataSocket.removeAllListeners("close");
+      }
 
       this.dataSocket.on("connect", () => {
         console.log("[FyersAdapter] WebSocket Connected successfully.");
@@ -265,6 +280,16 @@ export class FyersAdapter implements IBrokerAdapter {
     fromDate: string,
     toDate: string
   ): Promise<Candle[]> {
+    const cacheKey = `${symbol}_${resolution}_${fromDate}_${toDate}`;
+    const now = Date.now();
+    const cached = this.historyCache[cacheKey];
+
+    if (cached && cached.expiry > now && cached.candles.length > 0) {
+      return cached.candles;
+    }
+
+    const ttlMs = resolution === "D" ? 300_000 : 15_000;
+
     if (this.useLiveApi && this.fyersClient) {
       const fetchFromFyers = async (): Promise<Candle[] | null> => {
         const params = {
@@ -292,17 +317,27 @@ export class FyersAdapter implements IBrokerAdapter {
       try {
         console.log(`[FyersAdapter] Fetching real historical data for: ${symbol}`);
         const candles = await fetchFromFyers();
-        if (candles && candles.length > 0) return candles;
+        if (candles && candles.length > 0) {
+          this.historyCache[cacheKey] = { candles, expiry: now + ttlMs };
+          return candles;
+        }
       } catch (err: any) {
         if (err?.message?.includes("limit") || typeof err === "string" && err.includes("limit")) {
           // Rate limit backoff: wait 400ms and retry once
           await new Promise(r => setTimeout(r, 400));
           try {
             const retryCandles = await fetchFromFyers();
-            if (retryCandles && retryCandles.length > 0) return retryCandles;
+            if (retryCandles && retryCandles.length > 0) {
+              this.historyCache[cacheKey] = { candles: retryCandles, expiry: now + ttlMs };
+              return retryCandles;
+            }
           } catch {}
         }
         console.warn(`[FyersAdapter] Historical data query rejected for ${symbol}:`, err?.message || err);
+      }
+
+      if (cached && cached.candles.length > 0) {
+        return cached.candles;
       }
 
       // In Live Broker mode, never generate fake mock candles; return empty to let caller fail safely
@@ -347,6 +382,7 @@ export class FyersAdapter implements IBrokerAdapter {
       currentPrice = close;
       time += 60 * 1000;
     }
+    this.historyCache[cacheKey] = { candles: mockCandles, expiry: now + ttlMs };
     return mockCandles;
   }
 
