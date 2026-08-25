@@ -14,6 +14,7 @@ export class FyersAdapter implements IBrokerAdapter {
   private optionChainInflight: { [symbol: string]: Promise<OptionChainItem[]> } = {};
   private optionChainBackoffUntil: { [symbol: string]: number } = {};
   private historyCache: { [key: string]: { candles: Candle[]; expiry: number } } = {};
+  private historyInflight: Map<string, Promise<Candle[]>> = new Map();
   private static readonly OPTION_CHAIN_TTL_MS = 30_000;
   private static readonly OPTION_CHAIN_STALE_MS = 5 * 60_000;
   private static readonly OPTION_CHAIN_BACKOFF_MS = 30_000;
@@ -288,102 +289,113 @@ export class FyersAdapter implements IBrokerAdapter {
       return cached.candles;
     }
 
-    const ttlMs = resolution === "D" ? 300_000 : 15_000;
+    const inflight = this.historyInflight.get(cacheKey);
+    if (inflight) {
+      return inflight;
+    }
 
-    if (this.useLiveApi && this.fyersClient) {
-      const fetchFromFyers = async (): Promise<Candle[] | null> => {
-        const params = {
-          symbol: symbol,
-          resolution: resolution,
-          date_format: "1",
-          range_from: fromDate,
-          range_to: toDate,
-          cont_flag: "1"
-        };
-        const res = await this.fyersClient.getHistory(params);
-        if (res && res.s === "ok" && Array.isArray(res.candles)) {
-          return res.candles.map((c: any) => ({
-            timestamp: c[0] * 1000,
-            open: c[1],
-            high: c[2],
-            low: c[3],
-            close: c[4],
-            volume: c[5]
-          }));
-        }
-        return null;
-      };
-
+    const fetchPromise = (async (): Promise<Candle[]> => {
       try {
-        console.log(`[FyersAdapter] Fetching real historical data for: ${symbol}`);
-        const candles = await fetchFromFyers();
-        if (candles && candles.length > 0) {
-          this.historyCache[cacheKey] = { candles, expiry: now + ttlMs };
-          return candles;
-        }
-      } catch (err: any) {
-        if (err?.message?.includes("limit") || typeof err === "string" && err.includes("limit")) {
-          // Rate limit backoff: wait 400ms and retry once
-          await new Promise(r => setTimeout(r, 400));
-          try {
-            const retryCandles = await fetchFromFyers();
-            if (retryCandles && retryCandles.length > 0) {
-              this.historyCache[cacheKey] = { candles: retryCandles, expiry: now + ttlMs };
-              return retryCandles;
+        const ttlMs = resolution === "D" ? 300_000 : 15_000;
+
+        if (this.useLiveApi && this.fyersClient) {
+          const fetchFromFyers = async (): Promise<Candle[] | null> => {
+            const params = {
+              symbol: symbol,
+              resolution: resolution,
+              date_format: "1",
+              range_from: fromDate,
+              range_to: toDate,
+              cont_flag: "1"
+            };
+            const res = await this.fyersClient.getHistory(params);
+            if (res && res.s === "ok" && Array.isArray(res.candles)) {
+              return res.candles.map((c: any) => ({
+                timestamp: c[0] * 1000,
+                open: c[1],
+                high: c[2],
+                low: c[3],
+                close: c[4],
+                volume: c[5]
+              }));
             }
-          } catch {}
+            return null;
+          };
+
+          try {
+            console.log(`[FyersAdapter] Fetching real historical data for: ${symbol}`);
+            const candles = await fetchFromFyers();
+            if (candles && candles.length > 0) {
+              this.historyCache[cacheKey] = { candles, expiry: now + ttlMs };
+              return candles;
+            }
+          } catch (err: any) {
+            if (err?.message?.includes("limit") || (typeof err === "string" && err.includes("limit"))) {
+              await new Promise(r => setTimeout(r, 400));
+              try {
+                const retryCandles = await fetchFromFyers();
+                if (retryCandles && retryCandles.length > 0) {
+                  this.historyCache[cacheKey] = { candles: retryCandles, expiry: now + ttlMs };
+                  return retryCandles;
+                }
+              } catch {}
+            }
+            console.warn(`[FyersAdapter] Historical data query rejected for ${symbol}:`, err?.message || err);
+          }
+
+          if (cached && cached.candles.length > 0) {
+            return cached.candles;
+          }
+
+          return [];
         }
-        console.warn(`[FyersAdapter] Historical data query rejected for ${symbol}:`, err?.message || err);
+
+        const getSymbolBasePrice = (sym: string): number => {
+          if (sym.includes("SENSEX")) return 77728.16;
+          if (sym.includes("NIFTYBANK") || sym.includes("BANKNIFTY")) return 57497.80;
+          if (sym.includes("FINNIFTY")) return 26217.15;
+          if (sym.includes("INDIAVIX") || sym.includes("VIX")) return 11.33;
+          if (sym.includes("NIFTY")) return 24287.65;
+          if (sym.includes("RELIANCE")) return 1316.00;
+          if (sym.includes("HDFCBANK")) return 729.00;
+          if (sym.includes("ICICIBANK")) return 1415.30;
+          if (sym.includes("TCS")) return 4180.00;
+          if (sym.includes("SBIN")) return 840.00;
+          return 1500.00;
+        };
+
+        const mockCandles: Candle[] = [];
+        const basePrice = getSymbolBasePrice(symbol);
+        let currentPrice = basePrice;
+        let time = new Date(fromDate).getTime();
+        const volatilityStep = basePrice > 10000 ? 15 : (basePrice < 50 ? 0.05 : 1.5);
+        
+        for (let i = 0; i < 100; i++) {
+          const change = (Math.random() - 0.49) * volatilityStep;
+          const open = currentPrice;
+          const close = currentPrice + change;
+          const high = Math.max(open, close) + Math.random() * (volatilityStep * 0.3);
+          const low = Math.min(open, close) - Math.random() * (volatilityStep * 0.3);
+          mockCandles.push({
+            timestamp: time,
+            open: parseFloat(open.toFixed(2)),
+            high: parseFloat(high.toFixed(2)),
+            low: parseFloat(low.toFixed(2)),
+            close: parseFloat(close.toFixed(2)),
+            volume: Math.floor(Math.random() * 10000)
+          });
+          currentPrice = close;
+          time += 60 * 1000;
+        }
+        this.historyCache[cacheKey] = { candles: mockCandles, expiry: now + ttlMs };
+        return mockCandles;
+      } finally {
+        this.historyInflight.delete(cacheKey);
       }
+    })();
 
-      if (cached && cached.candles.length > 0) {
-        return cached.candles;
-      }
-
-      // In Live Broker mode, never generate fake mock candles; return empty to let caller fail safely
-      return [];
-    }
-
-    // Accurate realistic market baselines ONLY for offline simulation mode
-    const getSymbolBasePrice = (sym: string): number => {
-      if (sym.includes("SENSEX")) return 77728.16;
-      if (sym.includes("NIFTYBANK") || sym.includes("BANKNIFTY")) return 57497.80;
-      if (sym.includes("FINNIFTY")) return 26217.15;
-      if (sym.includes("INDIAVIX") || sym.includes("VIX")) return 11.33;
-      if (sym.includes("NIFTY")) return 24287.65;
-      if (sym.includes("RELIANCE")) return 1316.00;
-      if (sym.includes("HDFCBANK")) return 729.00;
-      if (sym.includes("ICICIBANK")) return 1415.30;
-      if (sym.includes("TCS")) return 4180.00;
-      if (sym.includes("SBIN")) return 840.00;
-      return 1500.00;
-    };
-
-    const mockCandles: Candle[] = [];
-    const basePrice = getSymbolBasePrice(symbol);
-    let currentPrice = basePrice;
-    let time = new Date(fromDate).getTime();
-    const volatilityStep = basePrice > 10000 ? 15 : (basePrice < 50 ? 0.05 : 1.5);
-    
-    for (let i = 0; i < 100; i++) {
-      const change = (Math.random() - 0.49) * volatilityStep;
-      const open = currentPrice;
-      const close = currentPrice + change;
-      const high = Math.max(open, close) + Math.random() * (volatilityStep * 0.3);
-      const low = Math.min(open, close) - Math.random() * (volatilityStep * 0.3);
-      mockCandles.push({
-        timestamp: time,
-        open: parseFloat(open.toFixed(2)),
-        high: parseFloat(high.toFixed(2)),
-        low: parseFloat(low.toFixed(2)),
-        close: parseFloat(close.toFixed(2)),
-        volume: Math.floor(Math.random() * 10000)
-      });
-      currentPrice = close;
-      time += 60 * 1000;
-    }
-    this.historyCache[cacheKey] = { candles: mockCandles, expiry: now + ttlMs };
-    return mockCandles;
+    this.historyInflight.set(cacheKey, fetchPromise);
+    return fetchPromise;
   }
 
   /**
