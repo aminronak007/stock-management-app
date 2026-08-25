@@ -278,7 +278,8 @@ export class AdvisoryManager {
       const [hStr, mStr] = istTime.split(":");
       const hours = parseInt(hStr, 10);
       const minutes = parseInt(mStr, 10);
-      return hours === 9 && minutes >= 15 && minutes < 30;
+      const orbEndMinute = (this.indiaVixValue > 18) ? 20 : 30;
+      return hours === 9 && minutes >= 15 && minutes < orbEndMinute;
     });
 
     if (orbCandles.length === 0) return;
@@ -531,6 +532,11 @@ export class AdvisoryManager {
       return;
     }
 
+    // 1b. Track India VIX updates for dynamic strategy adaptation
+    if (tick.symbol.includes("VIX") || tick.symbol.includes("INDIAVIX")) {
+      this.indiaVixValue = tick.ltp;
+    }
+
     // 2. Track Nifty Spot Index price
     if (tick.symbol === "NSE:NIFTY50-INDEX") {
       this.indexSpotPrice = tick.ltp;
@@ -574,22 +580,24 @@ export class AdvisoryManager {
       // Session VWAP: today's 9:15 AM IST bars only (not prior-day history)
       this.refreshSessionVwap(timestamp, tick.ltp);
       
-      // ORB range calculation (first 15 minutes of session: 9:15 - 9:30 AM IST)
-      if (hours === 9 && minutes >= 15 && minutes < 30) {
+      // Dynamic Adaptive ORB calculation window (5m for VIX > 18, 15m for normal VIX)
+      const orbEndMinute = (this.indiaVixValue > 18) ? 20 : 30;
+
+      if (hours === 9 && minutes >= 15 && minutes < orbEndMinute) {
         if (!this.isOrbActive) {
           if (this.orbHigh <= 0 || this.orbLow <= 0) {
             this.orbHigh = tick.ltp;
             this.orbLow = tick.ltp;
           }
           this.isOrbActive = true;
-          console.log(`[AdvisoryManager] 9:15 AM ORB range active. Starting boundaries tracking.`);
+          console.log(`[AdvisoryManager] 9:15 AM ORB range active (${orbEndMinute - 15}m window, VIX: ${this.indiaVixValue > 0 ? this.indiaVixValue.toFixed(2) : "Default"}). Tracking boundaries.`);
         }
         this.orbHigh = Math.max(this.orbHigh, tick.ltp);
         this.orbLow = Math.min(this.orbLow, tick.ltp);
       }
 
-      // Check breakout triggers post 9:30 AM IST
-      if ((hours === 9 && minutes >= 30) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
+      // Check breakout triggers post ORB formation (post 9:20 AM for VIX>18, post 9:30 AM for normal VIX)
+      if ((hours === 9 && minutes >= orbEndMinute) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
         this.isOrbActive = false; // ORB creation range completed
         // One evaluation at a time, at most once per second — never stampede Fyers on every tick
         if (!this.breakoutEvalInflight && timestamp - this.lastBreakoutEvalAt >= 1000) {
@@ -723,7 +731,21 @@ export class AdvisoryManager {
     const pcr = totalCallOi > 0 ? totalPutOi / totalCallOi : 1.0;
     const triggerType = candidate;
     const strikeInterval = 50;
-    let selectedStrike = Math.round(spot / strikeInterval) * strikeInterval;
+    const atmStrike = Math.round(spot / strikeInterval) * strikeInterval;
+    let selectedStrike = atmStrike;
+
+    // Enhancement 2: Dynamic Strike Selection (Delta-Calibrated based on VIX)
+    // Low VIX (<12): Option premiums move slowly due to low IV. We pick slightly In-The-Money (ITM) strike
+    // (-50 pts for CALL_BUY, +50 pts for PUT_BUY) with Delta ~0.62 to ensure faster premium acceleration.
+    // Normal/High VIX (>=12): We stick to At-The-Money (ATM) strike (Delta ~0.50).
+    if (this.indiaVixValue > 0 && this.indiaVixValue < 12) {
+      if (candidate === "CALL_BUY") {
+        selectedStrike = atmStrike - 50;
+      } else if (candidate === "PUT_BUY") {
+        selectedStrike = atmStrike + 50;
+      }
+      console.log(`[AdvisoryManager] Low VIX (${this.indiaVixValue.toFixed(2)}) detected. Selected ITM Strike ${selectedStrike} (ATM: ${atmStrike}) for higher Delta (~0.62).`);
+    }
 
     const legFor = (strike: number) => {
       const row = chain.find(item => item.strikePrice === strike);
@@ -952,8 +974,17 @@ export class AdvisoryManager {
         : this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
 
       // Persist the BUY to SQLite first. RAM is only a cache of that row.
-      const logQtyStr = process.env.ORDER_QTY || "25";
-      const logQty = parseInt(logQtyStr, 10) || 25;
+      const baseQty = parseInt(process.env.ORDER_QTY || "25", 10) || 25;
+      let logQty = baseQty;
+
+      // Upgrade 2: Dynamic High-Conviction Sizing (Money Multiplier)
+      // Standard setup (Score 75-84): 1 Lot (25 Qty)
+      // SUPER-SNIPER setup (Score >= 85): Double Lot Size (2 Lots = 50 Qty)
+      if (scoreCard.totalScore >= 85) {
+        logQty = baseQty * 2;
+        console.log(`[AdvisoryManager] 🚀 [SUPER-SNIPER] High Confluence Score (${scoreCard.totalScore}/100) detected! Dynamic Lot Scaling ACTIVE: Executing 2 Lots (${logQty} Qty).`);
+      }
+
       const openTradeId = await ExcelLogger.logTransaction(
         triggerType,
         optionSymbol,
@@ -997,10 +1028,8 @@ export class AdvisoryManager {
       
       // Auto Execution placement only for SNIPER Tier
       if (tier === "SNIPER" && process.env.AUTO_ORDER_EXECUTION === "true") {
-        const qtyStr = process.env.ORDER_QTY || "25";
-        const qty = parseInt(qtyStr, 10) || 25;
-        console.log(`[AdvisoryManager] [SNIPER] AUTO-EXECUTION ACTIVE. Placing BUY option order: ${qty}x ${optionSymbol}`);
-        this.broker.placeOptionOrder(optionSymbol, qty, "BUY", "MARKET")
+        console.log(`[AdvisoryManager] [SNIPER] AUTO-EXECUTION ACTIVE. Placing BUY option order: ${logQty}x ${optionSymbol}`);
+        this.broker.placeOptionOrder(optionSymbol, logQty, "BUY", "MARKET")
           .then(orderId => {
             targetPos.activeOrderId = orderId;
             console.log(`[AdvisoryManager] AUTO BUY ORDER FILLED. Order ID: ${orderId}`);

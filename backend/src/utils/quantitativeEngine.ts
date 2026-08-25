@@ -89,8 +89,25 @@ export class QuantitativeEngine {
     // 1. Immediate rejection: breakout but price returned inside ORB
     if (triggerType === "CALL_BUY" && spot <= orbHigh) return true;
     if (triggerType === "PUT_BUY" && spot >= orbLow) return true;
-    // Index often leads stocks by several minutes. Heavyweight lag and the still-forming
-    // 5m bar are confluence penalties, not a veto of a real ORB + VWAP + 9/21 break.
+    
+    // 2. Upgrade 1: Heavyweight Divergence Trap - If heavyweights actively oppose breakout, flag false breakout
+    let heavyweightAlignsCount = 0;
+    let validActiveCount = 0;
+    const trackedKeys = Object.keys(heavyweightsLtp);
+    trackedKeys.forEach(sym => {
+      const ltp = heavyweightsLtp[sym] || 0;
+      const vwap = heavyweightsVwap[sym] || 0;
+      if (ltp > 0 && vwap > 0) {
+        validActiveCount++;
+        if (triggerType === "CALL_BUY" && ltp > vwap) heavyweightAlignsCount++;
+        if (triggerType === "PUT_BUY" && ltp < vwap) heavyweightAlignsCount++;
+      }
+    });
+
+    if (validActiveCount >= 2 && heavyweightAlignsCount / validActiveCount < 0.35) {
+      return true; // Heavyweights strongly opposing spot move -> False Breakout Trap!
+    }
+
     return false;
   }
 
@@ -228,10 +245,14 @@ export class QuantitativeEngine {
       const ratio = heavyweightAlignsCount / validActiveCount;
       if (ratio >= 0.8) {
         factors.heavyweights.score += 15;
-        factors.heavyweights.factors.push("All active heavyweight stocks confirm trend");
+        factors.heavyweights.factors.push("All active heavyweight stocks (Reliance/HDFC/ICICI) strongly confirm breakout trend");
       } else if (ratio >= 0.5) {
         factors.heavyweights.score += 10;
         factors.heavyweights.factors.push("Majority heavyweight alignment confirmed");
+      } else {
+        factors.heavyweights.score = 0;
+        factors.heavyweights.factors.push("❌ HEAVYWEIGHT WARNING: Heavyweight stocks opposing breakout - HIGH RISK TRAP!");
+        explanation.push("Heavyweight stock VWAP alignment failed (< 50%). High probability fakeout trap.");
       }
     } else {
       // Fallback if index-based trading is running
