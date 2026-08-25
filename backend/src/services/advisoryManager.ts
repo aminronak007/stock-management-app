@@ -1214,18 +1214,27 @@ export class AdvisoryManager {
       pos.stoppedCooldownUntil = timestamp + cooldownMs;
       console.log(`[Risk Engine] [${tier}] ${type} triggered (${ratio >= 0 ? '+' : ''}${ratio.toFixed(2)}R). 45-minute chop quarantine active until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}.`);
     }
+    // Retrieve the actual entry qty from the open SQLite record (critical for dynamic lot sizing)
+    let openTradeId: number | undefined = pos.openTradeId ?? undefined;
+    let qty = parseInt(process.env.ORDER_QTY || "25", 10) || 25; // fallback default
+    if (!openTradeId) {
+      const openBuys = DatabaseService.getOpenBuyTrades(tier);
+      if (openBuys.length > 0) {
+        openTradeId = openBuys[openBuys.length - 1].id;
+        qty = openBuys[openBuys.length - 1].qty || qty;
+      }
+    } else {
+      // Read actual qty from the persisted BUY record (may be 2x for SUPER-SNIPER trades)
+      const openBuys = DatabaseService.getOpenBuyTrades(tier);
+      const matchingTrade = openBuys.find(t => t.id === openTradeId);
+      if (matchingTrade) {
+        qty = matchingTrade.qty || qty;
+      }
+    }
 
-    const qtyStr = process.env.ORDER_QTY || "25";
-    const qty = parseInt(qtyStr, 10) || 25;
     const grossPnl = pnl * qty;
     const fees = ExcelLogger.calculateStatutoryFees(exit, qty);
     const netPnl = grossPnl - fees;
-
-    let openTradeId = pos.openTradeId;
-    if (!openTradeId) {
-      const openBuys = DatabaseService.getOpenBuyTrades(tier);
-      openTradeId = openBuys.length > 0 ? openBuys[openBuys.length - 1].id : 0;
-    }
     if (openTradeId) {
       DatabaseService.markPaperTradeClosed(openTradeId, { pnl: grossPnl, fees, netPnl });
     }
