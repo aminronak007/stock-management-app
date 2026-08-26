@@ -421,12 +421,19 @@ export class DatabaseService {
     return trades.filter(t => this.getIstDateKey(t.timestamp) === today).length;
   }
 
-  public static getTodayRealizedPnl(now: number = Date.now()): number {
+  public static getTodayRealizedPnl(now: number = Date.now(), tier?: string): number {
     const db = this.initialize();
     const today = this.getIstDateKey(now);
-    const trades = db.prepare("SELECT * FROM paper_trades WHERE status = 'CLOSED'").all() as PaperTradeRecord[];
+    let query = "SELECT * FROM paper_trades WHERE status = 'CLOSED'";
+    const params: any[] = [];
+    if (tier && tier !== "ALL") {
+      query += " AND tier = ?";
+      params.push(tier);
+    }
+    const trades = db.prepare(query).all(...params) as PaperTradeRecord[];
     let total = 0;
     for (const trade of trades) {
+      if (!this.isExitType(trade.type)) continue; // Filter out entry BUY rows to prevent double counting
       if (this.getIstDateKey(trade.timestamp) === today) {
         if (trade.net_pnl !== undefined && trade.net_pnl !== null) {
           total += trade.net_pnl;

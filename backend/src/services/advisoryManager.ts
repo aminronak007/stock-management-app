@@ -278,7 +278,8 @@ export class AdvisoryManager {
       const [hStr, mStr] = istTime.split(":");
       const hours = parseInt(hStr, 10);
       const minutes = parseInt(mStr, 10);
-      return hours === 9 && minutes >= 15 && minutes < 30;
+      const orbEndMinute = (this.indiaVixValue > 18) ? 20 : 30;
+      return hours === 9 && minutes >= 15 && minutes < orbEndMinute;
     });
 
     if (orbCandles.length === 0) return;
@@ -286,6 +287,7 @@ export class AdvisoryManager {
     this.orbHigh = Math.max(...orbCandles.map((c) => c.high));
     this.orbLow = Math.min(...orbCandles.map((c) => c.low));
     this.isOrbActive = false;
+    this.lastTriggeredBreakoutLevel = { CALL_BUY: 0, PUT_BUY: 0 };
     console.log(
       `[AdvisoryManager] ORB hydrated from history (${orbCandles.length} bars): High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}`
     );
@@ -414,7 +416,7 @@ export class AdvisoryManager {
       pos.isTarget1Locked = !!trade.is_target1_locked;
       pos.entryTime = trade.timestamp;
       pos.activeOptionSymbol = trade.symbol;
-      pos.liveOptionLtp = trade.price;
+      pos.liveOptionLtp = null; // intentionally null — force delta model until real live tick arrives
       pos.openTradeId = trade.id;
 
       if (trade.symbol) {
@@ -466,33 +468,17 @@ export class AdvisoryManager {
       const tier = (buy.tier as SignalTier) || "SNIPER";
       const qty = buy.qty || 25;
       const perUnitPnl = buy.pnl != null && qty > 0 ? buy.pnl / qty : 0;
-      const exitPrice = parseFloat((buy.price + perUnitPnl).toFixed(2));
-      const reasoning = `[${tier} TIER] Catch-up 3:15 PM square-off. BUY #${buy.id} was left open in the ledger after an engine restart, so RAM never flattened it.`;
-
-      const fees = ExcelLogger.calculateStatutoryFees(exitPrice, qty);
       const grossPnl = perUnitPnl * qty;
+      const exitPrice = parseFloat((buy.price + perUnitPnl).toFixed(2));
+      const fees = ExcelLogger.calculateStatutoryFees(exitPrice, qty);
+
+      // Only mark the original BUY record as CLOSED — do NOT create a duplicate exit row
       DatabaseService.markPaperTradeClosed(buy.id, {
         pnl: grossPnl,
         fees,
         netPnl: grossPnl - fees
       });
-
-      ExcelLogger.logTransaction(
-        "SQUARE_OFF",
-        buy.symbol,
-        buy.strike || "",
-        qty,
-        exitPrice,
-        reasoning,
-        {
-          tier,
-          pnl: perUnitPnl,
-          marketRegime: buy.market_regime,
-          confluenceScore: buy.confluence_score
-        }
-      ).catch((err) => {
-        console.error("[AdvisoryManager] Failed to log catch-up square-off:", err?.message || err);
-      });
+      console.log(`[AdvisoryManager] [${tier}] Catch-up flattened orphaned BUY #${buy.id} (${buy.symbol}).`);
     }
   }
 
@@ -529,6 +515,11 @@ export class AdvisoryManager {
     if (this.isIntradaySquareOffWindow(timestamp)) {
       this.enforceMandatorySquareOff(timestamp);
       return;
+    }
+
+    // 1b. Track India VIX updates for dynamic strategy adaptation
+    if (tick.symbol.includes("VIX") || tick.symbol.includes("INDIAVIX")) {
+      this.indiaVixValue = tick.ltp;
     }
 
     // 2. Track Nifty Spot Index price
@@ -574,22 +565,24 @@ export class AdvisoryManager {
       // Session VWAP: today's 9:15 AM IST bars only (not prior-day history)
       this.refreshSessionVwap(timestamp, tick.ltp);
       
-      // ORB range calculation (first 15 minutes of session: 9:15 - 9:30 AM IST)
-      if (hours === 9 && minutes >= 15 && minutes < 30) {
+      // Dynamic Adaptive ORB calculation window (5m for VIX > 18, 15m for normal VIX)
+      const orbEndMinute = (this.indiaVixValue > 18) ? 20 : 30;
+
+      if (hours === 9 && minutes >= 15 && minutes < orbEndMinute) {
         if (!this.isOrbActive) {
           if (this.orbHigh <= 0 || this.orbLow <= 0) {
             this.orbHigh = tick.ltp;
             this.orbLow = tick.ltp;
           }
           this.isOrbActive = true;
-          console.log(`[AdvisoryManager] 9:15 AM ORB range active. Starting boundaries tracking.`);
+          console.log(`[AdvisoryManager] 9:15 AM ORB range active (${orbEndMinute - 15}m window, VIX: ${this.indiaVixValue > 0 ? this.indiaVixValue.toFixed(2) : "Default"}). Tracking boundaries.`);
         }
         this.orbHigh = Math.max(this.orbHigh, tick.ltp);
         this.orbLow = Math.min(this.orbLow, tick.ltp);
       }
 
-      // Check breakout triggers post 9:30 AM IST
-      if ((hours === 9 && minutes >= 30) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
+      // Check breakout triggers post ORB formation (post 9:20 AM for VIX>18, post 9:30 AM for normal VIX)
+      if ((hours === 9 && minutes >= orbEndMinute) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
         this.isOrbActive = false; // ORB creation range completed
         // One evaluation at a time, at most once per second — never stampede Fyers on every tick
         if (!this.breakoutEvalInflight && timestamp - this.lastBreakoutEvalAt >= 1000) {
@@ -631,8 +624,20 @@ export class AdvisoryManager {
     // 5. Track live option ticks for any active tier position
     for (const t of allTiers) {
       const p = this.tierPositions[t];
-      if (p.activeSignal && p.activeOptionSymbol && tick.symbol === p.activeOptionSymbol && tick.ltp > 0) {
-        p.liveOptionLtp = tick.ltp;
+      if (p.activeSignal && tick.ltp > 0) {
+        const optionSym = p.activeOptionSymbol;
+        const matchesExact = !!(optionSym && tick.symbol === optionSym);
+        const matchesSuffix = !!(optionSym && (
+          tick.symbol.endsWith(optionSym.replace("NSE:", "")) ||
+          optionSym.endsWith(tick.symbol.replace("NSE:", ""))
+        ));
+        const matchesStrike = !!(p.activeSignal.strikePrice &&
+          tick.symbol.includes(String(p.activeSignal.strikePrice)) &&
+          tick.symbol.endsWith(p.activeSignal.type.includes("CALL") ? "CE" : "PE"));
+
+        if (matchesExact || matchesSuffix || matchesStrike) {
+          p.liveOptionLtp = tick.ltp;
+        }
       }
     }
   }
@@ -694,8 +699,16 @@ export class AdvisoryManager {
       return;
     }
 
+    // Reset anti-churn watermark level if price has retraced back inside ORB range
+    if (spot <= this.orbHigh) {
+      this.lastTriggeredBreakoutLevel.CALL_BUY = 0;
+    }
+    if (spot >= this.orbLow) {
+      this.lastTriggeredBreakoutLevel.PUT_BUY = 0;
+    }
+
     // Fresh Swing Breakout & Anti-Churn Watermark check
-    const minBreakoutStep = 10; // Must clear previous entry watermark by at least 10 points
+    const minBreakoutStep = 5; // Reduced step from 10 to 5 points to keep ORB gates tight
     if (this.lastTriggeredBreakoutLevel[candidate] > 0) {
       if (candidate === "CALL_BUY" && spot <= this.lastTriggeredBreakoutLevel.CALL_BUY + minBreakoutStep) {
         this.lastSignalBlockReason = `Waiting for fresh swing high breakout above ${(this.lastTriggeredBreakoutLevel.CALL_BUY + minBreakoutStep).toFixed(1)} to prevent re-entry churn.`;
@@ -716,14 +729,41 @@ export class AdvisoryManager {
 
     let totalPutOi = 0;
     let totalCallOi = 0;
+    let maxCallOi = 0;
+    let maxCallOiStrike = 0;
+    let maxPutOi = 0;
+    let maxPutOiStrike = 0;
+
     chain.forEach(item => {
       totalPutOi += item.put.openInterest;
       totalCallOi += item.call.openInterest;
+      if (item.call.openInterest > maxCallOi) {
+        maxCallOi = item.call.openInterest;
+        maxCallOiStrike = item.strikePrice;
+      }
+      if (item.put.openInterest > maxPutOi) {
+        maxPutOi = item.put.openInterest;
+        maxPutOiStrike = item.strikePrice;
+      }
     });
     const pcr = totalCallOi > 0 ? totalPutOi / totalCallOi : 1.0;
     const triggerType = candidate;
     const strikeInterval = 50;
-    let selectedStrike = Math.round(spot / strikeInterval) * strikeInterval;
+    const atmStrike = Math.round(spot / strikeInterval) * strikeInterval;
+    let selectedStrike = atmStrike;
+
+    // Enhancement 2: Dynamic Strike Selection (Delta-Calibrated based on VIX)
+    // Low VIX (<12): Option premiums move slowly due to low IV. We pick slightly In-The-Money (ITM) strike
+    // (-50 pts for CALL_BUY, +50 pts for PUT_BUY) with Delta ~0.62 to ensure faster premium acceleration.
+    // Normal/High VIX (>=12): We stick to At-The-Money (ATM) strike (Delta ~0.50).
+    if (this.indiaVixValue > 0 && this.indiaVixValue < 12) {
+      if (candidate === "CALL_BUY") {
+        selectedStrike = atmStrike - 50;
+      } else if (candidate === "PUT_BUY") {
+        selectedStrike = atmStrike + 50;
+      }
+      console.log(`[AdvisoryManager] Low VIX (${this.indiaVixValue.toFixed(2)}) detected. Selected ITM Strike ${selectedStrike} (ATM: ${atmStrike}) for higher Delta (~0.62).`);
+    }
 
     const legFor = (strike: number) => {
       const row = chain.find(item => item.strikePrice === strike);
@@ -857,7 +897,9 @@ export class AdvisoryManager {
         candles5m: this.indexCandles,
         heavyweightsLtp: this.heavyweightLtp,
         heavyweightsVwap: this.heavyweightVwap,
-        optionPremiumRsi: marketRsi
+        optionPremiumRsi: marketRsi,
+        maxCallOiStrike,
+        maxPutOiStrike
       });
 
       // Strict rejection: zero trade on detected false breakout or score < 45
@@ -952,8 +994,17 @@ export class AdvisoryManager {
         : this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
 
       // Persist the BUY to SQLite first. RAM is only a cache of that row.
-      const logQtyStr = process.env.ORDER_QTY || "25";
-      const logQty = parseInt(logQtyStr, 10) || 25;
+      const baseQty = parseInt(process.env.ORDER_QTY || "25", 10) || 25;
+      let logQty = baseQty;
+
+      // Upgrade 2: Dynamic High-Conviction Sizing (Money Multiplier)
+      // Standard setup (Score 75-84): 1 Lot (25 Qty)
+      // SUPER-SNIPER setup (Score >= 85): Double Lot Size (2 Lots = 50 Qty)
+      if (scoreCard.totalScore >= 85) {
+        logQty = baseQty * 2;
+        console.log(`[AdvisoryManager] 🚀 [SUPER-SNIPER] High Confluence Score (${scoreCard.totalScore}/100) detected! Dynamic Lot Scaling ACTIVE: Executing 2 Lots (${logQty} Qty).`);
+      }
+
       const openTradeId = await ExcelLogger.logTransaction(
         triggerType,
         optionSymbol,
@@ -997,10 +1048,8 @@ export class AdvisoryManager {
       
       // Auto Execution placement only for SNIPER Tier
       if (tier === "SNIPER" && process.env.AUTO_ORDER_EXECUTION === "true") {
-        const qtyStr = process.env.ORDER_QTY || "25";
-        const qty = parseInt(qtyStr, 10) || 25;
-        console.log(`[AdvisoryManager] [SNIPER] AUTO-EXECUTION ACTIVE. Placing BUY option order: ${qty}x ${optionSymbol}`);
-        this.broker.placeOptionOrder(optionSymbol, qty, "BUY", "MARKET")
+        console.log(`[AdvisoryManager] [SNIPER] AUTO-EXECUTION ACTIVE. Placing BUY option order: ${logQty}x ${optionSymbol}`);
+        this.broker.placeOptionOrder(optionSymbol, logQty, "BUY", "MARKET")
           .then(orderId => {
             targetPos.activeOrderId = orderId;
             console.log(`[AdvisoryManager] AUTO BUY ORDER FILLED. Order ID: ${orderId}`);
@@ -1185,18 +1234,27 @@ export class AdvisoryManager {
       pos.stoppedCooldownUntil = timestamp + cooldownMs;
       console.log(`[Risk Engine] [${tier}] ${type} triggered (${ratio >= 0 ? '+' : ''}${ratio.toFixed(2)}R). 45-minute chop quarantine active until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}.`);
     }
+    // Retrieve the actual entry qty from the open SQLite record (critical for dynamic lot sizing)
+    let openTradeId: number | undefined = pos.openTradeId ?? undefined;
+    let qty = parseInt(process.env.ORDER_QTY || "25", 10) || 25; // fallback default
+    if (!openTradeId) {
+      const openBuys = DatabaseService.getOpenBuyTrades(tier);
+      if (openBuys.length > 0) {
+        openTradeId = openBuys[openBuys.length - 1].id;
+        qty = openBuys[openBuys.length - 1].qty || qty;
+      }
+    } else {
+      // Read actual qty from the persisted BUY record (may be 2x for SUPER-SNIPER trades)
+      const openBuys = DatabaseService.getOpenBuyTrades(tier);
+      const matchingTrade = openBuys.find(t => t.id === openTradeId);
+      if (matchingTrade) {
+        qty = matchingTrade.qty || qty;
+      }
+    }
 
-    const qtyStr = process.env.ORDER_QTY || "25";
-    const qty = parseInt(qtyStr, 10) || 25;
     const grossPnl = pnl * qty;
     const fees = ExcelLogger.calculateStatutoryFees(exit, qty);
     const netPnl = grossPnl - fees;
-
-    let openTradeId = pos.openTradeId;
-    if (!openTradeId) {
-      const openBuys = DatabaseService.getOpenBuyTrades(tier);
-      openTradeId = openBuys.length > 0 ? openBuys[openBuys.length - 1].id : 0;
-    }
     if (openTradeId) {
       DatabaseService.markPaperTradeClosed(openTradeId, { pnl: grossPnl, fees, netPnl });
     }
@@ -1433,21 +1491,50 @@ export class AdvisoryManager {
   public getActivePositions(): ActivePositionInfo[] {
     const positions: ActivePositionInfo[] = [];
     const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
-    const qtyStr = process.env.ORDER_QTY || "25";
-    const qty = parseInt(qtyStr, 10) || 25;
+    const defaultQty = parseInt(process.env.ORDER_QTY || "25", 10) || 25;
 
     for (const t of allTiers) {
-      const pos = this.tierPositions[t];
+      let pos = this.tierPositions[t];
+      if (!pos.activeSignal) {
+        // Fallback: Check SQLite for any open trades for this tier
+        const dbOpenTrades = DatabaseService.getOpenBuyTrades(t);
+        if (dbOpenTrades.length > 0) {
+          this.hydrateOpenPositionsFromDb();
+          pos = this.tierPositions[t];
+        }
+      }
+
       if (pos.activeSignal && pos.activeSignal.type.includes("BUY") && pos.activeSignal.entryPrice) {
         const entry = pos.activeSignal.entryPrice;
+
+        // Read actual qty from the persisted trade record (critical for dynamic 2x lot sizing)
+        let qty = defaultQty;
+        if (pos.openTradeId) {
+          try {
+            const openBuys = DatabaseService.getOpenBuyTrades(t);
+            const matchingTrade = openBuys.find(tr => tr.id === pos.openTradeId);
+            if (matchingTrade && matchingTrade.qty > 0) {
+              qty = matchingTrade.qty;
+            }
+          } catch {}
+        }
+
+        // Priority 1: Live option tick from Fyers WebSocket (most accurate)
+        // Priority 2: Delta model from Nifty spot movement (when option tick unavailable)
+        // Priority 3: Entry price (last resort - should rarely happen)
         let currentLtp: number;
         if (pos.liveOptionLtp && pos.liveOptionLtp > 0) {
           currentLtp = pos.liveOptionLtp;
-        } else if (pos.entrySpot > 0 && this.indexSpotPrice > 0) {
+        } else if (this.indexSpotPrice > 0) {
+          // Lock entrySpot on first tick after startup if it was missing/0
+          if (pos.entrySpot <= 0) {
+            pos.entrySpot = this.indexSpotPrice;
+          }
           const deltaMultiplier = 0.50;
+          const refSpot = pos.entrySpot;
           const spotMove = pos.activeSignal.type.includes("CALL")
-            ? (this.indexSpotPrice - pos.entrySpot)
-            : (pos.entrySpot - this.indexSpotPrice);
+            ? (this.indexSpotPrice - refSpot)
+            : (refSpot - this.indexSpotPrice);
           currentLtp = parseFloat(Math.max(0.50, entry + (spotMove * deltaMultiplier)).toFixed(2));
         } else {
           currentLtp = entry;
@@ -1482,8 +1569,8 @@ export class AdvisoryManager {
     return positions;
   }
 
-  public getTodayRealizedPnl(): number {
-    return parseFloat(this.sessionRealizedPnl.toFixed(2));
+  public getTodayRealizedPnl(tier?: string): number {
+    return DatabaseService.getTodayRealizedPnl(Date.now(), tier);
   }
 
   public setSamplePositionsActive(active: boolean) {

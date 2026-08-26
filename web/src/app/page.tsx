@@ -193,7 +193,7 @@ export default function Home() {
     fetch("http://localhost:8080/api/positions")
       .then(res => res.json())
       .then(data => {
-        if (Array.isArray(data.positions) && data.positions.length > 0) {
+        if (Array.isArray(data.positions)) {
           setPositions(data.positions);
         }
         if (data.realizedPnl !== undefined) {
@@ -276,6 +276,53 @@ export default function Home() {
               });
               return changed ? updated : prev;
             });
+          } else if (message.type === "TICK_BATCH") {
+            // Batched tick delivery: process all ticks in a single React state update
+            const tickBatch: TickData[] = message.payload;
+            if (Array.isArray(tickBatch) && tickBatch.length > 0) {
+              setTicks(prev => {
+                const next = { ...prev };
+                for (const tick of tickBatch) {
+                  next[tick.symbol] = tick;
+                }
+                return next;
+              });
+
+              // Update positions from batched ticks (direct option tick or spot delta model)
+              setPositions(prev => {
+                if (prev.length === 0) return prev;
+                let changed = false;
+                const tickMap: { [symbol: string]: TickData } = {};
+                for (const tick of tickBatch) {
+                  tickMap[tick.symbol] = tick;
+                }
+                const spotTick = tickMap["NSE:NIFTY50-INDEX"];
+
+                const updated = prev.map(pos => {
+                  const directTick = tickMap[pos.symbol];
+                  if (directTick && directTick.ltp > 0 && directTick.ltp !== pos.currentLtp) {
+                    changed = true;
+                    const pnl = parseFloat(((directTick.ltp - pos.entryPrice) * pos.qty).toFixed(2));
+                    const pnlPercent = parseFloat((((directTick.ltp - pos.entryPrice) / pos.entryPrice) * 100).toFixed(2));
+                    return { ...pos, currentLtp: directTick.ltp, pnl, pnlPercent };
+                  } else if (spotTick && spotTick.ltp > 0 && pos.entrySpot && pos.entrySpot > 0) {
+                    const deltaMultiplier = 0.50;
+                    const spotMove = pos.type.includes("CALL")
+                      ? (spotTick.ltp - pos.entrySpot)
+                      : (pos.entrySpot - spotTick.ltp);
+                    const estimatedLtp = parseFloat(Math.max(0.50, pos.entryPrice + (spotMove * deltaMultiplier)).toFixed(2));
+                    if (estimatedLtp !== pos.currentLtp) {
+                      changed = true;
+                      const pnl = parseFloat(((estimatedLtp - pos.entryPrice) * pos.qty).toFixed(2));
+                      const pnlPercent = parseFloat((((estimatedLtp - pos.entryPrice) / pos.entryPrice) * 100).toFixed(2));
+                      return { ...pos, currentLtp: estimatedLtp, pnl, pnlPercent, currentSpot: spotTick.ltp };
+                    }
+                  }
+                  return pos;
+                });
+                return changed ? updated : prev;
+              });
+            }
           } else if (message.type === "POSITIONS") {
             if (Array.isArray(message.payload)) {
               setPositions(message.payload);
@@ -310,11 +357,18 @@ export default function Home() {
             if (message.payload.activeSignal) {
               setActiveSignal(normalizeSignal(message.payload.activeSignal));
             }
-            if (message.payload.positions && message.payload.positions.length > 0) {
+            if (Array.isArray(message.payload.positions)) {
               setPositions(message.payload.positions);
             }
             if (message.payload.engineStatus) {
               setEngineStatus(message.payload.engineStatus);
+            }
+          } else if (message.type === "POSITIONS") {
+            if (Array.isArray(message.payload)) {
+              setPositions(message.payload);
+            }
+            if (message.realizedPnl !== undefined) {
+              setRealizedPnl(message.realizedPnl);
             }
           } else if (message.type === "ENGINE_STATUS") {
             setEngineStatus(message.payload);

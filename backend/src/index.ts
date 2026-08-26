@@ -87,36 +87,90 @@ async function main() {
     });
   };
 
-  // Forward all live incoming broker ticks to brokerTickCache, Advisory Engine, and all active UI WebSocket clients
+  // Tick Batching & Throttling for ultra-low-latency UI delivery
+  // Instead of broadcasting every individual tick (50-200/sec), we batch ticks and flush at 150ms intervals.
+  // This reduces WebSocket message count by ~95% while maintaining sub-200ms visual latency.
+  let pendingTickBatch: { [symbol: string]: any } = {};
+  let tickBatchTimer: NodeJS.Timeout | null = null;
+  const TICK_BATCH_INTERVAL_MS = 150; // Flush every 150ms (≈7 batches/sec — feels instant to human eye)
+
+  let lastPositionBroadcastAt = 0;
+  const POSITION_BROADCAST_INTERVAL_MS = 500; // Positions update at most 2x/sec
+
+  const flushTickBatch = () => {
+    const symbols = Object.keys(pendingTickBatch);
+    if (symbols.length === 0) return;
+
+    // Send all accumulated ticks in a single batched WebSocket frame
+    const batchPayload = JSON.stringify({
+      type: "TICK_BATCH",
+      payload: Object.values(pendingTickBatch)
+    });
+    clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(batchPayload);
+      }
+    });
+    pendingTickBatch = {};
+  };
+
+  // Reference Map for Previous Trading Day Close Prices to compute accurate % change
+  const symbolPrevCloseMap: { [symbol: string]: number } = {
+    "BSE:SENSEX-INDEX": 77728.16,
+    "NSE:NIFTY50-INDEX": 24287.65,
+    "NSE:NIFTYBANK-INDEX": 57497.80,
+    "NSE:FINNIFTY-INDEX": 26217.15,
+    "NSE:INDIAVIX-INDEX": 11.33,
+    "NSE:RELIANCE-EQ": 1316.00,
+    "NSE:HDFCBANK-EQ": 729.00,
+    "NSE:ICICIBANK-EQ": 1415.30
+  };
+
+  // Forward all live incoming broker ticks to brokerTickCache, Advisory Engine, and batched UI delivery
   broker.onTick((tick) => {
+    let changePercent = tick.netChangePercent;
+    const prevClose = symbolPrevCloseMap[tick.symbol];
+    if ((changePercent === undefined || changePercent === null || changePercent === 0) && prevClose && prevClose > 0 && tick.ltp > 0) {
+      changePercent = parseFloat((((tick.ltp - prevClose) / prevClose) * 100).toFixed(2));
+    }
+
     brokerTickCache[tick.symbol] = {
       ltp: tick.ltp,
-      change: tick.netChangePercent
+      change: changePercent || 0.0
     };
 
-    // Feed real-time ticks to the Advisory Strategy Engine
+    // Feed real-time ticks to the Advisory Strategy Engine (full speed, no throttling)
     advisory.processTick(tick).catch((err) => {
       console.error("[AdvisoryManager] Error processing tick:", err);
     });
 
-    broadcast({
-      type: "TICK",
-      payload: {
-        symbol: tick.symbol,
-        ltp: tick.ltp,
-        netChangePercent: tick.netChangePercent,
-        bidPrice: tick.bidPrice || tick.ltp,
-        askPrice: tick.askPrice || tick.ltp,
-        volume: tick.volume || 0,
-        timestamp: tick.timestamp || Date.now()
-      }
-    });
+    // Queue tick for next batch flush (overwrites previous tick for same symbol — latest wins)
+    pendingTickBatch[tick.symbol] = {
+      symbol: tick.symbol,
+      ltp: tick.ltp,
+      netChangePercent: changePercent || 0.0,
+      bidPrice: tick.bidPrice || tick.ltp,
+      askPrice: tick.askPrice || tick.ltp,
+      volume: tick.volume || 0,
+      timestamp: tick.timestamp || Date.now()
+    };
 
-    const activePositions = advisory.getActivePositions();
-    if (activePositions.length > 0) {
+    // Start batch timer if not already running
+    if (!tickBatchTimer) {
+      tickBatchTimer = setTimeout(() => {
+        flushTickBatch();
+        tickBatchTimer = null;
+      }, TICK_BATCH_INTERVAL_MS);
+    }
+
+    // Throttled position broadcast (syncs live position state including empty [] on exit)
+    const now = Date.now();
+    if (now - lastPositionBroadcastAt >= POSITION_BROADCAST_INTERVAL_MS) {
+      lastPositionBroadcastAt = now;
       broadcast({
         type: "POSITIONS",
-        payload: activePositions
+        payload: advisory.getActivePositions(),
+        realizedPnl: advisory.getTodayRealizedPnl()
       });
     }
   });
@@ -262,6 +316,13 @@ async function main() {
     broadcast({
       type: "SIGNAL",
       payload: toUiSignalPayload(signal)
+    });
+
+    // Immediately push updated active positions & realized PnL to UI upon signal (especially exits)
+    broadcast({
+      type: "POSITIONS",
+      payload: advisory.getActivePositions(),
+      realizedPnl: advisory.getTodayRealizedPnl()
     });
   });
 
@@ -712,7 +773,7 @@ async function main() {
     { symbol: "NSE:ICICIBANK-EQ", base: 1415.30, changeRange: 0.6 }
   ];
 
-  // Resolve actual last close prices from Fyers API on startup
+  // Resolve actual last close prices & prevClose from Fyers API on startup
   async function resolveHistoricalClosePrices() {
     const todayStr = new Date().toISOString().split("T")[0];
     const prevDate = new Date();
@@ -725,11 +786,28 @@ async function main() {
         const candles = await broker.getHistoricalCandles(m.symbol, "D", prevDateStr, todayStr);
         if (candles && candles.length > 0) {
           const lastCandle = candles[candles.length - 1];
-          m.base = lastCandle.close;
-          console.log(`[Broker] Resolved ${m.symbol} Last Close Price: ₹${m.base}`);
+          const prevCandle = candles.length >= 2 ? candles[candles.length - 2] : lastCandle;
+          const lastDateStr = new Date(lastCandle.timestamp).toISOString().split("T")[0];
 
-          // Seed the initial tick cache with the correct closed price
-          brokerTickCache[m.symbol] = { ltp: m.base, change: 0.0 };
+          let prevClose = prevCandle.close;
+          let currentLtp = lastCandle.close;
+
+          if (lastDateStr < todayStr && candles.length >= 2) {
+            prevClose = candles[candles.length - 2].close;
+            currentLtp = candles[candles.length - 1].close;
+          }
+
+          symbolPrevCloseMap[m.symbol] = prevClose;
+          m.base = currentLtp;
+
+          const changePercent = prevClose > 0 
+            ? parseFloat((((currentLtp - prevClose) / prevClose) * 100).toFixed(2)) 
+            : 0.0;
+
+          console.log(`[Broker] Resolved ${m.symbol} LTP: ₹${m.base}, PrevClose: ₹${prevClose} (Change: ${changePercent >= 0 ? "+" : ""}${changePercent}%)`);
+
+          // Seed the initial tick cache with the correct closed price & percentage change
+          brokerTickCache[m.symbol] = { ltp: m.base, change: changePercent };
 
           // Broadcast immediately to all connected UI clients
           broadcast({
@@ -737,19 +815,23 @@ async function main() {
             payload: {
               symbol: m.symbol,
               ltp: m.base,
-              netChangePercent: 0.0,
+              netChangePercent: changePercent,
               bidPrice: m.base,
               askPrice: m.base,
               timestamp: Date.now()
             }
           });
         } else {
+          const fallbackPrev = symbolPrevCloseMap[m.symbol] || m.base;
+          const changePercent = fallbackPrev > 0 ? parseFloat((((m.base - fallbackPrev) / fallbackPrev) * 100).toFixed(2)) : 0.0;
           console.warn(`[Broker] No history found for ${m.symbol}. Using fallback base: ₹${m.base}`);
-          brokerTickCache[m.symbol] = { ltp: m.base, change: 0.0 };
+          brokerTickCache[m.symbol] = { ltp: m.base, change: changePercent };
         }
       } catch (err: any) {
+        const fallbackPrev = symbolPrevCloseMap[m.symbol] || m.base;
+        const changePercent = fallbackPrev > 0 ? parseFloat((((m.base - fallbackPrev) / fallbackPrev) * 100).toFixed(2)) : 0.0;
         console.warn(`[Broker] Error fetching close for ${m.symbol}: ${err.message}. Using fallback base: ₹${m.base}`);
-        brokerTickCache[m.symbol] = { ltp: m.base, change: 0.0 };
+        brokerTickCache[m.symbol] = { ltp: m.base, change: changePercent };
       }
       // 350ms throttle delay between symbols to prevent Fyers rate limit
       await new Promise(r => setTimeout(r, 350));
