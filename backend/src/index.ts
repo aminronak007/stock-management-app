@@ -118,45 +118,6 @@ async function main() {
   // Dynamic in-memory map for previous day close prices, fetched dynamically from broker
   const dynamicPrevCloseMap: { [symbol: string]: number } = {};
 
-  async function populateDynamicPrevCloses(symbols: string[]) {
-    const todayStr = new Date().toISOString().split("T")[0];
-    const prevDate = new Date();
-    prevDate.setDate(prevDate.getDate() - 5);
-    const prevDateStr = prevDate.toISOString().split("T")[0];
-
-    for (const sym of symbols) {
-      try {
-        const dbQuote = DatabaseService.getMarketQuote(sym);
-        if (dbQuote && dbQuote.prev_close > 0) {
-          dynamicPrevCloseMap[sym] = dbQuote.prev_close;
-          console.log(`[MarketData] Loaded database Prev Close for ${sym}: ₹${dbQuote.prev_close.toFixed(2)}`);
-          continue;
-        }
-
-        const candles = await broker.getHistoricalCandles(sym, "D", prevDateStr, todayStr);
-        if (candles && candles.length > 0) {
-          const prevDay = candles.length >= 2 ? candles[candles.length - 2] : candles[0];
-          dynamicPrevCloseMap[sym] = prevDay.close;
-          console.log(`[MarketData] Dynamically populated Prev Close for ${sym}: ₹${prevDay.close.toFixed(2)}`);
-        }
-      } catch {
-        // silent fallback
-      }
-    }
-  }
-
-  // Populate dynamic prev closes in background on startup
-  populateDynamicPrevCloses([
-    "BSE:SENSEX-INDEX",
-    "NSE:NIFTY50-INDEX",
-    "NSE:NIFTYBANK-INDEX",
-    "NSE:FINNIFTY-INDEX",
-    "NSE:INDIAVIX-INDEX",
-    "NSE:RELIANCE-EQ",
-    "NSE:HDFCBANK-EQ",
-    "NSE:ICICIBANK-EQ"
-  ]).catch(() => {});
-
   // Forward all live incoming broker ticks to brokerTickCache, Advisory Engine, and batched UI delivery
   broker.onTick((tick) => {
     let netChange = tick.netChange;
@@ -391,8 +352,8 @@ async function main() {
       if (broker.generateSessionFromAuthCode) {
         await broker.generateSessionFromAuthCode(authCode);
 
-        // Re-resolve real closing prices and broadcast to all clients immediately
-        await resolveHistoricalClosePrices();
+        // Re-load real closing quotes and initialize advisory immediately
+        await loadInitialQuotes();
         await advisory.initialize();
 
         res.send(`
@@ -522,6 +483,56 @@ async function main() {
     }
   });
 
+  // Lightning-fast combined bootstrap endpoint for instant UI initial render (<1ms)
+  app.get("/api/bootstrap", (req, res) => {
+    try {
+      const cpr = advisory.getCpr();
+      const positions = advisory.getActivePositions();
+      const realizedPnl = advisory.getTodayRealizedPnl();
+      const engineStatus = advisory.getEngineStatus();
+      const session = DatabaseService.getSession("FYERS");
+
+      // In-memory instant quote map
+      const quotes: { [sym: string]: any } = {};
+      for (const sym of coreSymbols) {
+        if (brokerTickCache[sym]) {
+          quotes[sym] = {
+            symbol: sym,
+            ltp: brokerTickCache[sym].ltp,
+            netChange: brokerTickCache[sym].netChange ?? 0,
+            netChangePercent: brokerTickCache[sym].change ?? 0,
+            prevClose: dynamicPrevCloseMap[sym] ?? brokerTickCache[sym].ltp,
+            bidPrice: brokerTickCache[sym].ltp,
+            askPrice: brokerTickCache[sym].ltp,
+            timestamp: Date.now()
+          };
+        }
+      }
+
+      res.json({
+        quotes,
+        cpr: {
+          pivot: cpr ? cpr.pivot : null,
+          top: cpr ? cpr.topRange : null,
+          bottom: cpr ? cpr.bottomRange : null,
+          widthPercent: cpr ? ((cpr.topRange - cpr.bottomRange) / cpr.pivot) * 100 : null,
+          r1: cpr ? cpr.r1 : null,
+          r2: cpr ? cpr.r2 : null,
+          r3: cpr ? cpr.r3 : null,
+          s1: cpr ? cpr.s1 : null,
+          s2: cpr ? cpr.s2 : null,
+          s3: cpr ? cpr.s3 : null
+        },
+        engineStatus,
+        positions,
+        realizedPnl,
+        authenticated: !!session && session.expires_at > Date.now() && (broker as any).useLiveApi === true
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get("/api/cpr", (req, res) => {
     const cpr = advisory.getCpr();
     res.json({
@@ -552,6 +563,29 @@ async function main() {
 
   app.get("/api/quotes", async (req, res) => {
     try {
+      // Instant RAM cache path (0.01ms)
+      const cachedResult: { [sym: string]: any } = {};
+      let allCached = true;
+      for (const sym of coreSymbols) {
+        if (brokerTickCache[sym]) {
+          cachedResult[sym] = {
+            symbol: sym,
+            ltp: brokerTickCache[sym].ltp,
+            netChange: brokerTickCache[sym].netChange ?? 0,
+            netChangePercent: brokerTickCache[sym].change ?? 0,
+            prevClose: dynamicPrevCloseMap[sym] ?? brokerTickCache[sym].ltp,
+            bidPrice: brokerTickCache[sym].ltp,
+            askPrice: brokerTickCache[sym].ltp,
+            timestamp: Date.now()
+          };
+        } else {
+          allCached = false;
+        }
+      }
+      if (allCached && Object.keys(cachedResult).length > 0) {
+        return res.json(cachedResult);
+      }
+
       const quotes = await (broker.getQuotes ? broker.getQuotes(coreSymbols) : Promise.resolve({}));
       res.json(quotes);
     } catch (e: any) {
@@ -852,71 +886,7 @@ async function main() {
     }
   }
 
-  loadInitialQuotes().catch(() => {});
-
-  // Resolve actual last close prices & prevClose dynamically from Broker API history on startup
-  async function resolveHistoricalClosePrices() {
-    const todayStr = new Date().toISOString().split("T")[0];
-    const prevDate = new Date();
-    prevDate.setDate(prevDate.getDate() - 10); // Go back 10 days to guarantee cross-weekend data
-    const prevDateStr = prevDate.toISOString().split("T")[0];
-
-    console.log("[Broker] Dynamically querying actual market close prices from Broker API history...");
-    for (const symbol of coreSymbols) {
-      try {
-        const candles = await broker.getHistoricalCandles(symbol, "D", prevDateStr, todayStr);
-        if (candles && candles.length > 0) {
-          const lastCandle = candles[candles.length - 1];
-          const prevCandle = candles.length >= 2 ? candles[candles.length - 2] : lastCandle;
-          const lastDateStr = new Date(lastCandle.timestamp).toISOString().split("T")[0];
-
-          let prevClose = prevCandle.close;
-          let currentLtp = lastCandle.close;
-
-          if (lastDateStr < todayStr && candles.length >= 2) {
-            prevClose = candles[candles.length - 2].close;
-            currentLtp = candles[candles.length - 1].close;
-          }
-
-          dynamicPrevCloseMap[symbol] = prevClose;
-
-          // If quote not already seeded from loadInitialQuotes, compute and broadcast
-          if (!brokerTickCache[symbol] || brokerTickCache[symbol].netChange === undefined) {
-            const pointChange = prevClose > 0 ? parseFloat((currentLtp - prevClose).toFixed(2)) : 0.0;
-            const changePercent = prevClose > 0 
-              ? parseFloat((((currentLtp - prevClose) / prevClose) * 100).toFixed(2)) 
-              : 0.0;
-
-            console.log(`[Broker] Dynamically Resolved ${symbol} -> LTP: ₹${currentLtp}, PrevClose: ₹${prevClose} (Change: ${pointChange >= 0 ? "+" : ""}${pointChange} (${changePercent >= 0 ? "+" : ""}${changePercent}%))`);
-
-            brokerTickCache[symbol] = { ltp: currentLtp, change: changePercent, netChange: pointChange };
-
-            broadcast({
-              type: "TICK",
-              payload: {
-                symbol,
-                ltp: currentLtp,
-                netChange: pointChange,
-                netChangePercent: changePercent,
-                bidPrice: currentLtp,
-                askPrice: currentLtp,
-                timestamp: Date.now()
-              }
-            });
-          }
-        }
-      } catch (err: any) {
-        console.warn(`[Broker] Unable to fetch historical candles for ${symbol}:`, err?.message || err);
-      }
-      // 300ms throttle delay between symbols to prevent broker API rate limits
-      await new Promise(r => setTimeout(r, 300));
-    }
-  }
-
-  // Trigger historical resolve safely
-  resolveHistoricalClosePrices().catch((err: any) => {
-    console.warn("[Broker] Error during initial historical resolution:", err?.message || err);
-  });
+  loadInitialQuotes().catch(() => { });
 
   // Push live ORB / wait-reason status so the UI can explain missing signals
   setInterval(() => {
@@ -931,10 +901,43 @@ async function main() {
     advisory.enforceMandatorySquareOff();
   }, 15000);
 
-  const port = process.env.PORT || 8080;
+  const port = Number(process.env.PORT) || 8080;
+
+  server.on("error", (e: any) => {
+    if (e.code === "EADDRINUSE") {
+      console.warn(`[Web Server] Port ${port} is occupied. Retrying in 400ms...`);
+      setTimeout(() => {
+        try {
+          server.close();
+        } catch { }
+        server.listen(port);
+      }, 400);
+    }
+  });
+
   server.listen(port, () => {
     console.log(`[Web Server] HTTP API and WebSockets running on http://localhost:${port}`);
   });
+
+  const shutdown = () => {
+    clients.forEach((c) => {
+      try { c.terminate(); } catch { }
+    });
+    server.close(() => {
+      process.exit(0);
+    });
+  };
+
+  process.once("SIGUSR2", () => {
+    clients.forEach((c) => {
+      try { c.terminate(); } catch { }
+    });
+    server.close(() => {
+      process.kill(process.pid, "SIGUSR2");
+    });
+  });
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 process.on("unhandledRejection", (reason: any) => {

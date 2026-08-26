@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useMemo, useCallback } from "react";
+import { API_BASE } from "../config/api";
 
 interface DatabaseSignal {
   id: number;
@@ -657,7 +658,7 @@ export const DatabaseViewer: React.FC = () => {
   const fetchData = async () => {
     try {
       setIsLoading(true);
-      const res = await fetch("http://localhost:8080/api/database/overview");
+      const res = await fetch(`${API_BASE}/api/database/overview`);
       if (res.ok) {
         const data = await res.json();
         setPaperTrades(data.paperTrades || []);
@@ -969,7 +970,7 @@ export const DatabaseViewer: React.FC = () => {
         filterType: filterType,
         search: debouncedSearch
       });
-      const res = await fetch(`http://localhost:8080/api/database/trades?${params.toString()}`);
+      const res = await fetch(`${API_BASE}/api/database/trades?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setDbTrades(data.items || []);
@@ -998,7 +999,7 @@ export const DatabaseViewer: React.FC = () => {
         filterType: filterType,
         search: debouncedSearch
       });
-      const res = await fetch(`http://localhost:8080/api/database/signals?${params.toString()}`);
+      const res = await fetch(`${API_BASE}/api/database/signals?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setDbSignals(data.items || []);
@@ -1018,7 +1019,7 @@ export const DatabaseViewer: React.FC = () => {
   // Fetch Sessions directly from DB level
   const fetchDbSessions = useCallback(async () => {
     try {
-      const res = await fetch(`http://localhost:8080/api/database/sessions?page=${sessionsPage}&limit=${sessionsLimit}`);
+      const res = await fetch(`${API_BASE}/api/database/sessions?page=${sessionsPage}&limit=${sessionsLimit}`);
       if (res.ok) {
         const data = await res.json();
         setDbSessions(data.items || []);
@@ -1036,7 +1037,7 @@ export const DatabaseViewer: React.FC = () => {
   // Fetch Settings directly from DB level
   const fetchDbSettings = useCallback(async () => {
     try {
-      const res = await fetch(`http://localhost:8080/api/database/settings?page=${settingsPage}&limit=${settingsLimit}`);
+      const res = await fetch(`${API_BASE}/api/database/settings?page=${settingsPage}&limit=${settingsLimit}`);
       if (res.ok) {
         const data = await res.json();
         setDbSettings(data.items || []);

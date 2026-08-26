@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { API_BASE } from "../config/api";
 
 interface CandlestickChartProps {
   activeSymbol: string;
@@ -60,7 +61,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     let isSubscribed = true;
     const fetchHistory = async () => {
       try {
-        const res = await fetch(`http://localhost:8080/api/history?symbol=${activeSymbol}&resolution=${resolution}`);
+        const res = await fetch(`${API_BASE}/api/history?symbol=${activeSymbol}&resolution=${resolution}`);
         if (!res.ok) throw new Error("History fetch failed");
         const data = await res.json();
         

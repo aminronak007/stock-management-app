@@ -6,10 +6,10 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "nodemon",
-    "dev:simple": "ts-node src/index.ts",
-    "test:advisory": "ts-node src/scratch/mockAdvisoryTest.ts",
-    "generate:token": "ts-node src/scratch/generateToken.ts"
+    "dev": "nodemon --exec \"ts-node --transpile-only\" src/index.ts",
+    "dev:simple": "ts-node --transpile-only src/index.ts",
+    "test:advisory": "ts-node --transpile-only src/scratch/mockAdvisoryTest.ts",
+    "generate:token": "ts-node --transpile-only src/scratch/generateToken.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.1.2",

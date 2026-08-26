@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { API_BASE } from "../config/api";
 
 interface DatabaseSession {
   provider: string;
@@ -29,7 +30,7 @@ export const SettingsViewer: React.FC = () => {
   const fetchSettingsData = async () => {
     try {
       setIsLoading(true);
-      const res = await fetch("http://localhost:8080/api/database/overview");
+      const res = await fetch(`${API_BASE}/api/database/overview`);
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions || []);
@@ -68,7 +69,7 @@ export const SettingsViewer: React.FC = () => {
 
   const openFyersAuth = async () => {
     try {
-      const res = await fetch("http://localhost:8080/api/fyers-auth-url");
+      const res = await fetch(`${API_BASE}/api/fyers-auth-url`);
       if (res.ok) {
         const data = await res.json();
         if (data.url) {
@@ -78,7 +79,7 @@ export const SettingsViewer: React.FC = () => {
       }
     } catch {}
     const clientId = "W8C1B64UA9-200";
-    const redirect = encodeURIComponent("http://localhost:8080/api/fyers-callback");
+    const redirect = encodeURIComponent(`${API_BASE}/api/fyers-callback`);
     window.open(
       `https://api-t1.fyers.in/api/v3/generate-authcode?client_id=${clientId}&redirect_uri=${redirect}&response_type=code&state=state_code`,
       "_blank"
@@ -88,7 +89,7 @@ export const SettingsViewer: React.FC = () => {
   const handleReAuth = async () => {
     try {
       if (hasActiveSession) {
-        await fetch("http://localhost:8080/api/logout", { method: "POST" });
+        await fetch(`${API_BASE}/api/logout`, { method: "POST" });
         await fetchSettingsData();
       }
       openFyersAuth();

@@ -441,7 +441,7 @@ export class FyersAdapter implements IBrokerAdapter {
     // 1. If live API is connected, query real Fyers API quotes directly
     if (this.useLiveApi && this.fyersClient) {
       try {
-        const response = await this.fyersClient.getQuotes({ symbols: symbols.join(",") });
+        const response = await this.fyersClient.getQuotes(symbols);
         if (response && response.s === "ok" && Array.isArray(response.d)) {
           for (const item of response.d) {
             const sym = item.n || item.symbol || item.v?.symbol;

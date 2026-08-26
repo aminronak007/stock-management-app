@@ -97,6 +97,9 @@ export class DatabaseService {
     this.db = new Database(this.dbPath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
+    this.db.pragma("temp_store = MEMORY");
+    this.db.pragma("cache_size = -64000"); // 64MB fast RAM cache
+    this.db.pragma("mmap_size = 268435456"); // 256MB Memory-Mapped I/O for instant reads
 
     this.createTables();
 

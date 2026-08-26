@@ -10,6 +10,7 @@ import { DatabaseViewer } from "../components/DatabaseViewer";
 import { SignalGateStatus, EngineStatus } from "../components/SignalGateStatus";
 import { PositionsViewer } from "../components/PositionsViewer";
 import { SettingsViewer } from "../components/SettingsViewer";
+import { API_BASE, WS_BASE } from "../config/api";
 
 interface TickData {
   symbol: string;
@@ -176,41 +177,34 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch CPR data, engine status, and active positions on mount
+  // Lightning-fast initial bootstrap on mount (<1ms)
   useEffect(() => {
-    fetch("http://localhost:8080/api/quotes")
+    fetch(`${API_BASE}/api/bootstrap`)
       .then(res => res.json())
       .then(data => {
-        if (data && typeof data === "object") {
-          setTicks(prev => ({ ...prev, ...data }));
+        if (data.quotes && typeof data.quotes === "object") {
+          setTicks(prev => ({ ...prev, ...data.quotes }));
         }
-      })
-      .catch(() => {});
-
-    fetch("http://localhost:8080/api/cpr")
-      .then(res => res.json())
-      .then(data => {
-        setCprData(data);
-        setLogs(prev => [...prev, `[System] CPR initialized: Pivot=${data.pivot?.toFixed(2) || "--"}`]);
-      })
-      .catch(() => setLogs(prev => [...prev, "[System] Failed to fetch CPR parameters."]));
-
-    fetch("http://localhost:8080/api/engine-status")
-      .then(res => res.json())
-      .then(data => setEngineStatus(data))
-      .catch(() => {});
-
-    fetch("http://localhost:8080/api/positions")
-      .then(res => res.json())
-      .then(data => {
+        if (data.cpr) {
+          setCprData(data.cpr);
+          setLogs(prev => [...prev, `[System] CPR initialized: Pivot=${data.cpr.pivot?.toFixed(2) || "--"}`]);
+        }
+        if (data.engineStatus) {
+          setEngineStatus(data.engineStatus);
+        }
         if (Array.isArray(data.positions)) {
           setPositions(data.positions);
         }
         if (data.realizedPnl !== undefined) {
           setRealizedPnl(data.realizedPnl);
         }
+        if (data.authenticated !== undefined) {
+          setIsBrokerAuth(data.authenticated);
+        }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.warn("[System] Bootstrap fetch fallback:", err);
+      });
   }, []);
 
   const handleManualExit = async (tier: string) => {
@@ -218,7 +212,7 @@ export default function Home() {
       // Optimistic UI exit: instantly remove only this tier
       setPositions(prev => prev.filter(p => p.tier !== tier));
 
-      const res = await fetch("http://localhost:8080/api/positions/exit", {
+      const res = await fetch(`${API_BASE}/api/positions/exit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tier, reason: "Manual user exit from Positions Dashboard" })
@@ -246,7 +240,7 @@ export default function Home() {
     function connect() {
       if (isDisposed) return;
       console.log("[WebSocket] Connecting to backend...");
-      ws = new WebSocket("ws://localhost:8080");
+      ws = new WebSocket(WS_BASE);
 
       ws.onopen = () => {
         console.log("[WebSocket] Connected successfully.");
@@ -533,10 +527,10 @@ export default function Home() {
                   <button
                     onClick={async () => {
                       try {
-                        await fetch("http://localhost:8080/api/logout", { method: "POST" });
+                        await fetch(`${API_BASE}/api/logout`, { method: "POST" });
                         setIsBrokerAuth(false);
                         setLogs(prev => [...prev, "[Broker] Logged out. Session cleared."]);
-                        const authRes = await fetch("http://localhost:8080/api/fyers-auth-url");
+                        const authRes = await fetch(`${API_BASE}/api/fyers-auth-url`);
                         if (authRes.ok) {
                           const authData = await authRes.json();
                           if (authData.url) {
@@ -545,7 +539,7 @@ export default function Home() {
                           }
                         }
                         const clientId = "W8C1B64UA9-200";
-                        const redirect = encodeURIComponent("http://localhost:8080/api/fyers-callback");
+                        const redirect = encodeURIComponent(`${API_BASE}/api/fyers-callback`);
                         window.open(`https://api-t1.fyers.in/api/v3/generate-authcode?client_id=${clientId}&redirect_uri=${redirect}&response_type=code&state=state_code`, "_blank");
                       } catch (e) {
                         console.error("Logout error:", e);
@@ -561,7 +555,7 @@ export default function Home() {
                 <button
                   onClick={async () => {
                     try {
-                      const authRes = await fetch("http://localhost:8080/api/fyers-auth-url");
+                      const authRes = await fetch(`${API_BASE}/api/fyers-auth-url`);
                       if (authRes.ok) {
                         const authData = await authRes.json();
                         if (authData.url) {
@@ -571,7 +565,7 @@ export default function Home() {
                       }
                     } catch {}
                     const clientId = "W8C1B64UA9-200";
-                    const redirect = encodeURIComponent("http://localhost:8080/api/fyers-callback");
+                    const redirect = encodeURIComponent(`${API_BASE}/api/fyers-callback`);
                     window.open(`https://api-t1.fyers.in/api/v3/generate-authcode?client_id=${clientId}&redirect_uri=${redirect}&response_type=code&state=state_code`, "_blank");
                   }}
                   className="text-[9.5px] font-bold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 px-2.5 py-1 rounded shadow-md transition-all cursor-pointer flex items-center gap-1"
