@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 
 interface TickData {
   ltp: number;
+  netChange?: number;
   netChangePercent: number;
   bidPrice: number;
   askPrice: number;
@@ -168,14 +169,23 @@ export const Watchlist: React.FC<WatchlistProps> = ({
 
             const tick = ticks[symId];
             const ltp = tick ? tick.ltp : null;
-            const change = tick ? tick.netChangePercent : null;
+            const changePercent = tick ? tick.netChangePercent : null;
+            const netChange = tick && tick.netChange !== undefined && tick.netChange !== null 
+              ? tick.netChange 
+              : (ltp !== null && changePercent !== null ? ltp - (ltp / (1 + changePercent / 100)) : null);
             
-            const isPositive = change !== null && change >= 0;
+            const isPositive = (netChange !== null ? netChange : (changePercent ?? 0)) >= 0;
             const changeColor = isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]";
             const changeSign = isPositive ? "+" : "";
 
             const displayLtp = ltp !== null ? ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "--";
-            const displayChange = change !== null ? `${changeSign}${change.toFixed(2)}%` : "0.00%";
+            const pointsStr = netChange !== null 
+              ? `${netChange >= 0 ? "+" : ""}${netChange.toFixed(2)}` 
+              : `${changeSign}0.00`;
+            const percentStr = changePercent !== null 
+              ? `(${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)` 
+              : "(0.00%)";
+            const displayChange = ltp !== null ? `${pointsStr} ${percentStr}` : "0.00 (0.00%)";
 
             return (
               <div

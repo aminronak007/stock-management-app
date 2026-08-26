@@ -93,6 +93,7 @@ export class AdvisoryManager {
   private currentVwap: number = 0;
 
   // ORB parameters
+  private activeTradingDateKey: string = "";
   private isOrbActive: boolean = false;
   private orbHigh: number = 0;
   private orbLow: number = 0;
@@ -246,6 +247,45 @@ export class AdvisoryManager {
     }
 
     this.hydrateOrFlattenOpenPositions();
+  }
+
+  /**
+   * Resets all intraday levels and counters when a new calendar trading day begins
+   */
+  public async resetDailySession(newDateKey: string): Promise<void> {
+    this.activeTradingDateKey = newDateKey;
+    this.orbHigh = 0;
+    this.orbLow = 0;
+    this.dayHigh = 0;
+    this.dayLow = Infinity;
+    this.isOrbActive = false;
+    this.lastBreakoutEvalAt = 0;
+    this.lastSignalBlockReason = "";
+    this.lastTriggeredBreakoutLevel = { CALL_BUY: 0, PUT_BUY: 0 };
+    this.isSignalGeneratedToday = false;
+    this.currentVwap = 0;
+
+    const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
+    for (const t of allTiers) {
+      const pos = this.tierPositions[t];
+      pos.activeSignal = null;
+      pos.entrySpot = 0;
+      pos.liveOptionLtp = null;
+      pos.peakPremiumLtp = 0;
+      pos.isBreakevenLocked = false;
+      pos.isTarget1Locked = false;
+      pos.entryTime = 0;
+      pos.activeOptionSymbol = null;
+      pos.activeOrderId = null;
+      pos.openTradeId = null;
+      pos.dailyTradesCount = 0;
+      pos.dailyLossesCount = 0;
+      pos.dailyProfitLoss = 0;
+      pos.stoppedCooldownUntil = 0;
+    }
+
+    console.log(`[AdvisoryManager] 🌅 Daily rollover: Session state reset for ${newDateKey}. Re-initializing CPR & historical bars...`);
+    await this.initialize();
   }
 
   /**
@@ -502,7 +542,7 @@ export class AdvisoryManager {
     const timestamp = tick.timestamp || Date.now();
     const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
 
-    // 1. Time Check in IST (Indian Standard Time, UTC+5:30)
+    // 1. Time & Date Check in IST (Indian Standard Time, UTC+5:30)
     const istTimeStr = new Intl.DateTimeFormat("en-GB", {
       timeZone: "Asia/Kolkata",
       hour: "2-digit",
@@ -512,6 +552,16 @@ export class AdvisoryManager {
     const [hoursStr, minutesStr] = istTimeStr.split(":");
     const hours = parseInt(hoursStr, 10);
     const minutes = parseInt(minutesStr, 10);
+
+    // Automatic Session Rollover: Detect change of trading day
+    const currentDateKey = DatabaseService.getIstDateKey(timestamp);
+    if (this.activeTradingDateKey && this.activeTradingDateKey !== currentDateKey) {
+      this.resetDailySession(currentDateKey).catch(err => {
+        console.error("[AdvisoryManager] Day rollover reset failed:", err);
+      });
+    } else if (!this.activeTradingDateKey) {
+      this.activeTradingDateKey = currentDateKey;
+    }
 
     // Universal Hard Square-Off at 15:15 IST across all tiers (and any tick after that)
     if (this.isIntradaySquareOffWindow(timestamp)) {

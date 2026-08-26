@@ -34,6 +34,16 @@ export interface PaperTradeRecord {
   entry_price?: number;
 }
 
+export interface MarketQuoteRecord {
+  symbol: string;
+  ltp: number;
+  prev_close: number;
+  net_change: number;
+  net_change_percent: number;
+  volume?: number;
+  updated_at: number;
+}
+
 export interface SessionRiskSnapshot {
   dailyTradesCount: number;
   dailyLossesCount: number;
@@ -59,6 +69,12 @@ export interface TradeAnalytics {
   largestLoss: number;
   target1HitRate: number;
   target2HitRate: number;
+  stopLossHitRate?: number;
+  trailingStopHitRate?: number;
+  avgTradeDurationMinutes?: number;
+  dailyDrawdownLimit?: number;
+  dailyLossLimitReached?: boolean;
+  consecutiveLosses?: number;
   callWinRate: number;
   putWinRate: number;
   suggestedTargetMultiplier: number;
@@ -67,20 +83,20 @@ export interface TradeAnalytics {
 
 export class DatabaseService {
   private static db: Database.Database | null = null;
+  private static dbPath: string = path.join(__dirname, "../../data/state.db");
 
   public static initialize(): Database.Database {
     if (this.db) return this.db;
 
-    const dbDir = path.join(__dirname, "../../data");
-    if (!fs.existsSync(dbDir)) {
-      fs.mkdirSync(dbDir, { recursive: true });
+    const dataDir = path.dirname(this.dbPath);
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
     }
 
-    const dbPath = path.join(dbDir, "state.db");
-    console.log(`[Database] Initializing SQLite database at: ${dbPath}`);
-
-    this.db = new Database(dbPath);
-    this.db.pragma("journal_mode = WAL"); // Write-Ahead Logging for high concurrency
+    console.log(`[Database] Initializing SQLite database at: ${this.dbPath}`);
+    this.db = new Database(this.dbPath);
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
 
     this.createTables();
 
@@ -94,7 +110,7 @@ export class DatabaseService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
-        value TEXT
+        value TEXT NOT NULL
       )
     `);
 
@@ -107,7 +123,20 @@ export class DatabaseService {
       )
     `);
 
-    // 3. Advisory Signals Table (log trace)
+    // 3. Dynamic Market Quotes & Prev Closes Cache (Persistent across sessions/restarts)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS market_quotes (
+        symbol TEXT PRIMARY KEY,
+        ltp REAL NOT NULL,
+        prev_close REAL NOT NULL,
+        net_change REAL NOT NULL,
+        net_change_percent REAL NOT NULL,
+        volume INTEGER DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+
+    // 4. Advisory Signals Table (log trace)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS advisory_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -244,6 +273,54 @@ export class DatabaseService {
   public static clearSession(provider: string): void {
     const db = this.initialize();
     db.prepare("DELETE FROM sessions WHERE provider = ?").run(provider);
+  }
+
+  public static upsertMarketQuote(quote: {
+    symbol: string;
+    ltp: number;
+    prevClose: number;
+    netChange: number;
+    netChangePercent: number;
+    volume?: number;
+    updatedAt?: number;
+  }): void {
+    const db = this.initialize();
+    const stmt = db.prepare(`
+      INSERT INTO market_quotes (symbol, ltp, prev_close, net_change, net_change_percent, volume, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(symbol) DO UPDATE SET
+        ltp = excluded.ltp,
+        prev_close = excluded.prev_close,
+        net_change = excluded.net_change,
+        net_change_percent = excluded.net_change_percent,
+        volume = excluded.volume,
+        updated_at = excluded.updated_at
+    `);
+    stmt.run(
+      quote.symbol,
+      quote.ltp,
+      quote.prevClose,
+      quote.netChange,
+      quote.netChangePercent,
+      quote.volume || 0,
+      quote.updatedAt || Date.now()
+    );
+  }
+
+  public static getMarketQuote(symbol: string): MarketQuoteRecord | null {
+    const db = this.initialize();
+    const row = db.prepare("SELECT * FROM market_quotes WHERE symbol = ?").get(symbol) as MarketQuoteRecord | undefined;
+    return row || null;
+  }
+
+  public static getAllMarketQuotes(): { [symbol: string]: MarketQuoteRecord } {
+    const db = this.initialize();
+    const rows = db.prepare("SELECT * FROM market_quotes").all() as MarketQuoteRecord[];
+    const map: { [symbol: string]: MarketQuoteRecord } = {};
+    for (const r of rows) {
+      map[r.symbol] = r;
+    }
+    return map;
   }
 
   public static logSignal(

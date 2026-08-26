@@ -14,6 +14,7 @@ import { SettingsViewer } from "../components/SettingsViewer";
 interface TickData {
   symbol: string;
   ltp: number;
+  netChange?: number;
   netChangePercent: number;
   bidPrice: number;
   askPrice: number;
@@ -177,6 +178,15 @@ export default function Home() {
 
   // Fetch CPR data, engine status, and active positions on mount
   useEffect(() => {
+    fetch("http://localhost:8080/api/quotes")
+      .then(res => res.json())
+      .then(data => {
+        if (data && typeof data === "object") {
+          setTicks(prev => ({ ...prev, ...data }));
+        }
+      })
+      .catch(() => {});
+
     fetch("http://localhost:8080/api/cpr")
       .then(res => res.json())
       .then(data => {
@@ -433,20 +443,25 @@ export default function Home() {
   const depthAsks = Array.from({ length: 5 }, (_, i) => activeAsk + i * 0.4);
 
   // Top header values
-  const niftyTick = ticks["NSE:NIFTY50-INDEX"];
-  const niftyLtp = niftyTick ? niftyTick.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "--";
-  const niftyChange = niftyTick ? `${niftyTick.netChangePercent >= 0 ? "+" : ""}${niftyTick.netChangePercent.toFixed(2)}%` : "0.00%";
-  const niftyIsPositive = niftyTick ? niftyTick.netChangePercent >= 0 : true;
+  const formatHeaderIndex = (tick?: TickData) => {
+    if (!tick || tick.ltp === undefined || tick.ltp === null) {
+      return { ltp: "--", change: "0.00 (0.00%)", isPositive: true };
+    }
+    const ltpStr = tick.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const changePercent = tick.netChangePercent !== undefined && tick.netChangePercent !== null ? tick.netChangePercent : 0;
+    const netChange = tick.netChange !== undefined && tick.netChange !== null
+      ? tick.netChange
+      : (tick.ltp - (tick.ltp / (1 + changePercent / 100)));
 
-  const sensexTick = ticks["BSE:SENSEX-INDEX"];
-  const sensexLtp = sensexTick ? sensexTick.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "--";
-  const sensexChange = sensexTick ? `${sensexTick.netChangePercent >= 0 ? "+" : ""}${sensexTick.netChangePercent.toFixed(2)}%` : "0.00%";
-  const sensexIsPositive = sensexTick ? sensexTick.netChangePercent >= 0 : true;
+    const isPositive = (netChange !== null ? netChange : changePercent) >= 0;
+    const pointsStr = `${netChange >= 0 ? "+" : ""}${netChange.toFixed(2)}`;
+    const percentStr = `(${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`;
+    return { ltp: ltpStr, change: `${pointsStr} ${percentStr}`, isPositive };
+  };
 
-  const vixTick = ticks["NSE:INDIAVIX-INDEX"];
-  const vixLtp = vixTick ? vixTick.ltp.toFixed(2) : "--";
-  const vixChange = vixTick ? `${vixTick.netChangePercent >= 0 ? "+" : ""}${vixTick.netChangePercent.toFixed(2)}%` : "0.00%";
-  const vixIsPositive = vixTick ? vixTick.netChangePercent >= 0 : false;
+  const sensexData = formatHeaderIndex(ticks["BSE:SENSEX-INDEX"]);
+  const niftyData = formatHeaderIndex(ticks["NSE:NIFTY50-INDEX"]);
+  const vixData = formatHeaderIndex(ticks["NSE:INDIAVIX-INDEX"]);
 
   return (
     <>
@@ -463,29 +478,29 @@ export default function Home() {
         <div className="header-metrics flex gap-3.5 font-outfit">
           <div className="metric-card flex flex-col items-end px-2 border-r border-white/5">
             <span className="metric-label text-[9px] text-[var(--color-text-secondary)] font-semibold tracking-wider">SENSEX</span>
-            <span className={`metric-value text-[13px] font-bold ${sensexIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {sensexLtp}
+            <span className={`metric-value text-[13px] font-bold ${sensexData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {sensexData.ltp}
             </span>
-            <span className={`metric-subtext text-[10px] ${sensexIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {sensexChange}
+            <span className={`metric-subtext text-[10px] ${sensexData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {sensexData.change}
             </span>
           </div>
           <div className="metric-card flex flex-col items-end px-2 border-r border-white/5">
             <span className="metric-label text-[9px] text-[var(--color-text-secondary)] font-semibold tracking-wider">NIFTY 50</span>
-            <span className={`metric-value text-[13px] font-bold ${niftyIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {niftyLtp}
+            <span className={`metric-value text-[13px] font-bold ${niftyData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {niftyData.ltp}
             </span>
-            <span className={`metric-subtext text-[10px] ${niftyIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {niftyChange}
+            <span className={`metric-subtext text-[10px] ${niftyData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {niftyData.change}
             </span>
           </div>
           <div className="metric-card flex flex-col items-end px-2 border-r border-white/5">
             <span className="metric-label text-[9px] text-[var(--color-text-secondary)] font-semibold tracking-wider">INDIA VIX</span>
-            <span className={`metric-value text-[13px] font-bold ${vixIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {vixLtp}
+            <span className={`metric-value text-[13px] font-bold ${vixData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {vixData.ltp}
             </span>
-            <span className={`metric-subtext text-[10px] ${vixIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {vixChange}
+            <span className={`metric-subtext text-[10px] ${vixData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {vixData.change}
             </span>
           </div>
           {/* Status & Broker Session Stacked Section */}
@@ -754,7 +769,7 @@ export default function Home() {
               <div className="flex flex-col gap-6">
                 <QuantitativePanels
                   spotPrice={activeLtp}
-                  vixValue={parseFloat(vixLtp) || 14.5}
+                  vixValue={parseFloat(vixData.ltp) || (ticks["NSE:INDIAVIX-INDEX"]?.ltp ?? 10.57)}
                   activeSignal={activeSignal}
                   engineStatus={engineStatus}
                 />

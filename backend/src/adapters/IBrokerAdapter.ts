@@ -1,7 +1,9 @@
 export interface CompactTick {
   symbol: string;
   ltp: number;
+  netChange?: number;
   netChangePercent: number;
+  prevClose?: number;
   volume: number;
   bidPrice: number;
   askPrice: number;
@@ -65,6 +67,8 @@ export interface IBrokerAdapter {
   ): Promise<Candle[]>;
   
   getOptionChain(underlying: string): Promise<OptionChainItem[]>;
+
+  getQuotes?(symbols: string[]): Promise<{ [symbol: string]: CompactTick }>;
 
   placeOptionOrder(
     symbol: string,

@@ -25,6 +25,7 @@ function toUiSignalPayload(signal: AdvisorySignal | null) {
   if (!signal) return null;
   return {
     type: signal.type,
+    tier: signal.tier || "SNIPER",
     strike: signal.strikePrice != null ? String(signal.strikePrice) : "",
     entry: rupee(signal.entryPrice),
     sl: rupee(signal.stopLossPrice),
@@ -54,7 +55,7 @@ async function main() {
     console.log("[Egress Security] Static IP verification bypassed (verifyIp=false).");
   }
 
-  const brokerTickCache: { [symbol: string]: { ltp: number; change: number } } = {};
+  const brokerTickCache: { [symbol: string]: { ltp: number; change: number; netChange?: number } } = {};
 
   // 2. Instantiate and boot Broker Client
   const broker = BrokerFactory.getAdapter();
@@ -114,29 +115,72 @@ async function main() {
     pendingTickBatch = {};
   };
 
-  // Reference Map for Previous Trading Day Close Prices to compute accurate % change
-  const symbolPrevCloseMap: { [symbol: string]: number } = {
-    "BSE:SENSEX-INDEX": 77728.16,
-    "NSE:NIFTY50-INDEX": 24287.65,
-    "NSE:NIFTYBANK-INDEX": 57497.80,
-    "NSE:FINNIFTY-INDEX": 26217.15,
-    "NSE:INDIAVIX-INDEX": 11.33,
-    "NSE:RELIANCE-EQ": 1316.00,
-    "NSE:HDFCBANK-EQ": 729.00,
-    "NSE:ICICIBANK-EQ": 1415.30
-  };
+  // Dynamic in-memory map for previous day close prices, fetched dynamically from broker
+  const dynamicPrevCloseMap: { [symbol: string]: number } = {};
+
+  async function populateDynamicPrevCloses(symbols: string[]) {
+    const todayStr = new Date().toISOString().split("T")[0];
+    const prevDate = new Date();
+    prevDate.setDate(prevDate.getDate() - 5);
+    const prevDateStr = prevDate.toISOString().split("T")[0];
+
+    for (const sym of symbols) {
+      try {
+        const dbQuote = DatabaseService.getMarketQuote(sym);
+        if (dbQuote && dbQuote.prev_close > 0) {
+          dynamicPrevCloseMap[sym] = dbQuote.prev_close;
+          console.log(`[MarketData] Loaded database Prev Close for ${sym}: ₹${dbQuote.prev_close.toFixed(2)}`);
+          continue;
+        }
+
+        const candles = await broker.getHistoricalCandles(sym, "D", prevDateStr, todayStr);
+        if (candles && candles.length > 0) {
+          const prevDay = candles.length >= 2 ? candles[candles.length - 2] : candles[0];
+          dynamicPrevCloseMap[sym] = prevDay.close;
+          console.log(`[MarketData] Dynamically populated Prev Close for ${sym}: ₹${prevDay.close.toFixed(2)}`);
+        }
+      } catch {
+        // silent fallback
+      }
+    }
+  }
+
+  // Populate dynamic prev closes in background on startup
+  populateDynamicPrevCloses([
+    "BSE:SENSEX-INDEX",
+    "NSE:NIFTY50-INDEX",
+    "NSE:NIFTYBANK-INDEX",
+    "NSE:FINNIFTY-INDEX",
+    "NSE:INDIAVIX-INDEX",
+    "NSE:RELIANCE-EQ",
+    "NSE:HDFCBANK-EQ",
+    "NSE:ICICIBANK-EQ"
+  ]).catch(() => {});
 
   // Forward all live incoming broker ticks to brokerTickCache, Advisory Engine, and batched UI delivery
   broker.onTick((tick) => {
+    let netChange = tick.netChange;
     let changePercent = tick.netChangePercent;
-    const prevClose = symbolPrevCloseMap[tick.symbol];
-    if ((changePercent === undefined || changePercent === null || changePercent === 0) && prevClose && prevClose > 0 && tick.ltp > 0) {
-      changePercent = parseFloat((((tick.ltp - prevClose) / prevClose) * 100).toFixed(2));
+    const prevClose = tick.prevClose || dynamicPrevCloseMap[tick.symbol];
+
+    if (prevClose && prevClose > 0 && tick.ltp > 0) {
+      if (netChange === undefined || netChange === null || netChange === 0) {
+        netChange = parseFloat((tick.ltp - prevClose).toFixed(2));
+      }
+      if (changePercent === undefined || changePercent === null || changePercent === 0) {
+        changePercent = parseFloat((((tick.ltp - prevClose) / prevClose) * 100).toFixed(2));
+      }
+    } else if (netChange !== undefined && netChange !== 0 && (!changePercent || changePercent === 0) && tick.ltp > 0) {
+      const estimatedPrev = tick.ltp - netChange;
+      if (estimatedPrev > 0) {
+        changePercent = parseFloat(((netChange / estimatedPrev) * 100).toFixed(2));
+      }
     }
 
     brokerTickCache[tick.symbol] = {
       ltp: tick.ltp,
-      change: changePercent || 0.0
+      change: changePercent || 0.0,
+      netChange: netChange
     };
 
     // Feed real-time ticks to the Advisory Strategy Engine (full speed, no throttling)
@@ -148,6 +192,7 @@ async function main() {
     pendingTickBatch[tick.symbol] = {
       symbol: tick.symbol,
       ltp: tick.ltp,
+      netChange: netChange !== undefined ? netChange : undefined,
       netChangePercent: changePercent || 0.0,
       bidPrice: tick.bidPrice || tick.ltp,
       askPrice: tick.askPrice || tick.ltp,
@@ -201,6 +246,7 @@ async function main() {
         payload: {
           symbol: symbol,
           ltp: cached.ltp,
+          netChange: cached.netChange,
           netChangePercent: cached.change,
           bidPrice: cached.ltp - 0.15,
           askPrice: cached.ltp + 0.15,
@@ -504,6 +550,15 @@ async function main() {
     });
   });
 
+  app.get("/api/quotes", async (req, res) => {
+    try {
+      const quotes = await (broker.getQuotes ? broker.getQuotes(coreSymbols) : Promise.resolve({}));
+      res.json(quotes);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.post("/api/positions/exit", (req, res) => {
     try {
       const { tier, reason } = req.body;
@@ -762,28 +817,54 @@ async function main() {
   console.log("[Broker] Subscribing to core streams...");
   broker.subscribeTicks(coreSymbols);
 
-  const mockSymbols = [
-    { symbol: "BSE:SENSEX-INDEX", base: 77728.16, changeRange: 12 },
-    { symbol: "NSE:NIFTY50-INDEX", base: 24287.65, changeRange: 4 },
-    { symbol: "NSE:NIFTYBANK-INDEX", base: 57497.80, changeRange: 10 },
-    { symbol: "NSE:FINNIFTY-INDEX", base: 26217.15, changeRange: 5 },
-    { symbol: "NSE:INDIAVIX-INDEX", base: 11.33, changeRange: 0.15 },
-    { symbol: "NSE:RELIANCE-EQ", base: 1316.00, changeRange: 1 },
-    { symbol: "NSE:HDFCBANK-EQ", base: 729.00, changeRange: 0.8 },
-    { symbol: "NSE:ICICIBANK-EQ", base: 1415.30, changeRange: 0.6 }
-  ];
+  // Load quotes dynamically from Broker API / Database immediately on startup
+  async function loadInitialQuotes() {
+    if (broker.getQuotes) {
+      try {
+        const quotes = await broker.getQuotes(coreSymbols);
+        for (const sym of Object.keys(quotes)) {
+          const q = quotes[sym];
+          brokerTickCache[sym] = {
+            ltp: q.ltp,
+            change: q.netChangePercent,
+            netChange: q.netChange
+          };
+          if (q.prevClose && q.prevClose > 0) {
+            dynamicPrevCloseMap[sym] = q.prevClose;
+          }
+          console.log(`[Broker] Loaded initial quote for ${sym}: ₹${q.ltp}, Change: ${q.netChange} (${q.netChangePercent}%)`);
+          broadcast({
+            type: "TICK",
+            payload: {
+              symbol: sym,
+              ltp: q.ltp,
+              netChange: q.netChange,
+              netChangePercent: q.netChangePercent,
+              bidPrice: q.bidPrice || q.ltp,
+              askPrice: q.askPrice || q.ltp,
+              timestamp: q.timestamp || Date.now()
+            }
+          });
+        }
+      } catch (e: any) {
+        console.warn("[Broker] Initial getQuotes error:", e?.message || e);
+      }
+    }
+  }
 
-  // Resolve actual last close prices & prevClose from Fyers API on startup
+  loadInitialQuotes().catch(() => {});
+
+  // Resolve actual last close prices & prevClose dynamically from Broker API history on startup
   async function resolveHistoricalClosePrices() {
     const todayStr = new Date().toISOString().split("T")[0];
     const prevDate = new Date();
     prevDate.setDate(prevDate.getDate() - 10); // Go back 10 days to guarantee cross-weekend data
     const prevDateStr = prevDate.toISOString().split("T")[0];
 
-    console.log("[Broker] Resolving last correct close prices from Fyers API history...");
-    for (const m of mockSymbols) {
+    console.log("[Broker] Dynamically querying actual market close prices from Broker API history...");
+    for (const symbol of coreSymbols) {
       try {
-        const candles = await broker.getHistoricalCandles(m.symbol, "D", prevDateStr, todayStr);
+        const candles = await broker.getHistoricalCandles(symbol, "D", prevDateStr, todayStr);
         if (candles && candles.length > 0) {
           const lastCandle = candles[candles.length - 1];
           const prevCandle = candles.length >= 2 ? candles[candles.length - 2] : lastCandle;
@@ -797,44 +878,38 @@ async function main() {
             currentLtp = candles[candles.length - 1].close;
           }
 
-          symbolPrevCloseMap[m.symbol] = prevClose;
-          m.base = currentLtp;
+          dynamicPrevCloseMap[symbol] = prevClose;
 
-          const changePercent = prevClose > 0 
-            ? parseFloat((((currentLtp - prevClose) / prevClose) * 100).toFixed(2)) 
-            : 0.0;
+          // If quote not already seeded from loadInitialQuotes, compute and broadcast
+          if (!brokerTickCache[symbol] || brokerTickCache[symbol].netChange === undefined) {
+            const pointChange = prevClose > 0 ? parseFloat((currentLtp - prevClose).toFixed(2)) : 0.0;
+            const changePercent = prevClose > 0 
+              ? parseFloat((((currentLtp - prevClose) / prevClose) * 100).toFixed(2)) 
+              : 0.0;
 
-          console.log(`[Broker] Resolved ${m.symbol} LTP: ₹${m.base}, PrevClose: ₹${prevClose} (Change: ${changePercent >= 0 ? "+" : ""}${changePercent}%)`);
+            console.log(`[Broker] Dynamically Resolved ${symbol} -> LTP: ₹${currentLtp}, PrevClose: ₹${prevClose} (Change: ${pointChange >= 0 ? "+" : ""}${pointChange} (${changePercent >= 0 ? "+" : ""}${changePercent}%))`);
 
-          // Seed the initial tick cache with the correct closed price & percentage change
-          brokerTickCache[m.symbol] = { ltp: m.base, change: changePercent };
+            brokerTickCache[symbol] = { ltp: currentLtp, change: changePercent, netChange: pointChange };
 
-          // Broadcast immediately to all connected UI clients
-          broadcast({
-            type: "TICK",
-            payload: {
-              symbol: m.symbol,
-              ltp: m.base,
-              netChangePercent: changePercent,
-              bidPrice: m.base,
-              askPrice: m.base,
-              timestamp: Date.now()
-            }
-          });
-        } else {
-          const fallbackPrev = symbolPrevCloseMap[m.symbol] || m.base;
-          const changePercent = fallbackPrev > 0 ? parseFloat((((m.base - fallbackPrev) / fallbackPrev) * 100).toFixed(2)) : 0.0;
-          console.warn(`[Broker] No history found for ${m.symbol}. Using fallback base: ₹${m.base}`);
-          brokerTickCache[m.symbol] = { ltp: m.base, change: changePercent };
+            broadcast({
+              type: "TICK",
+              payload: {
+                symbol,
+                ltp: currentLtp,
+                netChange: pointChange,
+                netChangePercent: changePercent,
+                bidPrice: currentLtp,
+                askPrice: currentLtp,
+                timestamp: Date.now()
+              }
+            });
+          }
         }
       } catch (err: any) {
-        const fallbackPrev = symbolPrevCloseMap[m.symbol] || m.base;
-        const changePercent = fallbackPrev > 0 ? parseFloat((((m.base - fallbackPrev) / fallbackPrev) * 100).toFixed(2)) : 0.0;
-        console.warn(`[Broker] Error fetching close for ${m.symbol}: ${err.message}. Using fallback base: ₹${m.base}`);
-        brokerTickCache[m.symbol] = { ltp: m.base, change: changePercent };
+        console.warn(`[Broker] Unable to fetch historical candles for ${symbol}:`, err?.message || err);
       }
-      // 350ms throttle delay between symbols to prevent Fyers rate limit
-      await new Promise(r => setTimeout(r, 350));
+      // 300ms throttle delay between symbols to prevent broker API rate limits
+      await new Promise(r => setTimeout(r, 300));
     }
   }
 
