@@ -6,6 +6,10 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
+    "start:pm2": "pm2 start ecosystem.config.js",
+    "stop:pm2": "pm2 stop ecosystem.config.js",
+    "restart:pm2": "pm2 restart ecosystem.config.js",
+    "logs:pm2": "pm2 logs nifty-advisory-backend",
     "dev": "nodemon --exec \"ts-node --transpile-only\" src/index.ts",
     "dev:simple": "ts-node --transpile-only src/index.ts",
     "test:advisory": "ts-node --transpile-only src/scratch/mockAdvisoryTest.ts",

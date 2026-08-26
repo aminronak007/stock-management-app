@@ -78,14 +78,18 @@ async function main() {
   const wss = new WebSocketServer({ server });
   const clients = new Set<WebSocket>();
 
-  // Broadcast helper
+  // Broadcast helper with error-safe socket verification
   const broadcast = (data: any) => {
-    const payload = JSON.stringify(data);
-    clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(payload);
-      }
-    });
+    try {
+      const payload = JSON.stringify(data);
+      clients.forEach((client) => {
+        if (client && client.readyState === WebSocket.OPEN) {
+          try {
+            client.send(payload);
+          } catch {}
+        }
+      });
+    } catch {}
   };
 
   // Tick Batching & Throttling for ultra-low-latency UI delivery
@@ -102,16 +106,20 @@ async function main() {
     const symbols = Object.keys(pendingTickBatch);
     if (symbols.length === 0) return;
 
-    // Send all accumulated ticks in a single batched WebSocket frame
-    const batchPayload = JSON.stringify({
-      type: "TICK_BATCH",
-      payload: Object.values(pendingTickBatch)
-    });
-    clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(batchPayload);
-      }
-    });
+    try {
+      // Send all accumulated ticks in a single batched WebSocket frame
+      const batchPayload = JSON.stringify({
+        type: "TICK_BATCH",
+        payload: Object.values(pendingTickBatch)
+      });
+      clients.forEach((client) => {
+        if (client && client.readyState === WebSocket.OPEN) {
+          try {
+            client.send(batchPayload);
+          } catch {}
+        }
+      });
+    } catch {}
     pendingTickBatch = {};
   };
 
@@ -284,17 +292,23 @@ async function main() {
 
           symbols.forEach(sym => {
             const cached = brokerTickCache[sym];
-            ws.send(JSON.stringify({
-              type: "TICK",
-              payload: {
-                symbol: sym,
-                ltp: cached.ltp,
-                netChangePercent: cached.change,
-                bidPrice: cached.ltp,
-                askPrice: cached.ltp,
-                timestamp: Date.now()
-              }
-            }));
+            if (cached && ws.readyState === WebSocket.OPEN) {
+              try {
+                ws.send(JSON.stringify({
+                  type: "TICK",
+                  payload: {
+                    symbol: sym,
+                    ltp: cached.ltp,
+                    netChange: cached.netChange ?? 0,
+                    netChangePercent: cached.change ?? 0,
+                    prevClose: dynamicPrevCloseMap[sym] ?? cached.ltp,
+                    bidPrice: cached.ltp,
+                    askPrice: cached.ltp,
+                    timestamp: Date.now()
+                  }
+                }));
+              } catch {}
+            }
           });
         }
       } catch (e) {
@@ -302,10 +316,19 @@ async function main() {
       }
     });
 
+    ws.on("error", (err) => {
+      console.warn("[WebSocket] Client connection error:", err?.message || err);
+      clients.delete(ws);
+    });
+
     ws.on("close", () => {
       console.log("[WebSocket] Client disconnected.");
       clients.delete(ws);
     });
+  });
+
+  wss.on("error", (err) => {
+    console.warn("[WebSocket Server] WSS error:", err?.message || err);
   });
 
   // Register signal listener to pipe warnings to UI clients
@@ -903,15 +926,31 @@ async function main() {
 
   const port = Number(process.env.PORT) || 8080;
 
+  // Proactively release port 8080 if an orphaned process from a previous run is holding it
+  try {
+    if (process.platform === "win32") {
+      require("child_process").execSync(
+        `powershell -Command "Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"`,
+        { stdio: "ignore" }
+      );
+    } else {
+      // Ubuntu / Linux port liberation
+      require("child_process").execSync(
+        `fuser -k ${port}/tcp 2>/dev/null || kill -9 $(lsof -t -i:${port}) 2>/dev/null || true`,
+        { stdio: "ignore", shell: "/bin/sh" }
+      );
+    }
+  } catch {}
+
   server.on("error", (e: any) => {
     if (e.code === "EADDRINUSE") {
-      console.warn(`[Web Server] Port ${port} is occupied. Retrying in 400ms...`);
+      console.warn(`[Web Server] Port ${port} is occupied. Retrying in 500ms...`);
       setTimeout(() => {
         try {
           server.close();
         } catch { }
         server.listen(port);
-      }, 400);
+      }, 500);
     }
   });
 

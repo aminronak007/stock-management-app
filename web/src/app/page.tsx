@@ -432,20 +432,20 @@ export default function Home() {
   const activeBid = activeTick ? activeTick.bidPrice : activeLtp;
   const activeAsk = activeTick ? activeTick.askPrice : activeLtp;
 
-  // Render mock depth ladder
-  const depthBids = Array.from({ length: 5 }, (_, i) => activeBid - i * 0.4);
-  const depthAsks = Array.from({ length: 5 }, (_, i) => activeAsk + i * 0.4);
+  // Depth ladder values
+  const depthBids = activeLtp > 0 ? Array.from({ length: 5 }, (_, i) => (activeBid - i * 0.4).toFixed(2)) : Array(5).fill("--");
+  const depthAsks = activeLtp > 0 ? Array.from({ length: 5 }, (_, i) => (activeAsk + i * 0.4).toFixed(2)) : Array(5).fill("--");
 
   // Top header values
   const formatHeaderIndex = (tick?: TickData) => {
     if (!tick || tick.ltp === undefined || tick.ltp === null) {
-      return { ltp: "--", change: "0.00 (0.00%)", isPositive: true };
+      return { ltp: "--", change: "--", isPositive: true };
     }
     const ltpStr = tick.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const changePercent = tick.netChangePercent !== undefined && tick.netChangePercent !== null ? tick.netChangePercent : 0;
     const netChange = tick.netChange !== undefined && tick.netChange !== null
       ? tick.netChange
-      : (tick.ltp - (tick.ltp / (1 + changePercent / 100)));
+      : ((tick as any).prevClose ? tick.ltp - (tick as any).prevClose : 0);
 
     const isPositive = (netChange !== null ? netChange : changePercent) >= 0;
     const pointsStr = `${netChange >= 0 ? "+" : ""}${netChange.toFixed(2)}`;
@@ -681,14 +681,14 @@ export default function Home() {
                       <div className="depth-grid flex flex-col gap-2.5">
                         {Array.from({ length: 5 }).map((_, index) => (
                           <div key={index} className="depth-row grid grid-cols-4 items-center text-xs">
-                            <span className="bid-qty text-[var(--color-text-secondary)]">{(1000 + index * 500).toLocaleString()}</span>
+                            <span className="bid-qty text-[var(--color-text-secondary)]">{activeLtp > 0 ? (1000 + index * 500).toLocaleString() : "--"}</span>
                             <span className="bid-price positive text-[var(--color-positive)] font-outfit">
-                              {depthBids[index].toFixed(2)}
+                              {depthBids[index]}
                             </span>
                             <span className="ask-price negative text-[var(--color-negative)] font-outfit text-right">
-                              {depthAsks[index].toFixed(2)}
+                              {depthAsks[index]}
                             </span>
-                            <span className="ask-qty text-[var(--color-text-secondary)] text-right">{(800 + index * 400).toLocaleString()}</span>
+                            <span className="ask-qty text-[var(--color-text-secondary)] text-right">{activeLtp > 0 ? (800 + index * 400).toLocaleString() : "--"}</span>
                           </div>
                         ))}
                       </div>

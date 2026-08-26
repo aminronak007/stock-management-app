@@ -83,7 +83,7 @@ export interface TradeAnalytics {
 
 export class DatabaseService {
   private static db: Database.Database | null = null;
-  private static dbPath: string = path.join(__dirname, "../../data/state.db");
+  private static dbPath: string = path.resolve(process.cwd(), "data/state.db");
 
   public static initialize(): Database.Database {
     if (this.db) return this.db;
@@ -98,6 +98,7 @@ export class DatabaseService {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("temp_store = MEMORY");
+    this.db.pragma("busy_timeout = 10000"); // 10s wait for locks on Linux/servers to prevent SQLITE_BUSY
     this.db.pragma("cache_size = -64000"); // 64MB fast RAM cache
     this.db.pragma("mmap_size = 268435456"); // 256MB Memory-Mapped I/O for instant reads
 
@@ -369,7 +370,12 @@ export class DatabaseService {
   }): number {
     const db = this.initialize();
     const timestamp = Date.now();
-    const datetime = new Date().toLocaleString("en-IN");
+    const now = new Date();
+    const day = String(now.getDate()).padStart(2, "0");
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const year = now.getFullYear();
+    const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+    const datetime = `${day}-${month}-${year}, ${time}`;
     const investedCapital = data.price * data.qty;
     const tier = data.tier || "SNIPER";
     
@@ -551,13 +557,14 @@ export class DatabaseService {
   }
 
   /**
-   * Returns total completed/realized exits across ALL tiers combined for the day
+   * Returns total completed/realized distinct market setups across the session for the day
    */
   public static getDailyGlobalExitsCount(now: number = Date.now()): number {
     const db = this.initialize();
     const today = this.getIstDateKey(now);
+    // Count distinct trade setups on the primary SNIPER tier flow
     const trades = db.prepare(
-      "SELECT type, timestamp FROM paper_trades ORDER BY id ASC"
+      "SELECT type, timestamp FROM paper_trades WHERE tier = 'SNIPER' ORDER BY id ASC"
     ).all() as PaperTradeRecord[];
 
     let count = 0;
@@ -570,13 +577,13 @@ export class DatabaseService {
   }
 
   /**
-   * Returns global consecutive losses across ALL tiers combined for the day
+   * Returns consecutive trade setup losses across the session for the day
    */
   public static getDailyGlobalConsecutiveLossesCount(now: number = Date.now()): number {
     const db = this.initialize();
     const today = this.getIstDateKey(now);
     const trades = db.prepare(
-      "SELECT type, pnl, net_pnl, timestamp FROM paper_trades ORDER BY id DESC"
+      "SELECT type, pnl, net_pnl, timestamp FROM paper_trades WHERE tier = 'SNIPER' ORDER BY id DESC"
     ).all() as PaperTradeRecord[];
 
     let consecutiveLosses = 0;

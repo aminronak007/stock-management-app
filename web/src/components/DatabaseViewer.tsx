@@ -1113,11 +1113,27 @@ export const DatabaseViewer: React.FC = () => {
 
     if (datetimeStr && datetimeStr.includes(",")) {
       const parts = datetimeStr.split(",");
-      datePart = parts[0].trim();
+      const rawDate = parts[0].trim();
+      if (rawDate.includes("/")) {
+        const slashParts = rawDate.split("/");
+        if (slashParts.length === 3) {
+          const d = slashParts[0].padStart(2, "0");
+          const m = slashParts[1].padStart(2, "0");
+          const y = slashParts[2];
+          datePart = `${d}-${m}-${y}`;
+        } else {
+          datePart = rawDate.replace(/\//g, "-");
+        }
+      } else {
+        datePart = rawDate;
+      }
       timePart = parts.slice(1).join(",").trim();
     } else {
       const d = timestamp && !isNaN(Number(timestamp)) ? new Date(Number(timestamp)) : (datetimeStr ? new Date(datetimeStr) : new Date());
-      datePart = d.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
+      const day = String(d.getDate()).padStart(2, "0");
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      const year = d.getFullYear();
+      datePart = `${day}-${month}-${year}`;
       timePart = d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
     }
 

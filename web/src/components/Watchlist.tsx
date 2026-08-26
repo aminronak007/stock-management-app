@@ -169,10 +169,10 @@ export const Watchlist: React.FC<WatchlistProps> = ({
 
             const tick = ticks[symId];
             const ltp = tick ? tick.ltp : null;
-            const changePercent = tick ? tick.netChangePercent : null;
+            const changePercent = tick && tick.netChangePercent !== undefined ? tick.netChangePercent : null;
             const netChange = tick && tick.netChange !== undefined && tick.netChange !== null 
               ? tick.netChange 
-              : (ltp !== null && changePercent !== null ? ltp - (ltp / (1 + changePercent / 100)) : null);
+              : (tick && (tick as any).prevClose && ltp !== null ? ltp - (tick as any).prevClose : null);
             
             const isPositive = (netChange !== null ? netChange : (changePercent ?? 0)) >= 0;
             const changeColor = isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]";
@@ -185,7 +185,7 @@ export const Watchlist: React.FC<WatchlistProps> = ({
             const percentStr = changePercent !== null 
               ? `(${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)` 
               : "(0.00%)";
-            const displayChange = ltp !== null ? `${pointsStr} ${percentStr}` : "0.00 (0.00%)";
+            const displayChange = ltp !== null ? `${pointsStr} ${percentStr}` : "--";
 
             return (
               <div

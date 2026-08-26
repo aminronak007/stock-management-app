@@ -753,40 +753,40 @@ export class AdvisoryManager {
     // -------------------------------------------------------------
     // STRATEGY 1: TRAP REVERSAL (Priority 1: Fading Failed Breakouts)
     // -------------------------------------------------------------
-    if (this.dayHigh > this.orbHigh + 2 && spot <= this.orbHigh && !isAboveVwap && isTrendBearish) {
+    if (this.dayHigh > this.orbHigh + 2 && spot <= this.orbHigh && !isAboveVwap) {
       candidate = "PUT_BUY";
       setupType = "TRAP_REVERSAL";
-      reasoning = `[TRAP REVERSAL] Bull Trap: Failed breakout above ${this.dayHigh.toFixed(2)} with aggressive rejection below VWAP.`;
-    } else if (this.dayLow < this.orbLow - 2 && spot >= this.orbLow && isAboveVwap && isTrendBullish) {
+      reasoning = `[TRAP REVERSAL] Bull Trap: Failed breakout above Day High (${this.dayHigh.toFixed(2)}) with sharp rejection below ORB High and VWAP (${this.currentVwap.toFixed(1)}).`;
+    } else if (this.dayLow < this.orbLow - 2 && spot >= this.orbLow && isAboveVwap) {
       candidate = "CALL_BUY";
       setupType = "TRAP_REVERSAL";
-      reasoning = `[TRAP REVERSAL] Bear Trap: Failed breakdown below ${this.dayLow.toFixed(2)} with aggressive bounce above VWAP.`;
+      reasoning = `[TRAP REVERSAL] Bear Trap: Failed breakdown below Day Low (${this.dayLow.toFixed(2)}) with aggressive recovery above ORB Low and VWAP (${this.currentVwap.toFixed(1)}).`;
     }
 
     // -------------------------------------------------------------
     // STRATEGY 2: VWAP & 9/21 EMA PULLBACK (Priority 2: Trend Continuation)
     // -------------------------------------------------------------
-    else if (spot > this.orbHigh && isTrendBullish && isAboveVwap && Math.abs(spot - this.currentVwap) <= 15) {
+    else if (spot > this.orbHigh && isAboveVwap && Math.abs(spot - this.currentVwap) <= 15 && (isTrendBullish || spot > this.orbHigh + 10)) {
       candidate = "CALL_BUY";
       setupType = "VWAP_PULLBACK";
       reasoning = `[VWAP PULLBACK] Bullish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation bounce.`;
-    } else if (spot < this.orbLow && isTrendBearish && !isAboveVwap && Math.abs(spot - this.currentVwap) <= 15) {
+    } else if (spot < this.orbLow && !isAboveVwap && Math.abs(spot - this.currentVwap) <= 15 && (isTrendBearish || spot < this.orbLow - 10)) {
       candidate = "PUT_BUY";
       setupType = "VWAP_PULLBACK";
       reasoning = `[VWAP PULLBACK] Bearish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation rejection.`;
     }
 
     // -------------------------------------------------------------
-    // STRATEGY 3: ORB BREAKOUT (Priority 3: Initial Breakout)
+    // STRATEGY 3: ORB BREAKOUT / BREAKDOWN (Priority 3: Range Break)
     // -------------------------------------------------------------
-    else if (spot > this.orbHigh + buffer && isAboveVwap && isTrendBullish) {
+    else if (spot > this.orbHigh + buffer && isAboveVwap) {
       candidate = "CALL_BUY";
       setupType = "ORB_BREAKOUT";
-      reasoning = `Bullish ORB breakout above ${this.orbHigh.toFixed(2)} with session VWAP and 9/21 EMA alignment.`;
-    } else if (spot < this.orbLow - buffer && !isAboveVwap && isTrendBearish) {
+      reasoning = `Bullish ORB breakout above ${this.orbHigh.toFixed(2)} with session VWAP alignment.`;
+    } else if (spot < this.orbLow - buffer && !isAboveVwap) {
       candidate = "PUT_BUY";
       setupType = "ORB_BREAKOUT";
-      reasoning = `Bearish ORB breakdown below ${this.orbLow.toFixed(2)} with session VWAP and 9/21 EMA alignment.`;
+      reasoning = `Bearish ORB breakdown below ${this.orbLow.toFixed(2)} with session VWAP alignment.`;
     }
 
     if (!candidate) {
@@ -931,9 +931,11 @@ export class AdvisoryManager {
           const minutes = today.getMinutes();
           if (hours > 15 || (hours === 15 && minutes >= 30)) {
             days = 7;
+          } else {
+            days = 0.25; // 0DTE intraday expiry fraction
           }
         }
-        return Math.max(1, days);
+        return Math.max(0.1, days);
       };
 
       const expiryDateStr = atmChain?.expiryDate || chain[0]?.expiryDate;
