@@ -1,0 +1,1 @@
+{"level":"error","datetime":"2026-08-25T03:18:17.722Z","message":"get_profile response","data":{"s":"error","code":-17,"message":"Could not authenticate the user"},"functionName":"get_profile"}
