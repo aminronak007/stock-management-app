@@ -1739,9 +1739,9 @@ export const DatabaseViewer: React.FC = () => {
                     {dbTrades.length > 0 ? (
                       dbTrades.map((t) => {
                         const link = tradeLinkages.get(t.id);
-                        const hasPnl = t.pnl !== undefined && t.pnl !== null;
                         const isExit = !t.type.includes("BUY");
-                        const isOpen = t.status === "OPEN" || (!hasPnl && !isExit);
+                        const isOpen = !isExit && (t.status === "OPEN" || t.status === undefined) && !link?.pairedId && link?.status !== "CLOSED";
+                        const hasPnl = t.pnl !== undefined && t.pnl !== null;
                         const isProfit = hasPnl && t.pnl! >= 0;
 
                         return (
@@ -1754,21 +1754,9 @@ export const DatabaseViewer: React.FC = () => {
                               {getTierBadge(t.tier)}
                             </td>
                             <td className="py-3 px-4 whitespace-nowrap">
-                              <div className="flex flex-col items-start gap-1">
-                                <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(t.type)}`}>
-                                  {t.type}
-                                </span>
-                                {isExit && (link?.pairedId || t.parent_trade_id) && (
-                                  <span className="text-[9.5px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
-                                    <span>🔗</span> Closes Buy #{link?.pairedId || t.parent_trade_id}
-                                  </span>
-                                )}
-                                {!isExit && link?.pairedId && (
-                                  <span className="text-[9.5px] font-mono text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
-                                    <span>➜</span> Exited by #{link.pairedId}
-                                  </span>
-                                )}
-                              </div>
+                              <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(t.type)}`}>
+                                {t.type}
+                              </span>
                             </td>
                             <td className="py-3 px-4 whitespace-nowrap">
                               <div className="font-bold text-white">{t.strike ? `NIFTY ${t.strike}` : t.symbol}</div>
@@ -1810,6 +1798,11 @@ export const DatabaseViewer: React.FC = () => {
                                       Round-Trip #{link?.pairedId || t.parent_trade_id}➜#{t.id}
                                     </span>
                                   )}
+                                  {!isExit && link?.pairedId && (
+                                    <span className="text-[9.5px] text-gray-500 font-mono mt-0.5">
+                                      Exited by #{link.pairedId}
+                                    </span>
+                                  )}
                                 </div>
                               )}
                             </td>
@@ -1822,6 +1815,15 @@ export const DatabaseViewer: React.FC = () => {
                                   {t.pnl_percent !== undefined && t.pnl_percent !== null && (
                                     <span className="block text-[10px] font-normal">
                                       ({t.pnl_percent >= 0 ? "+" : ""}{t.pnl_percent.toFixed(1)}%)
+                                    </span>
+                                  )}
+                                </div>
+                              ) : link?.pnl !== undefined && link.pnl !== null ? (
+                                <div className={`font-bold ${link.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                                  {link.pnl >= 0 ? `+₹${link.pnl.toFixed(2)}` : `-₹${Math.abs(link.pnl).toFixed(2)}`}
+                                  {link.pnlPercent !== undefined && link.pnlPercent !== null && (
+                                    <span className="block text-[10px] font-normal">
+                                      ({link.pnlPercent >= 0 ? "+" : ""}{link.pnlPercent.toFixed(1)}%)
                                     </span>
                                   )}
                                 </div>
