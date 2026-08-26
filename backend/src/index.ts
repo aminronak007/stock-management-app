@@ -163,17 +163,15 @@ async function main() {
       }, TICK_BATCH_INTERVAL_MS);
     }
 
-    // Throttled position broadcast (only when positions exist and interval elapsed)
+    // Throttled position broadcast (syncs live position state including empty [] on exit)
     const now = Date.now();
     if (now - lastPositionBroadcastAt >= POSITION_BROADCAST_INTERVAL_MS) {
-      const activePositions = advisory.getActivePositions();
-      if (activePositions.length > 0) {
-        lastPositionBroadcastAt = now;
-        broadcast({
-          type: "POSITIONS",
-          payload: activePositions
-        });
-      }
+      lastPositionBroadcastAt = now;
+      broadcast({
+        type: "POSITIONS",
+        payload: advisory.getActivePositions(),
+        realizedPnl: advisory.getTodayRealizedPnl()
+      });
     }
   });
 
@@ -318,6 +316,13 @@ async function main() {
     broadcast({
       type: "SIGNAL",
       payload: toUiSignalPayload(signal)
+    });
+
+    // Immediately push updated active positions & realized PnL to UI upon signal (especially exits)
+    broadcast({
+      type: "POSITIONS",
+      payload: advisory.getActivePositions(),
+      realizedPnl: advisory.getTodayRealizedPnl()
     });
   });
 

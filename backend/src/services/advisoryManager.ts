@@ -729,9 +729,22 @@ export class AdvisoryManager {
 
     let totalPutOi = 0;
     let totalCallOi = 0;
+    let maxCallOi = 0;
+    let maxCallOiStrike = 0;
+    let maxPutOi = 0;
+    let maxPutOiStrike = 0;
+
     chain.forEach(item => {
       totalPutOi += item.put.openInterest;
       totalCallOi += item.call.openInterest;
+      if (item.call.openInterest > maxCallOi) {
+        maxCallOi = item.call.openInterest;
+        maxCallOiStrike = item.strikePrice;
+      }
+      if (item.put.openInterest > maxPutOi) {
+        maxPutOi = item.put.openInterest;
+        maxPutOiStrike = item.strikePrice;
+      }
     });
     const pcr = totalCallOi > 0 ? totalPutOi / totalCallOi : 1.0;
     const triggerType = candidate;
@@ -884,7 +897,9 @@ export class AdvisoryManager {
         candles5m: this.indexCandles,
         heavyweightsLtp: this.heavyweightLtp,
         heavyweightsVwap: this.heavyweightVwap,
-        optionPremiumRsi: marketRsi
+        optionPremiumRsi: marketRsi,
+        maxCallOiStrike,
+        maxPutOiStrike
       });
 
       // Strict rejection: zero trade on detected false breakout or score < 45
@@ -1554,8 +1569,8 @@ export class AdvisoryManager {
     return positions;
   }
 
-  public getTodayRealizedPnl(): number {
-    return parseFloat(this.sessionRealizedPnl.toFixed(2));
+  public getTodayRealizedPnl(tier?: string): number {
+    return DatabaseService.getTodayRealizedPnl(Date.now(), tier);
   }
 
   public setSamplePositionsActive(active: boolean) {

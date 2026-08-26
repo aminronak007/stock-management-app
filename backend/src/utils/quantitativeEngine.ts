@@ -129,6 +129,8 @@ export class QuantitativeEngine {
     heavyweightsLtp: { [symbol: string]: number };
     heavyweightsVwap: { [symbol: string]: number };
     optionPremiumRsi: number;
+    maxCallOiStrike?: number;
+    maxPutOiStrike?: number;
   }): SignalScoreCard {
     const {
       spot,
@@ -144,7 +146,9 @@ export class QuantitativeEngine {
       candles5m,
       heavyweightsLtp,
       heavyweightsVwap,
-      optionPremiumRsi
+      optionPremiumRsi,
+      maxCallOiStrike,
+      maxPutOiStrike
     } = params;
 
     const explanation: string[] = [];
@@ -167,7 +171,7 @@ export class QuantitativeEngine {
       avgVolume5
     );
 
-    // 5m 9/21 trend confirmation (Nifty options), not swing 50/200
+    // 5m 9/21 trend confirmation (Nifty options)
     let isCounterTrend = false;
     if (candles5m.length >= NIFTY_OPTIONS_EMA_SLOW) {
       const closes = candles5m.map(c => c.close);
@@ -175,6 +179,41 @@ export class QuantitativeEngine {
       if (ready) {
         if (triggerType === "CALL_BUY" && (spot < emaFast || emaFast < emaSlow)) isCounterTrend = true;
         if (triggerType === "PUT_BUY" && (spot > emaFast || emaFast > emaSlow)) isCounterTrend = true;
+      }
+    }
+
+    // Multi-Timeframe 15m Trend check
+    let is15mTrendAligned = false;
+    let is15mCounterTrend = false;
+    if (candles5m.length >= 9) {
+      const closes15m: number[] = [];
+      for (let i = 2; i < candles5m.length; i += 3) {
+        closes15m.push(candles5m[i].close);
+      }
+      if (closes15m.length >= 5) {
+        const { trendBullish: b15, trendBearish: br15 } = getIntradayEmaTrend(closes15m, spot);
+        if (triggerType === "CALL_BUY") {
+          if (b15) is15mTrendAligned = true;
+          if (br15) is15mCounterTrend = true;
+        } else if (triggerType === "PUT_BUY") {
+          if (br15) is15mTrendAligned = true;
+          if (b15) is15mCounterTrend = true;
+        }
+      }
+    }
+
+    // Institutional OI Wall Resistance/Support Check
+    let isNearCallWall = false;
+    let isNearPutWall = false;
+    if (triggerType === "CALL_BUY" && maxCallOiStrike && maxCallOiStrike > 0) {
+      // If spot is within 15 points below a massive Call OI wall, flag resistance
+      if (spot < maxCallOiStrike && (maxCallOiStrike - spot) <= 15) {
+        isNearCallWall = true;
+      }
+    } else if (triggerType === "PUT_BUY" && maxPutOiStrike && maxPutOiStrike > 0) {
+      // If spot is within 15 points above a massive Put OI wall, flag support
+      if (spot > maxPutOiStrike && (spot - maxPutOiStrike) <= 15) {
+        isNearPutWall = true;
       }
     }
 
@@ -255,12 +294,11 @@ export class QuantitativeEngine {
         explanation.push("Heavyweight stock VWAP alignment failed (< 50%). High probability fakeout trap.");
       }
     } else {
-      // Fallback if index-based trading is running
       factors.heavyweights.score += 10;
       factors.heavyweights.factors.push("Index-based momentum alignment active");
     }
 
-    // 4. Options Market Structure / PCR (15 Points)
+    // 4. Options Market Structure / PCR & OI Walls (15 Points)
     if (triggerType === "CALL_BUY" && pcr <= 1.35) {
       factors.optionsStructure.score += 8;
       factors.optionsStructure.factors.push(`PCR levels supportive for CALL buying (${pcr.toFixed(2)})`);
@@ -268,7 +306,6 @@ export class QuantitativeEngine {
       factors.optionsStructure.score += 8;
       factors.optionsStructure.factors.push(`PCR levels supportive for PUT buying (${pcr.toFixed(2)})`);
     }
-    // OI concentration: award points only when PCR skew is meaningful
     if ((triggerType === "CALL_BUY" && pcr >= 0.90 && pcr <= 1.25) ||
         (triggerType === "PUT_BUY" && pcr >= 0.70 && pcr <= 1.10)) {
       factors.optionsStructure.score += 7;
@@ -286,27 +323,12 @@ export class QuantitativeEngine {
       factors.volatility.score += 3;
       factors.volatility.factors.push(`India VIX is non-optimal/stale (${vix.toFixed(1)})`);
     }
-    // ATR size check
     if (atr > 8) {
       factors.volatility.score += 4;
       factors.volatility.factors.push(`ATR offers sufficient intraday range (${atr.toFixed(1)} pts)`);
     }
 
     // 6. Regime Alignment & Multi-Timeframe (15m) Trend Confirmation (10 Points)
-    // Aggregate 5m candles into 15m candles for higher-timeframe trend check
-    let is15mTrendAligned = false;
-    if (candles5m.length >= 9) {
-      const closes15m: number[] = [];
-      for (let i = 2; i < candles5m.length; i += 3) {
-        closes15m.push(candles5m[i].close);
-      }
-      if (closes15m.length >= 5) {
-        const { trendBullish: b15, trendBearish: br15 } = getIntradayEmaTrend(closes15m, spot);
-        if (triggerType === "CALL_BUY" && b15) is15mTrendAligned = true;
-        if (triggerType === "PUT_BUY" && br15) is15mTrendAligned = true;
-      }
-    }
-
     if (triggerType === "CALL_BUY" && regime === "TREND_UP") {
       factors.regimeAlignment.score += 10;
       factors.regimeAlignment.factors.push("CALL option aligned with 5m & 15m TREND_UP regime");
@@ -314,7 +336,7 @@ export class QuantitativeEngine {
       factors.regimeAlignment.score += 10;
       factors.regimeAlignment.factors.push("PUT option aligned with 5m & 15m TREND_DOWN regime");
     } else if (regime === "BREAKOUT_ATTEMPT") {
-      factors.regimeAlignment.score += is15mTrendAligned ? 9 : 6;
+      factors.regimeAlignment.score += is15mTrendAligned ? 10 : 6;
       factors.regimeAlignment.factors.push(is15mTrendAligned 
         ? "Breakout matches regime & 15m higher timeframe trend"
         : "Breakout strategy matches breakout regime");
@@ -327,7 +349,6 @@ export class QuantitativeEngine {
     } else {
       factors.optionMomentum.score += 3;
     }
-    // Bid/Ask spread quality (simulated default)
     factors.optionMomentum.score += 4;
     factors.optionMomentum.factors.push("Option spread bid/ask is liquid");
 
@@ -357,10 +378,25 @@ export class QuantitativeEngine {
 
     const isChoppyAdx = currentAdx < 18;
 
-    // Apply strict penalties
+    // Apply strict institutional penalties
     if (isCounterTrend) {
       totalScore = Math.max(0, totalScore - 15);
-      explanation.push("⚠ COUNTER TREND TRADE PENALTY (-15 points applied)");
+      explanation.push("⚠ 5M COUNTER TREND TRADE PENALTY (-15 points applied)");
+    }
+
+    if (is15mCounterTrend) {
+      totalScore = Math.max(0, totalScore - 15);
+      explanation.push("⚠ 15M HIGHER TIMEFRAME TREND PENALTY (-15 points): 15m trend opposes breakout direction");
+    }
+
+    if (isNearCallWall) {
+      totalScore = Math.max(0, totalScore - 15);
+      explanation.push(`⚠ CALL RESISTANCE WALL PENALTY (-15 points): Spot approaching Max Call OI Resistance Wall at ${maxCallOiStrike}`);
+    }
+
+    if (isNearPutWall) {
+      totalScore = Math.max(0, totalScore - 15);
+      explanation.push(`⚠ PUT SUPPORT WALL PENALTY (-15 points): Spot approaching Max Put OI Support Wall at ${maxPutOiStrike}`);
     }
 
     if (isChoppyAdx) {
