@@ -1309,8 +1309,8 @@ export const DatabaseViewer: React.FC = () => {
             </div>
             <div className="text-lg font-bold font-outfit text-white mt-1">
               {dynamicAnalytics.overall.winRatePercent ? `${dynamicAnalytics.overall.winRatePercent.toFixed(1)}%` : "0.0%"} WR
-              <span className={`text-xs ml-2 font-mono ${dynamicAnalytics.overall.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {dynamicAnalytics.overall.totalPnl >= 0 ? "+" : ""}₹{dynamicAnalytics.overall.totalPnl.toFixed(2)}
+              <span className={`text-xs ml-2 font-mono font-bold ${dynamicAnalytics.overall.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {dynamicAnalytics.overall.totalPnl >= 0 ? `+₹${dynamicAnalytics.overall.totalPnl.toFixed(2)}` : `-₹${Math.abs(dynamicAnalytics.overall.totalPnl).toFixed(2)}`}
               </span>
             </div>
           </button>
@@ -1326,10 +1326,10 @@ export const DatabaseViewer: React.FC = () => {
               <span className="flex items-center gap-1.5">🎯 Sniper Mode (≥75%)</span>
               <span className="text-[10px] text-emerald-400 font-mono">{dynamicAnalytics.sniper.totalTrades} Trades</span>
             </div>
-            <div className="text-lg font-bold font-outfit text-emerald-400 mt-1">
+            <div className={`text-lg font-bold font-outfit mt-1 ${selectedTier === "SNIPER" ? "text-emerald-300" : "text-white"}`}>
               {dynamicAnalytics.sniper.winRatePercent ? `${dynamicAnalytics.sniper.winRatePercent.toFixed(1)}%` : "0.0%"} WR
-              <span className="text-xs ml-2 font-mono text-emerald-400">
-                {dynamicAnalytics.sniper.totalPnl >= 0 ? "+" : ""}₹{dynamicAnalytics.sniper.totalPnl.toFixed(2)}
+              <span className={`text-xs ml-2 font-mono font-bold ${dynamicAnalytics.sniper.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {dynamicAnalytics.sniper.totalPnl >= 0 ? `+₹${dynamicAnalytics.sniper.totalPnl.toFixed(2)}` : `-₹${Math.abs(dynamicAnalytics.sniper.totalPnl).toFixed(2)}`}
               </span>
             </div>
             <div className="text-[10px] text-emerald-400/70 mt-0.5">Official UI Alert Signals</div>
@@ -1346,10 +1346,10 @@ export const DatabaseViewer: React.FC = () => {
               <span className="flex items-center gap-1.5">⚖️ Balanced (60% - 74%)</span>
               <span className="text-[10px] text-blue-400 font-mono">{dynamicAnalytics.balanced.totalTrades} Trades</span>
             </div>
-            <div className="text-lg font-bold font-outfit text-blue-400 mt-1">
+            <div className={`text-lg font-bold font-outfit mt-1 ${selectedTier === "BALANCED" ? "text-blue-300" : "text-white"}`}>
               {dynamicAnalytics.balanced.winRatePercent ? `${dynamicAnalytics.balanced.winRatePercent.toFixed(1)}%` : "0.0%"} WR
-              <span className={`text-xs ml-2 font-mono ${dynamicAnalytics.balanced.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {dynamicAnalytics.balanced.totalPnl >= 0 ? "+" : ""}₹{dynamicAnalytics.balanced.totalPnl.toFixed(2)}
+              <span className={`text-xs ml-2 font-mono font-bold ${dynamicAnalytics.balanced.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {dynamicAnalytics.balanced.totalPnl >= 0 ? `+₹${dynamicAnalytics.balanced.totalPnl.toFixed(2)}` : `-₹${Math.abs(dynamicAnalytics.balanced.totalPnl).toFixed(2)}`}
               </span>
             </div>
             <div className="text-[10px] text-blue-400/70 mt-0.5">Background Paper Trades</div>
@@ -1366,10 +1366,10 @@ export const DatabaseViewer: React.FC = () => {
               <span className="flex items-center gap-1.5">⚡ Exploratory (&lt;60%)</span>
               <span className="text-[10px] text-amber-400 font-mono">{dynamicAnalytics.exploratory.totalTrades} Trades</span>
             </div>
-            <div className="text-lg font-bold font-outfit text-amber-400 mt-1">
+            <div className={`text-lg font-bold font-outfit mt-1 ${selectedTier === "EXPLORATORY" ? "text-amber-300" : "text-white"}`}>
               {dynamicAnalytics.exploratory.winRatePercent ? `${dynamicAnalytics.exploratory.winRatePercent.toFixed(1)}%` : "0.0%"} WR
-              <span className={`text-xs ml-2 font-mono ${dynamicAnalytics.exploratory.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {dynamicAnalytics.exploratory.totalPnl >= 0 ? "+" : ""}₹{dynamicAnalytics.exploratory.totalPnl.toFixed(2)}
+              <span className={`text-xs ml-2 font-mono font-bold ${dynamicAnalytics.exploratory.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {dynamicAnalytics.exploratory.totalPnl >= 0 ? `+₹${dynamicAnalytics.exploratory.totalPnl.toFixed(2)}` : `-₹${Math.abs(dynamicAnalytics.exploratory.totalPnl).toFixed(2)}`}
               </span>
             </div>
             <div className="text-[10px] text-amber-400/70 mt-0.5">High-Risk Paper Trades</div>
@@ -1778,7 +1778,7 @@ export const DatabaseViewer: React.FC = () => {
                             </td>
                             <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
                               {t.target1 ? `T1: ₹${t.target1.toFixed(2)}` : "--"}
-                              {t.target2 && <span className="block text-[10px] text-emerald-400/80">T2: ₹${t.target2.toFixed(2)}</span>}
+                              {t.target2 && <span className="block text-[10px] text-emerald-400/80">T2: ₹{t.target2.toFixed(2)}</span>}
                             </td>
                             <td className="py-3 px-4 text-gray-300 whitespace-nowrap font-mono">
                               ₹{t.invested_capital.toFixed(2)}
