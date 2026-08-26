@@ -100,9 +100,16 @@ export const SignalGateStatus: React.FC<SignalGateStatusProps> = ({
         </p>
       </div>
 
-      <p className="text-[11px] text-gray-400 leading-relaxed">
-        {status.waitingReason}
-      </p>
+      <div className="flex flex-col gap-1">
+        <p className="text-[11px] text-gray-400 leading-relaxed">
+          {status.waitingReason}
+        </p>
+        {status.waitingReason.includes("anti-churn") && (
+          <span className="inline-flex items-center gap-1 text-[9.5px] font-bold text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/25 w-fit">
+            🛡️ Anti-Churn Protection (Step +10 pts above last entry)
+          </span>
+        )}
+      </div>
 
       {!compact && (
         <div className="flex flex-wrap gap-1.5">

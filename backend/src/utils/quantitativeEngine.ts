@@ -368,6 +368,12 @@ export class QuantitativeEngine {
       explanation.push(`⚠ CHOPPY MARKET PENALTY (ADX=${currentAdx.toFixed(1)} < 18: -15 points applied)`);
     }
 
+    // RANGE Regime Penalty: Sideways markets kill option premiums via Theta decay
+    if (regime === "RANGE") {
+      totalScore = Math.max(0, totalScore - 12);
+      explanation.push("⚠ RANGE REGIME PENALTY (-12 points): Sideways consolidation detected. Theta decay risk high.");
+    }
+
     if (isFalseBreakout || currentAdx < 14) {
       totalScore = 0;
       explanation.push(isFalseBreakout

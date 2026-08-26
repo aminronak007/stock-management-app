@@ -287,6 +287,7 @@ export class AdvisoryManager {
     this.orbHigh = Math.max(...orbCandles.map((c) => c.high));
     this.orbLow = Math.min(...orbCandles.map((c) => c.low));
     this.isOrbActive = false;
+    this.lastTriggeredBreakoutLevel = { CALL_BUY: 0, PUT_BUY: 0 };
     console.log(
       `[AdvisoryManager] ORB hydrated from history (${orbCandles.length} bars): High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}`
     );
@@ -415,7 +416,7 @@ export class AdvisoryManager {
       pos.isTarget1Locked = !!trade.is_target1_locked;
       pos.entryTime = trade.timestamp;
       pos.activeOptionSymbol = trade.symbol;
-      pos.liveOptionLtp = trade.price;
+      pos.liveOptionLtp = null; // intentionally null — force delta model until real live tick arrives
       pos.openTradeId = trade.id;
 
       if (trade.symbol) {
@@ -467,33 +468,17 @@ export class AdvisoryManager {
       const tier = (buy.tier as SignalTier) || "SNIPER";
       const qty = buy.qty || 25;
       const perUnitPnl = buy.pnl != null && qty > 0 ? buy.pnl / qty : 0;
-      const exitPrice = parseFloat((buy.price + perUnitPnl).toFixed(2));
-      const reasoning = `[${tier} TIER] Catch-up 3:15 PM square-off. BUY #${buy.id} was left open in the ledger after an engine restart, so RAM never flattened it.`;
-
-      const fees = ExcelLogger.calculateStatutoryFees(exitPrice, qty);
       const grossPnl = perUnitPnl * qty;
+      const exitPrice = parseFloat((buy.price + perUnitPnl).toFixed(2));
+      const fees = ExcelLogger.calculateStatutoryFees(exitPrice, qty);
+
+      // Only mark the original BUY record as CLOSED — do NOT create a duplicate exit row
       DatabaseService.markPaperTradeClosed(buy.id, {
         pnl: grossPnl,
         fees,
         netPnl: grossPnl - fees
       });
-
-      ExcelLogger.logTransaction(
-        "SQUARE_OFF",
-        buy.symbol,
-        buy.strike || "",
-        qty,
-        exitPrice,
-        reasoning,
-        {
-          tier,
-          pnl: perUnitPnl,
-          marketRegime: buy.market_regime,
-          confluenceScore: buy.confluence_score
-        }
-      ).catch((err) => {
-        console.error("[AdvisoryManager] Failed to log catch-up square-off:", err?.message || err);
-      });
+      console.log(`[AdvisoryManager] [${tier}] Catch-up flattened orphaned BUY #${buy.id} (${buy.symbol}).`);
     }
   }
 
@@ -639,8 +624,20 @@ export class AdvisoryManager {
     // 5. Track live option ticks for any active tier position
     for (const t of allTiers) {
       const p = this.tierPositions[t];
-      if (p.activeSignal && p.activeOptionSymbol && tick.symbol === p.activeOptionSymbol && tick.ltp > 0) {
-        p.liveOptionLtp = tick.ltp;
+      if (p.activeSignal && tick.ltp > 0) {
+        const optionSym = p.activeOptionSymbol;
+        const matchesExact = !!(optionSym && tick.symbol === optionSym);
+        const matchesSuffix = !!(optionSym && (
+          tick.symbol.endsWith(optionSym.replace("NSE:", "")) ||
+          optionSym.endsWith(tick.symbol.replace("NSE:", ""))
+        ));
+        const matchesStrike = !!(p.activeSignal.strikePrice &&
+          tick.symbol.includes(String(p.activeSignal.strikePrice)) &&
+          tick.symbol.endsWith(p.activeSignal.type.includes("CALL") ? "CE" : "PE"));
+
+        if (matchesExact || matchesSuffix || matchesStrike) {
+          p.liveOptionLtp = tick.ltp;
+        }
       }
     }
   }
@@ -702,8 +699,16 @@ export class AdvisoryManager {
       return;
     }
 
+    // Reset anti-churn watermark level if price has retraced back inside ORB range
+    if (spot <= this.orbHigh) {
+      this.lastTriggeredBreakoutLevel.CALL_BUY = 0;
+    }
+    if (spot >= this.orbLow) {
+      this.lastTriggeredBreakoutLevel.PUT_BUY = 0;
+    }
+
     // Fresh Swing Breakout & Anti-Churn Watermark check
-    const minBreakoutStep = 10; // Must clear previous entry watermark by at least 10 points
+    const minBreakoutStep = 5; // Reduced step from 10 to 5 points to keep ORB gates tight
     if (this.lastTriggeredBreakoutLevel[candidate] > 0) {
       if (candidate === "CALL_BUY" && spot <= this.lastTriggeredBreakoutLevel.CALL_BUY + minBreakoutStep) {
         this.lastSignalBlockReason = `Waiting for fresh swing high breakout above ${(this.lastTriggeredBreakoutLevel.CALL_BUY + minBreakoutStep).toFixed(1)} to prevent re-entry churn.`;
@@ -1471,21 +1476,50 @@ export class AdvisoryManager {
   public getActivePositions(): ActivePositionInfo[] {
     const positions: ActivePositionInfo[] = [];
     const allTiers: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
-    const qtyStr = process.env.ORDER_QTY || "25";
-    const qty = parseInt(qtyStr, 10) || 25;
+    const defaultQty = parseInt(process.env.ORDER_QTY || "25", 10) || 25;
 
     for (const t of allTiers) {
-      const pos = this.tierPositions[t];
+      let pos = this.tierPositions[t];
+      if (!pos.activeSignal) {
+        // Fallback: Check SQLite for any open trades for this tier
+        const dbOpenTrades = DatabaseService.getOpenBuyTrades(t);
+        if (dbOpenTrades.length > 0) {
+          this.hydrateOpenPositionsFromDb();
+          pos = this.tierPositions[t];
+        }
+      }
+
       if (pos.activeSignal && pos.activeSignal.type.includes("BUY") && pos.activeSignal.entryPrice) {
         const entry = pos.activeSignal.entryPrice;
+
+        // Read actual qty from the persisted trade record (critical for dynamic 2x lot sizing)
+        let qty = defaultQty;
+        if (pos.openTradeId) {
+          try {
+            const openBuys = DatabaseService.getOpenBuyTrades(t);
+            const matchingTrade = openBuys.find(tr => tr.id === pos.openTradeId);
+            if (matchingTrade && matchingTrade.qty > 0) {
+              qty = matchingTrade.qty;
+            }
+          } catch {}
+        }
+
+        // Priority 1: Live option tick from Fyers WebSocket (most accurate)
+        // Priority 2: Delta model from Nifty spot movement (when option tick unavailable)
+        // Priority 3: Entry price (last resort - should rarely happen)
         let currentLtp: number;
         if (pos.liveOptionLtp && pos.liveOptionLtp > 0) {
           currentLtp = pos.liveOptionLtp;
-        } else if (pos.entrySpot > 0 && this.indexSpotPrice > 0) {
+        } else if (this.indexSpotPrice > 0) {
+          // Lock entrySpot on first tick after startup if it was missing/0
+          if (pos.entrySpot <= 0) {
+            pos.entrySpot = this.indexSpotPrice;
+          }
           const deltaMultiplier = 0.50;
+          const refSpot = pos.entrySpot;
           const spotMove = pos.activeSignal.type.includes("CALL")
-            ? (this.indexSpotPrice - pos.entrySpot)
-            : (pos.entrySpot - this.indexSpotPrice);
+            ? (this.indexSpotPrice - refSpot)
+            : (refSpot - this.indexSpotPrice);
           currentLtp = parseFloat(Math.max(0.50, entry + (spotMove * deltaMultiplier)).toFixed(2));
         } else {
           currentLtp = entry;
