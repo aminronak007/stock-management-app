@@ -470,6 +470,73 @@ export class DatabaseService {
     return consecutiveLosses;
   }
 
+  /**
+   * Returns total completed/realized exits across ALL tiers combined for the day
+   */
+  public static getDailyGlobalExitsCount(now: number = Date.now()): number {
+    const db = this.initialize();
+    const today = this.getIstDateKey(now);
+    const trades = db.prepare(
+      "SELECT type, timestamp FROM paper_trades ORDER BY id ASC"
+    ).all() as PaperTradeRecord[];
+
+    let count = 0;
+    for (const t of trades) {
+      if (this.getIstDateKey(t.timestamp) === today && this.isExitType(t.type)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Returns global consecutive losses across ALL tiers combined for the day
+   */
+  public static getDailyGlobalConsecutiveLossesCount(now: number = Date.now()): number {
+    const db = this.initialize();
+    const today = this.getIstDateKey(now);
+    const trades = db.prepare(
+      "SELECT type, pnl, net_pnl, timestamp FROM paper_trades ORDER BY id DESC"
+    ).all() as PaperTradeRecord[];
+
+    let consecutiveLosses = 0;
+    for (const t of trades) {
+      if (this.getIstDateKey(t.timestamp) !== today) break;
+      if (!this.isExitType(t.type)) continue;
+
+      const pnlVal = t.net_pnl !== undefined && t.net_pnl !== null ? t.net_pnl : (t.pnl || 0);
+      if (pnlVal < 0 || t.type === "EXIT_STOP_LOSS") {
+        consecutiveLosses++;
+      } else if (pnlVal > 0) {
+        break;
+      }
+    }
+    return consecutiveLosses;
+  }
+
+  /**
+   * Evaluates if account-level daily trading limit (Max 3 trades) or 2-loss circuit breaker is engaged
+   */
+  public static isGlobalDailyTradingLocked(now: number = Date.now(), maxDailyTrades: number = 3): { locked: boolean; reason: string } {
+    const exitsCount = this.getDailyGlobalExitsCount(now);
+    if (exitsCount >= maxDailyTrades) {
+      return {
+        locked: true,
+        reason: `Global Daily Trade Cap reached (${exitsCount}/${maxDailyTrades} completed trades). Trading locked to protect capital and prevent fee bleed.`
+      };
+    }
+
+    const globalLosses = this.getDailyGlobalConsecutiveLossesCount(now);
+    if (globalLosses >= 2) {
+      return {
+        locked: true,
+        reason: "Global 2-Consecutive-Loss Circuit Breaker engaged. Trading locked for the remainder of the session."
+      };
+    }
+
+    return { locked: false, reason: "" };
+  }
+
   public static markPaperTradeClosed(
     id: number,
     data: { pnl: number; fees?: number; netPnl?: number }

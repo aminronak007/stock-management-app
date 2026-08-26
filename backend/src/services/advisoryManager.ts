@@ -3,7 +3,7 @@ import { Indicators } from "../utils/indicators";
 import { Greeks } from "../utils/greeks";
 import { CPR, CPRValues } from "../utils/cpr";
 import { ExcelLogger } from "../utils/excelLogger";
-import { QuantitativeEngine } from "../utils/quantitativeEngine";
+import { QuantitativeEngine, StrategySetup } from "../utils/quantitativeEngine";
 import { DatabaseService, SignalTier } from "../utils/database";
 import { TelegramService } from "./telegramService";
 import {
@@ -96,6 +96,8 @@ export class AdvisoryManager {
   private isOrbActive: boolean = false;
   private orbHigh: number = 0;
   private orbLow: number = 0;
+  private dayHigh: number = 0;
+  private dayLow: number = Infinity;
   private isSignalGeneratedToday: boolean = false;
   private lastBreakoutEvalAt: number = 0;
   private breakoutEvalInflight: boolean = false;
@@ -564,6 +566,12 @@ export class AdvisoryManager {
       
       // Session VWAP: today's 9:15 AM IST bars only (not prior-day history)
       this.refreshSessionVwap(timestamp, tick.ltp);
+
+      // Track Intraday Extremes (Day High & Day Low) for Trap Reversals
+      if (this.dayHigh === 0) this.dayHigh = tick.ltp;
+      if (this.dayLow === Infinity) this.dayLow = tick.ltp;
+      this.dayHigh = Math.max(this.dayHigh, tick.ltp);
+      this.dayLow = Math.min(this.dayLow, tick.ltp);
       
       // Dynamic Adaptive ORB calculation window (5m for VIX > 18, 15m for normal VIX)
       const orbEndMinute = (this.indiaVixValue > 18) ? 20 : 30;
@@ -646,7 +654,14 @@ export class AdvisoryManager {
    * Evaluates if a high-probability breakout direction occurred and routes to appropriate tier
    */
   private async evaluateBreakoutSignals(spot: number, timestamp: number): Promise<void> {
-    // Lunch Hour Consolidation Filter: Block signals between 11:30 AM and 1:30 PM IST
+    // Account-Level Anti-Overtrading Guard: Global Daily Trade Cap (3 trades) & 2-Loss Circuit Breaker
+    const globalLock = DatabaseService.isGlobalDailyTradingLocked(timestamp, 3);
+    if (globalLock.locked) {
+      this.lastSignalBlockReason = globalLock.reason;
+      return;
+    }
+
+    // Track whether current bar is inside midday lunch hour (11:30 AM to 1:30 PM IST)
     const istStr = new Intl.DateTimeFormat("en-GB", {
       timeZone: "Asia/Kolkata",
       hour: "2-digit",
@@ -657,9 +672,7 @@ export class AdvisoryManager {
     const istH = parseInt(hStr, 10);
     const istM = parseInt(mStr, 10);
     const istTotalMinutes = istH * 60 + istM;
-    if (istTotalMinutes >= 690 && istTotalMinutes <= 810) {
-      return;
-    }
+    const isLunchHour = istTotalMinutes >= 690 && istTotalMinutes <= 810;
 
     // CPR Filter Check: If price opened or is sitting inside CPR, trade with caution
     if (this.cpr && CPR.isPriceInsideCPR(spot, this.cpr)) {
@@ -684,19 +697,66 @@ export class AdvisoryManager {
     }
 
     let candidate: "CALL_BUY" | "PUT_BUY" | null = null;
+    let setupType: StrategySetup = "ORB_BREAKOUT";
     let reasoning = "";
 
-    if (spot > this.orbHigh + buffer && isAboveVwap && isTrendBullish) {
+    // -------------------------------------------------------------
+    // STRATEGY 1: TRAP REVERSAL (Priority 1: Fading Failed Breakouts)
+    // -------------------------------------------------------------
+    if (this.dayHigh > this.orbHigh + 2 && spot <= this.orbHigh && !isAboveVwap && isTrendBearish) {
+      candidate = "PUT_BUY";
+      setupType = "TRAP_REVERSAL";
+      reasoning = `[TRAP REVERSAL] Bull Trap: Failed breakout above ${this.dayHigh.toFixed(2)} with aggressive rejection below VWAP.`;
+    } else if (this.dayLow < this.orbLow - 2 && spot >= this.orbLow && isAboveVwap && isTrendBullish) {
       candidate = "CALL_BUY";
+      setupType = "TRAP_REVERSAL";
+      reasoning = `[TRAP REVERSAL] Bear Trap: Failed breakdown below ${this.dayLow.toFixed(2)} with aggressive bounce above VWAP.`;
+    }
+
+    // -------------------------------------------------------------
+    // STRATEGY 2: VWAP & 9/21 EMA PULLBACK (Priority 2: Trend Continuation)
+    // -------------------------------------------------------------
+    else if (spot > this.orbHigh && isTrendBullish && isAboveVwap && Math.abs(spot - this.currentVwap) <= 15) {
+      candidate = "CALL_BUY";
+      setupType = "VWAP_PULLBACK";
+      reasoning = `[VWAP PULLBACK] Bullish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation bounce.`;
+    } else if (spot < this.orbLow && isTrendBearish && !isAboveVwap && Math.abs(spot - this.currentVwap) <= 15) {
+      candidate = "PUT_BUY";
+      setupType = "VWAP_PULLBACK";
+      reasoning = `[VWAP PULLBACK] Bearish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation rejection.`;
+    }
+
+    // -------------------------------------------------------------
+    // STRATEGY 3: ORB BREAKOUT (Priority 3: Initial Breakout)
+    // -------------------------------------------------------------
+    else if (spot > this.orbHigh + buffer && isAboveVwap && isTrendBullish) {
+      candidate = "CALL_BUY";
+      setupType = "ORB_BREAKOUT";
       reasoning = `Bullish ORB breakout above ${this.orbHigh.toFixed(2)} with session VWAP and 9/21 EMA alignment.`;
     } else if (spot < this.orbLow - buffer && !isAboveVwap && isTrendBearish) {
       candidate = "PUT_BUY";
+      setupType = "ORB_BREAKOUT";
       reasoning = `Bearish ORB breakdown below ${this.orbLow.toFixed(2)} with session VWAP and 9/21 EMA alignment.`;
     }
 
     if (!candidate) {
       this.lastSignalBlockReason = "";
       return;
+    }
+
+    // Breakout Candle Confirmation / Anti-Trap Filter (for ORB_BREAKOUT only)
+    if (setupType === "ORB_BREAKOUT") {
+      const hasClosedBreakoutCandle = this.indexCandles.slice(-3).some(c => 
+        candidate === "CALL_BUY" ? c.close > this.orbHigh : c.close < this.orbLow
+      );
+      const hasStrongBuffer = candidate === "CALL_BUY" 
+        ? spot > this.orbHigh + (buffer * 1.3)
+        : spot < this.orbLow - (buffer * 1.3);
+
+      if (!hasClosedBreakoutCandle && !hasStrongBuffer) {
+        this.lastSignalBlockReason = `Waiting for 5m candle close confirmation beyond ${candidate === "CALL_BUY" ? this.orbHigh.toFixed(2) : this.orbLow.toFixed(2)} to filter out wick traps.`;
+        return;
+      }
     }
 
     // Reset anti-churn watermark level if price has retraced back inside ORB range
@@ -889,6 +949,7 @@ export class AdvisoryManager {
         orbHigh: this.orbHigh,
         orbLow: this.orbLow,
         triggerType,
+        setupType,
         cpr: this.cpr,
         pcr,
         vix: this.indiaVixValue,
@@ -908,6 +969,14 @@ export class AdvisoryManager {
           ? "Breakdown printed, then price returned inside the opening range (false breakout)."
           : `Breakdown is valid, but confluence is ${scoreCard.totalScore}/100 (need at least 45).`;
         console.warn(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
+        return;
+      }
+
+      // Lunch Hour Trend Quality Check:
+      // Block signals during 11:30 AM - 1:30 PM unless scoreCard indicates a high-conviction trend setup (score >= 70)
+      if (isLunchHour && scoreCard.totalScore < 70) {
+        this.lastSignalBlockReason = `Lunch hour consolidation (11:30 AM - 1:30 PM): score ${scoreCard.totalScore}/100 is below high-conviction threshold (70) to prevent midday theta decay.`;
+        console.log(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
         return;
       }
 
@@ -1153,14 +1222,15 @@ export class AdvisoryManager {
     // Theta Exit check: position open too long in sideways chop.
     // Tier-dependent timeout: high-conviction SNIPER trades get more room to develop.
     // Skip when entrySpot is unknown (restored from DB after restart) to avoid a false chop exit.
+    // Adaptive rule: Do NOT exit if spot is moving in the intended direction (spotMovementGain > 0).
     const thetaTimeoutMs = tier === "SNIPER" ? 25 * 60 * 1000
-                         : tier === "BALANCED" ? 18 * 60 * 1000
-                         : 12 * 60 * 1000;
+                         : tier === "BALANCED" ? 20 * 60 * 1000
+                         : 18 * 60 * 1000;
     if (elapsed > thetaTimeoutMs && pos.entrySpot > 0) {
       const percentageChange = Math.abs(spotMovementGain / spot) * 100;
-      if (percentageChange < 0.15) {
+      if (percentageChange < 0.15 && spotMovementGain <= 0) {
         const timeoutMins = Math.round(thetaTimeoutMs / 60000);
-        this.triggerTierExit(tier, "THETA_EXIT", `Option premium decay warning. Sideways chop > ${timeoutMins} minutes.`, timestamp, currentPremiumLtp);
+        this.triggerTierExit(tier, "THETA_EXIT", `Option premium decay warning. Sideways chop > ${timeoutMins} minutes without directional progress.`, timestamp, currentPremiumLtp);
         return;
       }
     }
