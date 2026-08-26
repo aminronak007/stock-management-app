@@ -93,14 +93,14 @@ async function main() {
   };
 
   // Tick Batching & Throttling for ultra-low-latency UI delivery
-  // Instead of broadcasting every individual tick (50-200/sec), we batch ticks and flush at 150ms intervals.
-  // This reduces WebSocket message count by ~95% while maintaining sub-200ms visual latency.
+  // Batches high-frequency ticks into 60ms coalesced frames (≈16 flushes/sec)
+  // Sub-60ms latency guarantees instant visual updates without socket queue congestion.
   let pendingTickBatch: { [symbol: string]: any } = {};
   let tickBatchTimer: NodeJS.Timeout | null = null;
-  const TICK_BATCH_INTERVAL_MS = 150; // Flush every 150ms (≈7 batches/sec — feels instant to human eye)
+  const TICK_BATCH_INTERVAL_MS = 60; // 60ms ultra-low latency tick batching
 
   let lastPositionBroadcastAt = 0;
-  const POSITION_BROADCAST_INTERVAL_MS = 500; // Positions update at most 2x/sec
+  const POSITION_BROADCAST_INTERVAL_MS = 250; // Positions update 4x/sec for real-time PnL accuracy
 
   const flushTickBatch = () => {
     const symbols = Object.keys(pendingTickBatch);
