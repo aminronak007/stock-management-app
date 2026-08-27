@@ -30,9 +30,3 @@ backend/logs/
 # OS Files
 .DS_Store
 Thumbs.db
-
-# SQLite journal & WAL files
-*.db-shm
-*.db-wal
-
-
