@@ -131,6 +131,9 @@ export class QuantitativeEngine {
     optionPremiumRsi: number;
     maxCallOiStrike?: number;
     maxPutOiStrike?: number;
+    deltaCallOi?: number;
+    deltaPutOi?: number;
+    deltaVixPercent?: number;
   }): SignalScoreCard {
     const {
       spot,
@@ -148,7 +151,10 @@ export class QuantitativeEngine {
       heavyweightsVwap,
       optionPremiumRsi,
       maxCallOiStrike,
-      maxPutOiStrike
+      maxPutOiStrike,
+      deltaCallOi,
+      deltaPutOi,
+      deltaVixPercent
     } = params;
 
     const explanation: string[] = [];
@@ -206,12 +212,10 @@ export class QuantitativeEngine {
     let isNearCallWall = false;
     let isNearPutWall = false;
     if (triggerType === "CALL_BUY" && maxCallOiStrike && maxCallOiStrike > 0) {
-      // If spot is within 15 points below a massive Call OI wall, flag resistance
       if (spot < maxCallOiStrike && (maxCallOiStrike - spot) <= 15) {
         isNearCallWall = true;
       }
     } else if (triggerType === "PUT_BUY" && maxPutOiStrike && maxPutOiStrike > 0) {
-      // If spot is within 15 points above a massive Put OI wall, flag support
       if (spot > maxPutOiStrike && (spot - maxPutOiStrike) <= 15) {
         isNearPutWall = true;
       }
@@ -298,21 +302,29 @@ export class QuantitativeEngine {
       factors.heavyweights.factors.push("Index-based momentum alignment active");
     }
 
-    // 4. Options Market Structure / PCR & OI Walls (15 Points)
+    // 4. Options Market Structure / PCR & ΔOI (15 Points)
     if (triggerType === "CALL_BUY" && pcr <= 1.35) {
-      factors.optionsStructure.score += 8;
+      factors.optionsStructure.score += 5;
       factors.optionsStructure.factors.push(`PCR levels supportive for CALL buying (${pcr.toFixed(2)})`);
     } else if (triggerType === "PUT_BUY" && pcr >= 0.60) {
-      factors.optionsStructure.score += 8;
+      factors.optionsStructure.score += 5;
       factors.optionsStructure.factors.push(`PCR levels supportive for PUT buying (${pcr.toFixed(2)})`);
     }
     if ((triggerType === "CALL_BUY" && pcr >= 0.90 && pcr <= 1.25) ||
         (triggerType === "PUT_BUY" && pcr >= 0.70 && pcr <= 1.10)) {
-      factors.optionsStructure.score += 7;
+      factors.optionsStructure.score += 5;
       factors.optionsStructure.factors.push(`Option chain OI concentration favourable (PCR=${pcr.toFixed(2)})`);
     } else if (pcr > 0 && pcr < 5) {
-      factors.optionsStructure.score += 3;
-      factors.optionsStructure.factors.push(`Option chain OI present but skew is non-ideal (PCR=${pcr.toFixed(2)})`);
+      factors.optionsStructure.score += 2;
+    }
+
+    // Delta OI Unwinding Check
+    if (triggerType === "CALL_BUY" && deltaCallOi !== undefined && deltaCallOi < 0) {
+      factors.optionsStructure.score += 5;
+      factors.optionsStructure.factors.push("Institutional Call Unwinding detected (Shorts covering, trend accelerating)");
+    } else if (triggerType === "PUT_BUY" && deltaPutOi !== undefined && deltaPutOi < 0) {
+      factors.optionsStructure.score += 5;
+      factors.optionsStructure.factors.push("Institutional Put Unwinding detected (Shorts covering, trend accelerating)");
     }
 
     // 5. Volatility (10 Points)
@@ -321,7 +333,6 @@ export class QuantitativeEngine {
       factors.volatility.factors.push(`India VIX inside optimal trading band (${vix.toFixed(1)})`);
     } else {
       factors.volatility.score += 3;
-      factors.volatility.factors.push(`India VIX is non-optimal/stale (${vix.toFixed(1)})`);
     }
     if (atr > 8) {
       factors.volatility.score += 4;
@@ -397,6 +408,21 @@ export class QuantitativeEngine {
     if (isNearPutWall) {
       totalScore = Math.max(0, totalScore - 15);
       explanation.push(`⚠ PUT SUPPORT WALL PENALTY (-15 points): Spot approaching Max Put OI Support Wall at ${maxPutOiStrike}`);
+    }
+
+    if (triggerType === "CALL_BUY" && deltaCallOi !== undefined && deltaCallOi > 50000) {
+      totalScore = Math.max(0, totalScore - 10);
+      explanation.push("⚠ CALL WRITING PENALTY (-10 points): Institutional Call Writers adding contracts into breakout");
+    }
+
+    if (triggerType === "PUT_BUY" && deltaPutOi !== undefined && deltaPutOi > 50000) {
+      totalScore = Math.max(0, totalScore - 10);
+      explanation.push("⚠ PUT WRITING PENALTY (-10 points): Institutional Put Writers adding contracts into breakdown");
+    }
+
+    if (deltaVixPercent !== undefined && deltaVixPercent < -3.0) {
+      totalScore = Math.max(0, totalScore - 10);
+      explanation.push(`⚠ VEGA COLLAPSE WARNING (-10 points): India VIX dropped rapidly (${deltaVixPercent.toFixed(1)}%). Premium decay risk.`);
     }
 
     if (isChoppyAdx) {

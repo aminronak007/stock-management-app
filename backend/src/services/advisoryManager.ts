@@ -178,6 +178,11 @@ export class AdvisoryManager {
   private dailyLossLimit: number = -2.0; // max -2R daily drawdown
   private dailyMaxTrades: number = 3; // max 3 trades per tier per day to prevent fee accumulation
 
+  // Delta OI and Delta VIX tracking for Institutional Acceleration Guard
+  private prevTotalCallOi: number = 0;
+  private prevTotalPutOi: number = 0;
+  private prevVix: number = 0;
+
   // Callback to alert Electron/Web UI (only for SNIPER Tier)
   private onSignalCallback: (signal: AdvisorySignal) => void = () => {};
 
@@ -746,6 +751,15 @@ export class AdvisoryManager {
         maxPutOiStrike = item.strikePrice;
       }
     });
+
+    const deltaCallOi = this.prevTotalCallOi > 0 ? totalCallOi - this.prevTotalCallOi : 0;
+    const deltaPutOi = this.prevTotalPutOi > 0 ? totalPutOi - this.prevTotalPutOi : 0;
+    const deltaVixPercent = (this.prevVix > 0 && this.indiaVixValue > 0) ? ((this.indiaVixValue - this.prevVix) / this.prevVix) * 100 : 0;
+
+    this.prevTotalCallOi = totalCallOi;
+    this.prevTotalPutOi = totalPutOi;
+    this.prevVix = this.indiaVixValue;
+
     const pcr = totalCallOi > 0 ? totalPutOi / totalCallOi : 1.0;
     const triggerType = candidate;
     const strikeInterval = 50;
@@ -899,7 +913,10 @@ export class AdvisoryManager {
         heavyweightsVwap: this.heavyweightVwap,
         optionPremiumRsi: marketRsi,
         maxCallOiStrike,
-        maxPutOiStrike
+        maxPutOiStrike,
+        deltaCallOi,
+        deltaPutOi,
+        deltaVixPercent
       });
 
       // Strict rejection: zero trade on detected false breakout or score < 45
@@ -1177,19 +1194,58 @@ export class AdvisoryManager {
       return;
     }
     
-    // Target 1 Trail Step-up
+    // Target 1 Trail Step-up & Multi-Lot Partial Profit Booking (50% Lot Exit)
     if (pos.activeSignal.targetPrice1 && currentPremiumLtp >= pos.activeSignal.targetPrice1 && !pos.isTarget1Locked) {
       pos.isTarget1Locked = true;
-      const profitLockPrice = pos.activeSignal.entryPrice + (pos.activeSignal.targetPrice1 - pos.activeSignal.entryPrice) * 0.5;
+      const profitLockPrice = pos.activeSignal.entryPrice + 2.50;
       pos.activeSignal.stopLossPrice = parseFloat(profitLockPrice.toFixed(2));
       this.persistOpenPositionState(pos);
+
+      // Perform Partial Profit Booking on 50% lot if position is multi-lot (>25 qty)
+      if (pos.openTradeId) {
+        try {
+          const db = DatabaseService.initialize();
+          const tradeRecord = db.prepare("SELECT * FROM paper_trades WHERE id = ?").get(pos.openTradeId) as any;
+          if (tradeRecord && tradeRecord.qty > 25) {
+            const partialQty = Math.floor(tradeRecord.qty / 2);
+            const remainingQty = tradeRecord.qty - partialQty;
+            const entryPx = tradeRecord.entry_price || pos.activeSignal.entryPrice;
+            const grossPnl = partialQty * (currentPremiumLtp - entryPx);
+            const fees = ExcelLogger.calculateStatutoryFees(currentPremiumLtp, partialQty);
+            const netPnl = grossPnl - fees;
+
+            ExcelLogger.logTransaction(
+              "EXIT_PROFIT",
+              pos.activeOptionSymbol || "NIFTY_OPTION",
+              pos.activeSignal?.strikePrice || "",
+              partialQty,
+              currentPremiumLtp,
+              `[${tier} TIER] Target 1 (+1.25R) Hit! Partial profit booked on 50% lot (${partialQty} qty). Remaining ${remainingQty} qty runner active with SL locked at breakeven.`,
+              {
+                tier,
+                pnl: grossPnl,
+                parentTradeId: pos.openTradeId,
+                entryPrice: entryPx,
+                marketRegime: pos.activeSignal?.regime,
+                confluenceScore: pos.activeSignal?.scoreCard?.totalScore
+              }
+            ).catch(() => {});
+
+            db.prepare("UPDATE paper_trades SET qty = ? WHERE id = ?").run(remainingQty, pos.openTradeId);
+            console.log(`[AdvisoryManager] [${tier}] Multi-Lot Partial Profit Booked: ${partialQty} qty @ ₹${currentPremiumLtp.toFixed(2)} (Net PnL: ₹${netPnl.toFixed(2)}). Remaining ${remainingQty} qty runner active.`);
+          }
+        } catch (e) {
+          console.error(`[AdvisoryManager] Error performing partial profit booking:`, e);
+        }
+      }
+
       console.log(`[AdvisoryManager] [${tier}] Target 1 crossed! Trailing stop stepped up to ₹${profitLockPrice.toFixed(2)}`);
       
       if (tier === "SNIPER") {
         const targetLockSignal: AdvisorySignal = {
           ...pos.activeSignal,
           type: "HOLD",
-          reasoning: `Target 1 achieved. Trailing stop stepped up to ₹${profitLockPrice.toFixed(2)} to secure profits.`
+          reasoning: `Target 1 (+1.25R) achieved! 50% partial profit booked. Trailing stop locked at breakeven (₹${profitLockPrice.toFixed(2)}) for remaining 50% runner.`
         };
         this.onSignalCallback(targetLockSignal);
         TelegramService.sendSignalAlert(targetLockSignal).catch(() => {});

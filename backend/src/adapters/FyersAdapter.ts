@@ -330,7 +330,14 @@ export class FyersAdapter implements IBrokerAdapter {
               return candles;
             }
           } catch (err: any) {
-            if (err?.message?.includes("limit") || (typeof err === "string" && err.includes("limit"))) {
+            const errMsg = String(err?.message || err || "").toLowerCase();
+            const isTransientNetErr = 
+              errMsg.includes("limit") || 
+              errMsg.includes("econnreset") || 
+              errMsg.includes("etimedout") ||
+              errMsg.includes("socket");
+
+            if (isTransientNetErr) {
               await new Promise(r => setTimeout(r, 400));
               try {
                 const retryCandles = await fetchFromFyers();
