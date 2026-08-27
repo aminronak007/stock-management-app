@@ -95,6 +95,7 @@ export class AdvisoryManager {
   // ORB parameters
   private activeTradingDateKey: string = "";
   private isOrbActive: boolean = false;
+  private isOrbLocked: boolean = false;
   private orbHigh: number = 0;
   private orbLow: number = 0;
   private dayHigh: number = 0;
@@ -264,6 +265,7 @@ export class AdvisoryManager {
     this.dayHigh = 0;
     this.dayLow = Infinity;
     this.isOrbActive = false;
+    this.isOrbLocked = false;
     this.lastBreakoutEvalAt = 0;
     this.lastSignalBlockReason = "";
     this.lastTriggeredBreakoutLevel = { CALL_BUY: 0, PUT_BUY: 0 };
@@ -325,8 +327,7 @@ export class AdvisoryManager {
       const [hStr, mStr] = istTime.split(":");
       const hours = parseInt(hStr, 10);
       const minutes = parseInt(mStr, 10);
-      const orbEndMinute = (this.indiaVixValue > 18) ? 20 : 30;
-      return hours === 9 && minutes >= 15 && minutes < orbEndMinute;
+      return hours === 9 && minutes >= 15 && minutes < 30;
     });
 
     if (orbCandles.length === 0) return;
@@ -334,9 +335,10 @@ export class AdvisoryManager {
     this.orbHigh = Math.max(...orbCandles.map((c) => c.high));
     this.orbLow = Math.min(...orbCandles.map((c) => c.low));
     this.isOrbActive = false;
+    this.isOrbLocked = true;
     this.lastTriggeredBreakoutLevel = { CALL_BUY: 0, PUT_BUY: 0 };
     console.log(
-      `[AdvisoryManager] ORB hydrated from history (${orbCandles.length} bars): High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}`
+      `[AdvisoryManager] 🔒 ORB hydrated from history (${orbCandles.length} bars): High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)} (LOCKED)`
     );
   }
 
@@ -628,25 +630,27 @@ export class AdvisoryManager {
       this.dayHigh = Math.max(this.dayHigh, tick.ltp);
       this.dayLow = Math.min(this.dayLow, tick.ltp);
       
-      // Dynamic Adaptive ORB calculation window (5m for VIX > 18, 15m for normal VIX)
-      const orbEndMinute = (this.indiaVixValue > 18) ? 20 : 30;
-
-      if (hours === 9 && minutes >= 15 && minutes < orbEndMinute) {
-        if (!this.isOrbActive) {
-          if (this.orbHigh <= 0 || this.orbLow <= 0) {
+      // 9:15–9:30 AM IST Opening Range (ORB) tracking window
+      if (hours === 9 && minutes >= 15 && minutes < 30) {
+        if (!this.isOrbLocked) {
+          if (!this.isOrbActive || this.orbHigh <= 0 || this.orbLow <= 0) {
             this.orbHigh = tick.ltp;
             this.orbLow = tick.ltp;
+            this.isOrbActive = true;
+            console.log(`[AdvisoryManager] 9:15 AM ORB formation window active. Tracking boundaries.`);
           }
-          this.isOrbActive = true;
-          console.log(`[AdvisoryManager] 9:15 AM ORB range active (${orbEndMinute - 15}m window, VIX: ${this.indiaVixValue > 0 ? this.indiaVixValue.toFixed(2) : "Default"}). Tracking boundaries.`);
+          this.orbHigh = Math.max(this.orbHigh, tick.ltp);
+          this.orbLow = Math.min(this.orbLow, tick.ltp);
         }
-        this.orbHigh = Math.max(this.orbHigh, tick.ltp);
-        this.orbLow = Math.min(this.orbLow, tick.ltp);
       }
 
-      // Check breakout triggers post ORB formation (post 9:20 AM for VIX>18, post 9:30 AM for normal VIX)
-      if ((hours === 9 && minutes >= orbEndMinute) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
-        this.isOrbActive = false; // ORB creation range completed
+      // Lock ORB range permanently after 9:30 AM IST & evaluate signals
+      if ((hours === 9 && minutes >= 30) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
+        if (!this.isOrbLocked && (this.orbHigh > 0 || this.orbLow > 0)) {
+          this.isOrbActive = false;
+          this.isOrbLocked = true;
+          console.log(`[AdvisoryManager] 🔒 9:30 AM ORB locked permanently: High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}`);
+        }
         // One evaluation at a time, at most once per second — never stampede Fyers on every tick
         if (!this.breakoutEvalInflight && timestamp - this.lastBreakoutEvalAt >= 1000) {
           this.lastBreakoutEvalAt = timestamp;
@@ -1586,11 +1590,22 @@ export class AdvisoryManager {
     const aboveVwap = spot > this.currentVwap;
     const buffer = orbConfirmationBuffer(spot);
 
-    const ptsToCall = hasOrb ? this.orbHigh - spot : 0;
-    const ptsToPut = hasOrb ? spot - this.orbLow : 0;
+    // Calculate dynamic breakout targets including confirmation buffer & anti-churn swing levels
+    let targetCallLevel = hasOrb ? this.orbHigh + buffer : 0;
+    let targetPutLevel = hasOrb ? this.orbLow - buffer : 0;
+
+    if (this.lastTriggeredBreakoutLevel.CALL_BUY > 0) {
+      targetCallLevel = Math.max(targetCallLevel, this.lastTriggeredBreakoutLevel.CALL_BUY + 5);
+    }
+    if (this.lastTriggeredBreakoutLevel.PUT_BUY > 0) {
+      targetPutLevel = Math.min(targetPutLevel, this.lastTriggeredBreakoutLevel.PUT_BUY - 5);
+    }
+
+    const ptsToCall = hasOrb ? parseFloat((targetCallLevel - spot).toFixed(2)) : 0;
+    const ptsToPut = hasOrb ? parseFloat((spot - targetPutLevel).toFixed(2)) : 0;
     const insideOrb = hasOrb && spot <= this.orbHigh && spot >= this.orbLow;
-    const brokeCall = hasOrb && spot > this.orbHigh + buffer;
-    const brokePut = hasOrb && spot < this.orbLow - buffer;
+    const brokeCall = hasOrb && spot >= targetCallLevel;
+    const brokePut = hasOrb && spot <= targetPutLevel;
 
     const dbOpenBuys = DatabaseService.getOpenBuyTrades();
     const openBuyTier = (["SNIPER", "BALANCED", "EXPLORATORY"] as const).find(
@@ -1615,22 +1630,22 @@ export class AdvisoryManager {
     } else if (insideCpr) {
       waitingReason = "Spot is inside CPR. Breakout entries are withheld until price leaves the pivot range.";
     } else if (insideOrb) {
-      waitingReason = `Nifty is inside the opening range. CALL needs a break above ${this.orbHigh.toFixed(2)}; PUT needs a break below ${this.orbLow.toFixed(2)}.`;
+      waitingReason = `Nifty is inside opening range (${this.orbLow.toFixed(2)} - ${this.orbHigh.toFixed(2)}). CALL target: ${targetCallLevel.toFixed(2)}; PUT target: ${targetPutLevel.toFixed(2)}.`;
     } else if (hasOrb && spot > this.orbHigh && !brokeCall) {
-      waitingReason = `ORB high tagged. CALL needs a confirmed hold ${buffer.toFixed(1)} pts above ${this.orbHigh.toFixed(2)}.`;
+      waitingReason = `ORB high tagged. CALL needs a confirmed hold at/above ${targetCallLevel.toFixed(2)}.`;
     } else if (hasOrb && spot < this.orbLow && !brokePut) {
-      waitingReason = `ORB low tagged. PUT needs a confirmed hold ${buffer.toFixed(1)} pts below ${this.orbLow.toFixed(2)}.`;
+      waitingReason = `ORB low tagged. PUT needs a confirmed hold at/below ${targetPutLevel.toFixed(2)}.`;
     } else if (brokeCall && !aboveVwap) {
-      waitingReason = `ORB high is broken, but spot is still below session VWAP (${this.currentVwap.toFixed(2)}). CALL is blocked.`;
+      waitingReason = `ORB target (${targetCallLevel.toFixed(2)}) broken, but spot is still below session VWAP (${this.currentVwap.toFixed(2)}). CALL is blocked.`;
     } else if (brokeCall && !trendBullish) {
-      waitingReason = "ORB high is broken, but 5-minute 9/21 EMA is not bullish. CALL is blocked.";
+      waitingReason = `ORB target (${targetCallLevel.toFixed(2)}) broken, but 5-minute 9/21 EMA is not bullish. CALL is blocked.`;
     } else if (brokePut && aboveVwap) {
-      waitingReason = `ORB low is broken, but spot is still above session VWAP (${this.currentVwap.toFixed(2)}). PUT is blocked.`;
+      waitingReason = `ORB target (${targetPutLevel.toFixed(2)}) broken, but spot is still above session VWAP (${this.currentVwap.toFixed(2)}). PUT is blocked.`;
     } else if (brokePut && !trendBearish) {
-      waitingReason = "ORB low is broken, but 5-minute 9/21 EMA is not bearish. PUT is blocked.";
+      waitingReason = `ORB target (${targetPutLevel.toFixed(2)}) broken, but 5-minute 9/21 EMA is not bearish. PUT is blocked.`;
     } else if (brokeCall || brokePut) {
       waitingReason = this.lastSignalBlockReason
-        || "ORB is broken and local filters passed. Pricing the option chain for strike and targets.";
+        || "ORB breakout gate passed and local filters aligned. Pricing option chain.";
     }
 
     return {
@@ -1639,6 +1654,9 @@ export class AdvisoryManager {
       vix: this.indiaVixValue,
       orbHigh: this.orbHigh,
       orbLow: this.orbLow,
+      targetCallLevel,
+      targetPutLevel,
+      buffer,
       ptsToCall,
       ptsToPut,
       insideOrb,
