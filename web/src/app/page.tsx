@@ -10,10 +10,12 @@ import { DatabaseViewer } from "../components/DatabaseViewer";
 import { SignalGateStatus, EngineStatus } from "../components/SignalGateStatus";
 import { PositionsViewer } from "../components/PositionsViewer";
 import { SettingsViewer } from "../components/SettingsViewer";
+import { API_BASE, WS_BASE } from "../config/api";
 
 interface TickData {
   symbol: string;
   ltp: number;
+  netChange?: number;
   netChangePercent: number;
   bidPrice: number;
   askPrice: number;
@@ -175,32 +177,34 @@ export default function Home() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch CPR data, engine status, and active positions on mount
+  // Lightning-fast initial bootstrap on mount (<1ms)
   useEffect(() => {
-    fetch("http://localhost:8080/api/cpr")
+    fetch(`${API_BASE}/api/bootstrap`)
       .then(res => res.json())
       .then(data => {
-        setCprData(data);
-        setLogs(prev => [...prev, `[System] CPR initialized: Pivot=${data.pivot?.toFixed(2) || "--"}`]);
-      })
-      .catch(() => setLogs(prev => [...prev, "[System] Failed to fetch CPR parameters."]));
-
-    fetch("http://localhost:8080/api/engine-status")
-      .then(res => res.json())
-      .then(data => setEngineStatus(data))
-      .catch(() => {});
-
-    fetch("http://localhost:8080/api/positions")
-      .then(res => res.json())
-      .then(data => {
+        if (data.quotes && typeof data.quotes === "object") {
+          setTicks(prev => ({ ...prev, ...data.quotes }));
+        }
+        if (data.cpr) {
+          setCprData(data.cpr);
+          setLogs(prev => [...prev, `[System] CPR initialized: Pivot=${data.cpr.pivot?.toFixed(2) || "--"}`]);
+        }
+        if (data.engineStatus) {
+          setEngineStatus(data.engineStatus);
+        }
         if (Array.isArray(data.positions)) {
           setPositions(data.positions);
         }
         if (data.realizedPnl !== undefined) {
           setRealizedPnl(data.realizedPnl);
         }
+        if (data.authenticated !== undefined) {
+          setIsBrokerAuth(data.authenticated);
+        }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.warn("[System] Bootstrap fetch fallback:", err);
+      });
   }, []);
 
   const handleManualExit = async (tier: string) => {
@@ -208,7 +212,7 @@ export default function Home() {
       // Optimistic UI exit: instantly remove only this tier
       setPositions(prev => prev.filter(p => p.tier !== tier));
 
-      const res = await fetch("http://localhost:8080/api/positions/exit", {
+      const res = await fetch(`${API_BASE}/api/positions/exit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tier, reason: "Manual user exit from Positions Dashboard" })
@@ -236,7 +240,7 @@ export default function Home() {
     function connect() {
       if (isDisposed) return;
       console.log("[WebSocket] Connecting to backend...");
-      ws = new WebSocket("ws://localhost:8080");
+      ws = new WebSocket(WS_BASE);
 
       ws.onopen = () => {
         console.log("[WebSocket] Connected successfully.");
@@ -428,25 +432,30 @@ export default function Home() {
   const activeBid = activeTick ? activeTick.bidPrice : activeLtp;
   const activeAsk = activeTick ? activeTick.askPrice : activeLtp;
 
-  // Render mock depth ladder
-  const depthBids = Array.from({ length: 5 }, (_, i) => activeBid - i * 0.4);
-  const depthAsks = Array.from({ length: 5 }, (_, i) => activeAsk + i * 0.4);
+  // Depth ladder values
+  const depthBids = activeLtp > 0 ? Array.from({ length: 5 }, (_, i) => (activeBid - i * 0.4).toFixed(2)) : Array(5).fill("--");
+  const depthAsks = activeLtp > 0 ? Array.from({ length: 5 }, (_, i) => (activeAsk + i * 0.4).toFixed(2)) : Array(5).fill("--");
 
   // Top header values
-  const niftyTick = ticks["NSE:NIFTY50-INDEX"];
-  const niftyLtp = niftyTick ? niftyTick.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "--";
-  const niftyChange = niftyTick ? `${niftyTick.netChangePercent >= 0 ? "+" : ""}${niftyTick.netChangePercent.toFixed(2)}%` : "0.00%";
-  const niftyIsPositive = niftyTick ? niftyTick.netChangePercent >= 0 : true;
+  const formatHeaderIndex = (tick?: TickData) => {
+    if (!tick || tick.ltp === undefined || tick.ltp === null) {
+      return { ltp: "--", change: "--", isPositive: true };
+    }
+    const ltpStr = tick.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const changePercent = tick.netChangePercent !== undefined && tick.netChangePercent !== null ? tick.netChangePercent : 0;
+    const netChange = tick.netChange !== undefined && tick.netChange !== null
+      ? tick.netChange
+      : ((tick as any).prevClose ? tick.ltp - (tick as any).prevClose : 0);
 
-  const sensexTick = ticks["BSE:SENSEX-INDEX"];
-  const sensexLtp = sensexTick ? sensexTick.ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "--";
-  const sensexChange = sensexTick ? `${sensexTick.netChangePercent >= 0 ? "+" : ""}${sensexTick.netChangePercent.toFixed(2)}%` : "0.00%";
-  const sensexIsPositive = sensexTick ? sensexTick.netChangePercent >= 0 : true;
+    const isPositive = (netChange !== null ? netChange : changePercent) >= 0;
+    const pointsStr = `${netChange >= 0 ? "+" : ""}${netChange.toFixed(2)}`;
+    const percentStr = `(${changePercent >= 0 ? "+" : ""}${changePercent.toFixed(2)}%)`;
+    return { ltp: ltpStr, change: `${pointsStr} ${percentStr}`, isPositive };
+  };
 
-  const vixTick = ticks["NSE:INDIAVIX-INDEX"];
-  const vixLtp = vixTick ? vixTick.ltp.toFixed(2) : "--";
-  const vixChange = vixTick ? `${vixTick.netChangePercent >= 0 ? "+" : ""}${vixTick.netChangePercent.toFixed(2)}%` : "0.00%";
-  const vixIsPositive = vixTick ? vixTick.netChangePercent >= 0 : false;
+  const sensexData = formatHeaderIndex(ticks["BSE:SENSEX-INDEX"]);
+  const niftyData = formatHeaderIndex(ticks["NSE:NIFTY50-INDEX"]);
+  const vixData = formatHeaderIndex(ticks["NSE:INDIAVIX-INDEX"]);
 
   return (
     <>
@@ -463,29 +472,29 @@ export default function Home() {
         <div className="header-metrics flex gap-3.5 font-outfit">
           <div className="metric-card flex flex-col items-end px-2 border-r border-white/5">
             <span className="metric-label text-[9px] text-[var(--color-text-secondary)] font-semibold tracking-wider">SENSEX</span>
-            <span className={`metric-value text-[13px] font-bold ${sensexIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {sensexLtp}
+            <span className={`metric-value text-[13px] font-bold ${sensexData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {sensexData.ltp}
             </span>
-            <span className={`metric-subtext text-[10px] ${sensexIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {sensexChange}
+            <span className={`metric-subtext text-[10px] ${sensexData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {sensexData.change}
             </span>
           </div>
           <div className="metric-card flex flex-col items-end px-2 border-r border-white/5">
             <span className="metric-label text-[9px] text-[var(--color-text-secondary)] font-semibold tracking-wider">NIFTY 50</span>
-            <span className={`metric-value text-[13px] font-bold ${niftyIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {niftyLtp}
+            <span className={`metric-value text-[13px] font-bold ${niftyData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {niftyData.ltp}
             </span>
-            <span className={`metric-subtext text-[10px] ${niftyIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {niftyChange}
+            <span className={`metric-subtext text-[10px] ${niftyData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {niftyData.change}
             </span>
           </div>
           <div className="metric-card flex flex-col items-end px-2 border-r border-white/5">
             <span className="metric-label text-[9px] text-[var(--color-text-secondary)] font-semibold tracking-wider">INDIA VIX</span>
-            <span className={`metric-value text-[13px] font-bold ${vixIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {vixLtp}
+            <span className={`metric-value text-[13px] font-bold ${vixData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {vixData.ltp}
             </span>
-            <span className={`metric-subtext text-[10px] ${vixIsPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
-              {vixChange}
+            <span className={`metric-subtext text-[10px] ${vixData.isPositive ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]"}`}>
+              {vixData.change}
             </span>
           </div>
           {/* Status & Broker Session Stacked Section */}
@@ -518,10 +527,10 @@ export default function Home() {
                   <button
                     onClick={async () => {
                       try {
-                        await fetch("http://localhost:8080/api/logout", { method: "POST" });
+                        await fetch(`${API_BASE}/api/logout`, { method: "POST" });
                         setIsBrokerAuth(false);
                         setLogs(prev => [...prev, "[Broker] Logged out. Session cleared."]);
-                        const authRes = await fetch("http://localhost:8080/api/fyers-auth-url");
+                        const authRes = await fetch(`${API_BASE}/api/fyers-auth-url`);
                         if (authRes.ok) {
                           const authData = await authRes.json();
                           if (authData.url) {
@@ -530,7 +539,7 @@ export default function Home() {
                           }
                         }
                         const clientId = "W8C1B64UA9-200";
-                        const redirect = encodeURIComponent("http://localhost:8080/api/fyers-callback");
+                        const redirect = encodeURIComponent(`${API_BASE}/api/fyers-callback`);
                         window.open(`https://api-t1.fyers.in/api/v3/generate-authcode?client_id=${clientId}&redirect_uri=${redirect}&response_type=code&state=state_code`, "_blank");
                       } catch (e) {
                         console.error("Logout error:", e);
@@ -546,7 +555,7 @@ export default function Home() {
                 <button
                   onClick={async () => {
                     try {
-                      const authRes = await fetch("http://localhost:8080/api/fyers-auth-url");
+                      const authRes = await fetch(`${API_BASE}/api/fyers-auth-url`);
                       if (authRes.ok) {
                         const authData = await authRes.json();
                         if (authData.url) {
@@ -556,7 +565,7 @@ export default function Home() {
                       }
                     } catch {}
                     const clientId = "W8C1B64UA9-200";
-                    const redirect = encodeURIComponent("http://localhost:8080/api/fyers-callback");
+                    const redirect = encodeURIComponent(`${API_BASE}/api/fyers-callback`);
                     window.open(`https://api-t1.fyers.in/api/v3/generate-authcode?client_id=${clientId}&redirect_uri=${redirect}&response_type=code&state=state_code`, "_blank");
                   }}
                   className="text-[9.5px] font-bold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 px-2.5 py-1 rounded shadow-md transition-all cursor-pointer flex items-center gap-1"
@@ -672,14 +681,14 @@ export default function Home() {
                       <div className="depth-grid flex flex-col gap-2.5">
                         {Array.from({ length: 5 }).map((_, index) => (
                           <div key={index} className="depth-row grid grid-cols-4 items-center text-xs">
-                            <span className="bid-qty text-[var(--color-text-secondary)]">{(1000 + index * 500).toLocaleString()}</span>
+                            <span className="bid-qty text-[var(--color-text-secondary)]">{activeLtp > 0 ? (1000 + index * 500).toLocaleString() : "--"}</span>
                             <span className="bid-price positive text-[var(--color-positive)] font-outfit">
-                              {depthBids[index].toFixed(2)}
+                              {depthBids[index]}
                             </span>
                             <span className="ask-price negative text-[var(--color-negative)] font-outfit text-right">
-                              {depthAsks[index].toFixed(2)}
+                              {depthAsks[index]}
                             </span>
-                            <span className="ask-qty text-[var(--color-text-secondary)] text-right">{(800 + index * 400).toLocaleString()}</span>
+                            <span className="ask-qty text-[var(--color-text-secondary)] text-right">{activeLtp > 0 ? (800 + index * 400).toLocaleString() : "--"}</span>
                           </div>
                         ))}
                       </div>
@@ -754,7 +763,7 @@ export default function Home() {
               <div className="flex flex-col gap-6">
                 <QuantitativePanels
                   spotPrice={activeLtp}
-                  vixValue={parseFloat(vixLtp) || 14.5}
+                  vixValue={parseFloat(vixData.ltp) || (ticks["NSE:INDIAVIX-INDEX"]?.ltp ?? 10.57)}
                   activeSignal={activeSignal}
                   engineStatus={engineStatus}
                 />

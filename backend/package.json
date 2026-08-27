@@ -6,10 +6,14 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "nodemon",
-    "dev:simple": "ts-node src/index.ts",
-    "test:advisory": "ts-node src/scratch/mockAdvisoryTest.ts",
-    "generate:token": "ts-node src/scratch/generateToken.ts"
+    "pm2": "pm2 start ecosystem.config.js",
+    "stop": "pm2 stop ecosystem.config.js",
+    "restart": "pm2 restart ecosystem.config.js",
+    "logs:pm2": "pm2 logs nifty-advisory-backend",
+    "dev": "nodemon --exec \"ts-node --transpile-only\" src/index.ts",
+    "dev:simple": "ts-node --transpile-only src/index.ts",
+    "test:advisory": "ts-node --transpile-only src/scratch/mockAdvisoryTest.ts",
+    "generate:token": "ts-node --transpile-only src/scratch/generateToken.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.1.2",
@@ -28,6 +32,7 @@
     "@types/node": "^20.14.9",
     "@types/ws": "^8.18.1",
     "nodemon": "^3.1.14",
+    "pm2": "^7.0.4",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.2"
   }

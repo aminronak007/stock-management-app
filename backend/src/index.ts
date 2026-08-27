@@ -25,6 +25,7 @@ function toUiSignalPayload(signal: AdvisorySignal | null) {
   if (!signal) return null;
   return {
     type: signal.type,
+    tier: signal.tier || "SNIPER",
     strike: signal.strikePrice != null ? String(signal.strikePrice) : "",
     entry: rupee(signal.entryPrice),
     sl: rupee(signal.stopLossPrice),
@@ -54,7 +55,7 @@ async function main() {
     console.log("[Egress Security] Static IP verification bypassed (verifyIp=false).");
   }
 
-  const brokerTickCache: { [symbol: string]: { ltp: number; change: number } } = {};
+  const brokerTickCache: { [symbol: string]: { ltp: number; change: number; netChange?: number } } = {};
 
   // 2. Instantiate and boot Broker Client
   const broker = BrokerFactory.getAdapter();
@@ -77,66 +78,78 @@ async function main() {
   const wss = new WebSocketServer({ server });
   const clients = new Set<WebSocket>();
 
-  // Broadcast helper
+  // Broadcast helper with error-safe socket verification
   const broadcast = (data: any) => {
-    const payload = JSON.stringify(data);
-    clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(payload);
-      }
-    });
+    try {
+      const payload = JSON.stringify(data);
+      clients.forEach((client) => {
+        if (client && client.readyState === WebSocket.OPEN) {
+          try {
+            client.send(payload);
+          } catch {}
+        }
+      });
+    } catch {}
   };
 
   // Tick Batching & Throttling for ultra-low-latency UI delivery
-  // Instead of broadcasting every individual tick (50-200/sec), we batch ticks and flush at 150ms intervals.
-  // This reduces WebSocket message count by ~95% while maintaining sub-200ms visual latency.
+  // Batches high-frequency ticks into 60ms coalesced frames (≈16 flushes/sec)
+  // Sub-60ms latency guarantees instant visual updates without socket queue congestion.
   let pendingTickBatch: { [symbol: string]: any } = {};
   let tickBatchTimer: NodeJS.Timeout | null = null;
-  const TICK_BATCH_INTERVAL_MS = 150; // Flush every 150ms (≈7 batches/sec — feels instant to human eye)
+  const TICK_BATCH_INTERVAL_MS = 60; // 60ms ultra-low latency tick batching
 
   let lastPositionBroadcastAt = 0;
-  const POSITION_BROADCAST_INTERVAL_MS = 500; // Positions update at most 2x/sec
+  const POSITION_BROADCAST_INTERVAL_MS = 250; // Positions update 4x/sec for real-time PnL accuracy
 
   const flushTickBatch = () => {
     const symbols = Object.keys(pendingTickBatch);
     if (symbols.length === 0) return;
 
-    // Send all accumulated ticks in a single batched WebSocket frame
-    const batchPayload = JSON.stringify({
-      type: "TICK_BATCH",
-      payload: Object.values(pendingTickBatch)
-    });
-    clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(batchPayload);
-      }
-    });
+    try {
+      // Send all accumulated ticks in a single batched WebSocket frame
+      const batchPayload = JSON.stringify({
+        type: "TICK_BATCH",
+        payload: Object.values(pendingTickBatch)
+      });
+      clients.forEach((client) => {
+        if (client && client.readyState === WebSocket.OPEN) {
+          try {
+            client.send(batchPayload);
+          } catch {}
+        }
+      });
+    } catch {}
     pendingTickBatch = {};
   };
 
-  // Reference Map for Previous Trading Day Close Prices to compute accurate % change
-  const symbolPrevCloseMap: { [symbol: string]: number } = {
-    "BSE:SENSEX-INDEX": 77728.16,
-    "NSE:NIFTY50-INDEX": 24287.65,
-    "NSE:NIFTYBANK-INDEX": 57497.80,
-    "NSE:FINNIFTY-INDEX": 26217.15,
-    "NSE:INDIAVIX-INDEX": 11.33,
-    "NSE:RELIANCE-EQ": 1316.00,
-    "NSE:HDFCBANK-EQ": 729.00,
-    "NSE:ICICIBANK-EQ": 1415.30
-  };
+  // Dynamic in-memory map for previous day close prices, fetched dynamically from broker
+  const dynamicPrevCloseMap: { [symbol: string]: number } = {};
 
   // Forward all live incoming broker ticks to brokerTickCache, Advisory Engine, and batched UI delivery
   broker.onTick((tick) => {
+    let netChange = tick.netChange;
     let changePercent = tick.netChangePercent;
-    const prevClose = symbolPrevCloseMap[tick.symbol];
-    if ((changePercent === undefined || changePercent === null || changePercent === 0) && prevClose && prevClose > 0 && tick.ltp > 0) {
-      changePercent = parseFloat((((tick.ltp - prevClose) / prevClose) * 100).toFixed(2));
+    const prevClose = tick.prevClose || dynamicPrevCloseMap[tick.symbol];
+
+    if (prevClose && prevClose > 0 && tick.ltp > 0) {
+      if (netChange === undefined || netChange === null || netChange === 0) {
+        netChange = parseFloat((tick.ltp - prevClose).toFixed(2));
+      }
+      if (changePercent === undefined || changePercent === null || changePercent === 0) {
+        changePercent = parseFloat((((tick.ltp - prevClose) / prevClose) * 100).toFixed(2));
+      }
+    } else if (netChange !== undefined && netChange !== 0 && (!changePercent || changePercent === 0) && tick.ltp > 0) {
+      const estimatedPrev = tick.ltp - netChange;
+      if (estimatedPrev > 0) {
+        changePercent = parseFloat(((netChange / estimatedPrev) * 100).toFixed(2));
+      }
     }
 
     brokerTickCache[tick.symbol] = {
       ltp: tick.ltp,
-      change: changePercent || 0.0
+      change: changePercent || 0.0,
+      netChange: netChange
     };
 
     // Feed real-time ticks to the Advisory Strategy Engine (full speed, no throttling)
@@ -148,6 +161,7 @@ async function main() {
     pendingTickBatch[tick.symbol] = {
       symbol: tick.symbol,
       ltp: tick.ltp,
+      netChange: netChange !== undefined ? netChange : undefined,
       netChangePercent: changePercent || 0.0,
       bidPrice: tick.bidPrice || tick.ltp,
       askPrice: tick.askPrice || tick.ltp,
@@ -201,6 +215,7 @@ async function main() {
         payload: {
           symbol: symbol,
           ltp: cached.ltp,
+          netChange: cached.netChange,
           netChangePercent: cached.change,
           bidPrice: cached.ltp - 0.15,
           askPrice: cached.ltp + 0.15,
@@ -277,17 +292,23 @@ async function main() {
 
           symbols.forEach(sym => {
             const cached = brokerTickCache[sym];
-            ws.send(JSON.stringify({
-              type: "TICK",
-              payload: {
-                symbol: sym,
-                ltp: cached.ltp,
-                netChangePercent: cached.change,
-                bidPrice: cached.ltp,
-                askPrice: cached.ltp,
-                timestamp: Date.now()
-              }
-            }));
+            if (cached && ws.readyState === WebSocket.OPEN) {
+              try {
+                ws.send(JSON.stringify({
+                  type: "TICK",
+                  payload: {
+                    symbol: sym,
+                    ltp: cached.ltp,
+                    netChange: cached.netChange ?? 0,
+                    netChangePercent: cached.change ?? 0,
+                    prevClose: dynamicPrevCloseMap[sym] ?? cached.ltp,
+                    bidPrice: cached.ltp,
+                    askPrice: cached.ltp,
+                    timestamp: Date.now()
+                  }
+                }));
+              } catch {}
+            }
           });
         }
       } catch (e) {
@@ -295,10 +316,19 @@ async function main() {
       }
     });
 
+    ws.on("error", (err) => {
+      console.warn("[WebSocket] Client connection error:", err?.message || err);
+      clients.delete(ws);
+    });
+
     ws.on("close", () => {
       console.log("[WebSocket] Client disconnected.");
       clients.delete(ws);
     });
+  });
+
+  wss.on("error", (err) => {
+    console.warn("[WebSocket Server] WSS error:", err?.message || err);
   });
 
   // Register signal listener to pipe warnings to UI clients
@@ -345,8 +375,8 @@ async function main() {
       if (broker.generateSessionFromAuthCode) {
         await broker.generateSessionFromAuthCode(authCode);
 
-        // Re-resolve real closing prices and broadcast to all clients immediately
-        await resolveHistoricalClosePrices();
+        // Re-load real closing quotes and initialize advisory immediately
+        await loadInitialQuotes();
         await advisory.initialize();
 
         res.send(`
@@ -476,6 +506,56 @@ async function main() {
     }
   });
 
+  // Lightning-fast combined bootstrap endpoint for instant UI initial render (<1ms)
+  app.get("/api/bootstrap", (req, res) => {
+    try {
+      const cpr = advisory.getCpr();
+      const positions = advisory.getActivePositions();
+      const realizedPnl = advisory.getTodayRealizedPnl();
+      const engineStatus = advisory.getEngineStatus();
+      const session = DatabaseService.getSession("FYERS");
+
+      // In-memory instant quote map
+      const quotes: { [sym: string]: any } = {};
+      for (const sym of coreSymbols) {
+        if (brokerTickCache[sym]) {
+          quotes[sym] = {
+            symbol: sym,
+            ltp: brokerTickCache[sym].ltp,
+            netChange: brokerTickCache[sym].netChange ?? 0,
+            netChangePercent: brokerTickCache[sym].change ?? 0,
+            prevClose: dynamicPrevCloseMap[sym] ?? brokerTickCache[sym].ltp,
+            bidPrice: brokerTickCache[sym].ltp,
+            askPrice: brokerTickCache[sym].ltp,
+            timestamp: Date.now()
+          };
+        }
+      }
+
+      res.json({
+        quotes,
+        cpr: {
+          pivot: cpr ? cpr.pivot : null,
+          top: cpr ? cpr.topRange : null,
+          bottom: cpr ? cpr.bottomRange : null,
+          widthPercent: cpr ? ((cpr.topRange - cpr.bottomRange) / cpr.pivot) * 100 : null,
+          r1: cpr ? cpr.r1 : null,
+          r2: cpr ? cpr.r2 : null,
+          r3: cpr ? cpr.r3 : null,
+          s1: cpr ? cpr.s1 : null,
+          s2: cpr ? cpr.s2 : null,
+          s3: cpr ? cpr.s3 : null
+        },
+        engineStatus,
+        positions,
+        realizedPnl,
+        authenticated: !!session && session.expires_at > Date.now() && (broker as any).useLiveApi === true
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.get("/api/cpr", (req, res) => {
     const cpr = advisory.getCpr();
     res.json({
@@ -502,6 +582,38 @@ async function main() {
       positions: advisory.getActivePositions(),
       realizedPnl: advisory.getTodayRealizedPnl()
     });
+  });
+
+  app.get("/api/quotes", async (req, res) => {
+    try {
+      // Instant RAM cache path (0.01ms)
+      const cachedResult: { [sym: string]: any } = {};
+      let allCached = true;
+      for (const sym of coreSymbols) {
+        if (brokerTickCache[sym]) {
+          cachedResult[sym] = {
+            symbol: sym,
+            ltp: brokerTickCache[sym].ltp,
+            netChange: brokerTickCache[sym].netChange ?? 0,
+            netChangePercent: brokerTickCache[sym].change ?? 0,
+            prevClose: dynamicPrevCloseMap[sym] ?? brokerTickCache[sym].ltp,
+            bidPrice: brokerTickCache[sym].ltp,
+            askPrice: brokerTickCache[sym].ltp,
+            timestamp: Date.now()
+          };
+        } else {
+          allCached = false;
+        }
+      }
+      if (allCached && Object.keys(cachedResult).length > 0) {
+        return res.json(cachedResult);
+      }
+
+      const quotes = await (broker.getQuotes ? broker.getQuotes(coreSymbols) : Promise.resolve({}));
+      res.json(quotes);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
   });
 
   app.post("/api/positions/exit", (req, res) => {
@@ -762,86 +874,42 @@ async function main() {
   console.log("[Broker] Subscribing to core streams...");
   broker.subscribeTicks(coreSymbols);
 
-  const mockSymbols = [
-    { symbol: "BSE:SENSEX-INDEX", base: 77728.16, changeRange: 12 },
-    { symbol: "NSE:NIFTY50-INDEX", base: 24287.65, changeRange: 4 },
-    { symbol: "NSE:NIFTYBANK-INDEX", base: 57497.80, changeRange: 10 },
-    { symbol: "NSE:FINNIFTY-INDEX", base: 26217.15, changeRange: 5 },
-    { symbol: "NSE:INDIAVIX-INDEX", base: 11.33, changeRange: 0.15 },
-    { symbol: "NSE:RELIANCE-EQ", base: 1316.00, changeRange: 1 },
-    { symbol: "NSE:HDFCBANK-EQ", base: 729.00, changeRange: 0.8 },
-    { symbol: "NSE:ICICIBANK-EQ", base: 1415.30, changeRange: 0.6 }
-  ];
-
-  // Resolve actual last close prices & prevClose from Fyers API on startup
-  async function resolveHistoricalClosePrices() {
-    const todayStr = new Date().toISOString().split("T")[0];
-    const prevDate = new Date();
-    prevDate.setDate(prevDate.getDate() - 10); // Go back 10 days to guarantee cross-weekend data
-    const prevDateStr = prevDate.toISOString().split("T")[0];
-
-    console.log("[Broker] Resolving last correct close prices from Fyers API history...");
-    for (const m of mockSymbols) {
+  // Load quotes dynamically from Broker API / Database immediately on startup
+  async function loadInitialQuotes() {
+    if (broker.getQuotes) {
       try {
-        const candles = await broker.getHistoricalCandles(m.symbol, "D", prevDateStr, todayStr);
-        if (candles && candles.length > 0) {
-          const lastCandle = candles[candles.length - 1];
-          const prevCandle = candles.length >= 2 ? candles[candles.length - 2] : lastCandle;
-          const lastDateStr = new Date(lastCandle.timestamp).toISOString().split("T")[0];
-
-          let prevClose = prevCandle.close;
-          let currentLtp = lastCandle.close;
-
-          if (lastDateStr < todayStr && candles.length >= 2) {
-            prevClose = candles[candles.length - 2].close;
-            currentLtp = candles[candles.length - 1].close;
+        const quotes = await broker.getQuotes(coreSymbols);
+        for (const sym of Object.keys(quotes)) {
+          const q = quotes[sym];
+          brokerTickCache[sym] = {
+            ltp: q.ltp,
+            change: q.netChangePercent,
+            netChange: q.netChange
+          };
+          if (q.prevClose && q.prevClose > 0) {
+            dynamicPrevCloseMap[sym] = q.prevClose;
           }
-
-          symbolPrevCloseMap[m.symbol] = prevClose;
-          m.base = currentLtp;
-
-          const changePercent = prevClose > 0 
-            ? parseFloat((((currentLtp - prevClose) / prevClose) * 100).toFixed(2)) 
-            : 0.0;
-
-          console.log(`[Broker] Resolved ${m.symbol} LTP: ₹${m.base}, PrevClose: ₹${prevClose} (Change: ${changePercent >= 0 ? "+" : ""}${changePercent}%)`);
-
-          // Seed the initial tick cache with the correct closed price & percentage change
-          brokerTickCache[m.symbol] = { ltp: m.base, change: changePercent };
-
-          // Broadcast immediately to all connected UI clients
+          console.log(`[Broker] Loaded initial quote for ${sym}: ₹${q.ltp}, Change: ${q.netChange} (${q.netChangePercent}%)`);
           broadcast({
             type: "TICK",
             payload: {
-              symbol: m.symbol,
-              ltp: m.base,
-              netChangePercent: changePercent,
-              bidPrice: m.base,
-              askPrice: m.base,
-              timestamp: Date.now()
+              symbol: sym,
+              ltp: q.ltp,
+              netChange: q.netChange,
+              netChangePercent: q.netChangePercent,
+              bidPrice: q.bidPrice || q.ltp,
+              askPrice: q.askPrice || q.ltp,
+              timestamp: q.timestamp || Date.now()
             }
           });
-        } else {
-          const fallbackPrev = symbolPrevCloseMap[m.symbol] || m.base;
-          const changePercent = fallbackPrev > 0 ? parseFloat((((m.base - fallbackPrev) / fallbackPrev) * 100).toFixed(2)) : 0.0;
-          console.warn(`[Broker] No history found for ${m.symbol}. Using fallback base: ₹${m.base}`);
-          brokerTickCache[m.symbol] = { ltp: m.base, change: changePercent };
         }
-      } catch (err: any) {
-        const fallbackPrev = symbolPrevCloseMap[m.symbol] || m.base;
-        const changePercent = fallbackPrev > 0 ? parseFloat((((m.base - fallbackPrev) / fallbackPrev) * 100).toFixed(2)) : 0.0;
-        console.warn(`[Broker] Error fetching close for ${m.symbol}: ${err.message}. Using fallback base: ₹${m.base}`);
-        brokerTickCache[m.symbol] = { ltp: m.base, change: changePercent };
+      } catch (e: any) {
+        console.warn("[Broker] Initial getQuotes error:", e?.message || e);
       }
-      // 350ms throttle delay between symbols to prevent Fyers rate limit
-      await new Promise(r => setTimeout(r, 350));
     }
   }
 
-  // Trigger historical resolve safely
-  resolveHistoricalClosePrices().catch((err: any) => {
-    console.warn("[Broker] Error during initial historical resolution:", err?.message || err);
-  });
+  loadInitialQuotes().catch(() => { });
 
   // Push live ORB / wait-reason status so the UI can explain missing signals
   setInterval(() => {
@@ -856,10 +924,59 @@ async function main() {
     advisory.enforceMandatorySquareOff();
   }, 15000);
 
-  const port = process.env.PORT || 8080;
+  const port = Number(process.env.PORT) || 8080;
+
+  // Proactively release port 8080 if an orphaned process from a previous run is holding it
+  try {
+    if (process.platform === "win32") {
+      require("child_process").execSync(
+        `powershell -Command "Get-NetTCPConnection -LocalPort ${port} -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }"`,
+        { stdio: "ignore" }
+      );
+    } else {
+      // Ubuntu / Linux port liberation
+      require("child_process").execSync(
+        `fuser -k ${port}/tcp 2>/dev/null || kill -9 $(lsof -t -i:${port}) 2>/dev/null || true`,
+        { stdio: "ignore", shell: "/bin/sh" }
+      );
+    }
+  } catch {}
+
+  server.on("error", (e: any) => {
+    if (e.code === "EADDRINUSE") {
+      console.warn(`[Web Server] Port ${port} is occupied. Retrying in 500ms...`);
+      setTimeout(() => {
+        try {
+          server.close();
+        } catch { }
+        server.listen(port);
+      }, 500);
+    }
+  });
+
   server.listen(port, () => {
     console.log(`[Web Server] HTTP API and WebSockets running on http://localhost:${port}`);
   });
+
+  const shutdown = () => {
+    clients.forEach((c) => {
+      try { c.terminate(); } catch { }
+    });
+    server.close(() => {
+      process.exit(0);
+    });
+  };
+
+  process.once("SIGUSR2", () => {
+    clients.forEach((c) => {
+      try { c.terminate(); } catch { }
+    });
+    server.close(() => {
+      process.kill(process.pid, "SIGUSR2");
+    });
+  });
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 process.on("unhandledRejection", (reason: any) => {

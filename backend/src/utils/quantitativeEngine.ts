@@ -11,6 +11,11 @@ export type MarketRegime =
   | "BREAKOUT_ATTEMPT"
   | "REVERSAL";
 
+export type StrategySetup = 
+  | "ORB_BREAKOUT"
+  | "TRAP_REVERSAL"
+  | "VWAP_PULLBACK";
+
 export interface ConfluenceFactors {
   marketStructure: { score: number; max: number; factors: string[] };
   vwapMomentum: { score: number; max: number; factors: string[] };
@@ -26,6 +31,7 @@ export interface SignalScoreCard {
   totalScore: number;
   qualityLabel: "NO_TRADE" | "WATCH" | "WEAK_SETUP" | "HIGH_QUALITY" | "VERY_HIGH_QUALITY";
   regime: MarketRegime;
+  setupType?: StrategySetup;
   isFalseBreakout: boolean;
   isCounterTrend: boolean;
   factors: ConfluenceFactors;
@@ -44,7 +50,7 @@ export class QuantitativeEngine {
     atr: number
   ): MarketRegime {
     if (vix > 20) return "HIGH_VOLATILITY";
-    if (vix < 10) return "LOW_VOLATILITY";
+    if (vix < 9) return "LOW_VOLATILITY";
 
     if (candles5m.length >= NIFTY_OPTIONS_EMA_SLOW) {
       const closes = candles5m.map(c => c.close);
@@ -84,13 +90,14 @@ export class QuantitativeEngine {
     heavyweightsLtp: { [symbol: string]: number },
     heavyweightsVwap: { [symbol: string]: number },
     currentVolume: number,
-    avgVolume5: number
+    avgVolume5: number,
+    latestCandle?: { close: number; open: number; high: number; low: number }
   ): boolean {
     // 1. Immediate rejection: breakout but price returned inside ORB
     if (triggerType === "CALL_BUY" && spot <= orbHigh) return true;
     if (triggerType === "PUT_BUY" && spot >= orbLow) return true;
     
-    // 2. Upgrade 1: Heavyweight Divergence Trap - If heavyweights actively oppose breakout, flag false breakout
+    // 2. Heavyweight Divergence Trap - If heavyweights actively oppose breakout, flag false breakout
     let heavyweightAlignsCount = 0;
     let validActiveCount = 0;
     const trackedKeys = Object.keys(heavyweightsLtp);
@@ -108,6 +115,25 @@ export class QuantitativeEngine {
       return true; // Heavyweights strongly opposing spot move -> False Breakout Trap!
     }
 
+    // 3. Exhaustion Pin-Bar / Rejection Wick Check:
+    // If the latest closed candle spiked outside ORB but closed with a heavy opposing rejection wick (> 45% of candle range), it flags an exhaustion trap
+    if (latestCandle) {
+      const candleRange = latestCandle.high - latestCandle.low;
+      if (candleRange > 3) {
+        if (triggerType === "CALL_BUY") {
+          const upperWick = latestCandle.high - Math.max(latestCandle.open, latestCandle.close);
+          if (upperWick / candleRange > 0.45 && latestCandle.close < latestCandle.open) {
+            return true; // Shooting star / Bearish rejection pinbar at highs!
+          }
+        } else if (triggerType === "PUT_BUY") {
+          const lowerWick = Math.min(latestCandle.open, latestCandle.close) - latestCandle.low;
+          if (lowerWick / candleRange > 0.45 && latestCandle.close > latestCandle.open) {
+            return true; // Hammer / Bullish rejection pinbar at lows!
+          }
+        }
+      }
+    }
+
     return false;
   }
 
@@ -120,12 +146,13 @@ export class QuantitativeEngine {
     orbHigh: number;
     orbLow: number;
     triggerType: "CALL_BUY" | "PUT_BUY";
+    setupType?: StrategySetup;
     cpr: CPRValues | null;
     pcr: number;
     vix: number;
     atr: number;
     riskReward: number;
-    candles5m: { close: number; high: number; low: number; volume: number }[];
+    candles5m: { close: number; high: number; low: number; volume: number; open?: number }[];
     heavyweightsLtp: { [symbol: string]: number };
     heavyweightsVwap: { [symbol: string]: number };
     optionPremiumRsi: number;
@@ -141,6 +168,7 @@ export class QuantitativeEngine {
       orbHigh,
       orbLow,
       triggerType,
+      setupType = "ORB_BREAKOUT",
       cpr,
       pcr,
       vix,
@@ -160,22 +188,25 @@ export class QuantitativeEngine {
     const explanation: string[] = [];
     const regime = this.classifyRegime(spot, cpr, vix, candles5m, atr);
 
-    // Initial check: False Breakout
+    // Initial check: False Breakout (Only for ORB_BREAKOUT entries; TRAP_REVERSAL trades the trap itself)
     const currentCandle = candles5m[candles5m.length - 1];
     const prev5Volumes = candles5m.slice(-6, -1).map(c => c.volume);
     const avgVolume5 = prev5Volumes.length > 0 ? prev5Volumes.reduce((a, b) => a + b, 0) / prev5Volumes.length : 0;
     const currentVolume = currentCandle ? currentCandle.volume : 0;
 
-    const isFalseBreakout = this.detectFalseBreakout(
-      spot,
-      orbHigh,
-      orbLow,
-      triggerType,
-      heavyweightsLtp,
-      heavyweightsVwap,
-      currentVolume,
-      avgVolume5
-    );
+    const isFalseBreakout = setupType === "ORB_BREAKOUT" 
+      ? this.detectFalseBreakout(
+          spot,
+          orbHigh,
+          orbLow,
+          triggerType,
+          heavyweightsLtp,
+          heavyweightsVwap,
+          currentVolume,
+          avgVolume5,
+          currentCandle && currentCandle.open !== undefined ? (currentCandle as { close: number; open: number; high: number; low: number }) : undefined
+        )
+      : false;
 
     // 5m 9/21 trend confirmation (Nifty options)
     let isCounterTrend = false;
@@ -234,17 +265,28 @@ export class QuantitativeEngine {
     };
 
     // 1. Market Structure (20 Points)
-    if (triggerType === "CALL_BUY") {
-      if (spot > orbHigh) {
-        factors.marketStructure.score += 10;
-        factors.marketStructure.factors.push("Spot breakout above ORB High");
-      }
+    if (setupType === "TRAP_REVERSAL") {
+      factors.marketStructure.score += 10;
+      factors.marketStructure.factors.push(triggerType === "PUT_BUY" 
+        ? "Bull Trap confirmed: Spot failed above ORB High and rejected downwards"
+        : "Bear Trap confirmed: Spot failed below ORB Low and rejected upwards");
+    } else if (setupType === "VWAP_PULLBACK") {
+      factors.marketStructure.score += 10;
+      factors.marketStructure.factors.push("Pullback to dynamic VWAP / 21 EMA support/resistance verified");
     } else {
-      if (spot < orbLow) {
-        factors.marketStructure.score += 10;
-        factors.marketStructure.factors.push("Spot breakdown below ORB Low");
+      if (triggerType === "CALL_BUY") {
+        if (spot > orbHigh) {
+          factors.marketStructure.score += 10;
+          factors.marketStructure.factors.push("Spot breakout above ORB High");
+        }
+      } else {
+        if (spot < orbLow) {
+          factors.marketStructure.score += 10;
+          factors.marketStructure.factors.push("Spot breakdown below ORB Low");
+        }
       }
     }
+
     if (cpr) {
       const outsideCpr = spot > cpr.topRange || spot < cpr.bottomRange;
       if (outsideCpr) {
@@ -331,10 +373,13 @@ export class QuantitativeEngine {
     if (vix >= 12 && vix <= 18) {
       factors.volatility.score += 6;
       factors.volatility.factors.push(`India VIX inside optimal trading band (${vix.toFixed(1)})`);
+    } else if (vix >= 10 && vix < 12) {
+      factors.volatility.score += 5;
+      factors.volatility.factors.push(`Low India VIX (${vix.toFixed(1)}): ITM option delta calibrated for momentum`);
     } else {
       factors.volatility.score += 3;
     }
-    if (atr > 8) {
+    if (atr > 6) {
       factors.volatility.score += 4;
       factors.volatility.factors.push(`ATR offers sufficient intraday range (${atr.toFixed(1)} pts)`);
     }
@@ -459,6 +504,7 @@ export class QuantitativeEngine {
       totalScore,
       qualityLabel,
       regime,
+      setupType,
       isFalseBreakout,
       isCounterTrend,
       factors,

@@ -137,11 +137,22 @@ export class FyersAdapter implements IBrokerAdapter {
           if (!item || typeof item !== "object") return;
 
           // Extract LTP from several possible fields
-          const ltp = item.ltp ?? item.iv ?? item.ic ?? item.last_price ?? item.lp ?? item.cmd?.c ?? 0;
-          const netChangePercent = item.chp ?? item.cng ?? item.nc ?? item.cmd?.chp ?? 0;
-          const volume = item.vol ?? item.v ?? item.volume ?? 0;
-          const bidPrice = item.bid ?? item.bp ?? item.bidPrice ?? ltp;
-          const askPrice = item.ask ?? item.ap ?? item.askPrice ?? ltp;
+          const ltp = Number(item.ltp ?? item.iv ?? item.ic ?? item.last_price ?? item.lp ?? item.cmd?.c ?? 0);
+          const prevClosePrice = Number(item.prev_close_price ?? item.prevClose ?? item.cmd?.prev_close_price ?? 0);
+          
+          let netChange = Number(item.ch ?? item.cng ?? item.cmd?.ch ?? 0);
+          let netChangePercent = Number(item.chp ?? item.cmd?.chp ?? item.nc ?? 0);
+
+          if (netChange === 0 && prevClosePrice > 0 && ltp > 0) {
+            netChange = parseFloat((ltp - prevClosePrice).toFixed(2));
+          }
+          if (netChangePercent === 0 && prevClosePrice > 0 && ltp > 0) {
+            netChangePercent = parseFloat((((ltp - prevClosePrice) / prevClosePrice) * 100).toFixed(2));
+          }
+
+          const volume = Number(item.vol ?? item.v ?? item.volume ?? 0);
+          const bidPrice = Number(item.bid ?? item.bp ?? item.bidPrice ?? ltp);
+          const askPrice = Number(item.ask ?? item.ap ?? item.askPrice ?? ltp);
 
           const tsSeconds = item.tvalue ?? item.ltt ?? item.tt ?? null;
           const timestamp = tsSeconds ? Number(tsSeconds) * 1000 : Date.now();
@@ -153,11 +164,13 @@ export class FyersAdapter implements IBrokerAdapter {
 
           const tick: CompactTick = {
             symbol,
-            ltp: Number(ltp || 0),
-            netChangePercent: Number(netChangePercent || 0),
-            volume: Number(volume || 0),
-            bidPrice: Number(bidPrice || ltp || 0),
-            askPrice: Number(askPrice || ltp || 0),
+            ltp,
+            netChange: netChange || undefined,
+            netChangePercent,
+            prevClose: prevClosePrice > 0 ? prevClosePrice : undefined,
+            volume,
+            bidPrice,
+            askPrice,
             timestamp
           };
 
@@ -357,42 +370,65 @@ export class FyersAdapter implements IBrokerAdapter {
           return [];
         }
 
-        const getSymbolBasePrice = (sym: string): number => {
-          if (sym.includes("SENSEX")) return 77728.16;
-          if (sym.includes("NIFTYBANK") || sym.includes("BANKNIFTY")) return 57497.80;
-          if (sym.includes("FINNIFTY")) return 26217.15;
-          if (sym.includes("INDIAVIX") || sym.includes("VIX")) return 11.33;
-          if (sym.includes("NIFTY")) return 24287.65;
-          if (sym.includes("RELIANCE")) return 1316.00;
-          if (sym.includes("HDFCBANK")) return 729.00;
-          if (sym.includes("ICICIBANK")) return 1415.30;
-          if (sym.includes("TCS")) return 4180.00;
-          if (sym.includes("SBIN")) return 840.00;
-          return 1500.00;
-        };
+        const dbQuote = DatabaseService.getMarketQuote(symbol);
+        const ltp = dbQuote ? dbQuote.ltp : 0;
+        const prevClose = dbQuote ? dbQuote.prev_close : ltp;
 
         const mockCandles: Candle[] = [];
-        const basePrice = getSymbolBasePrice(symbol);
-        let currentPrice = basePrice;
         let time = new Date(fromDate).getTime();
-        const volatilityStep = basePrice > 10000 ? 15 : (basePrice < 50 ? 0.05 : 1.5);
-        
-        for (let i = 0; i < 100; i++) {
-          const change = (Math.random() - 0.49) * volatilityStep;
-          const open = currentPrice;
-          const close = currentPrice + change;
-          const high = Math.max(open, close) + Math.random() * (volatilityStep * 0.3);
-          const low = Math.min(open, close) - Math.random() * (volatilityStep * 0.3);
-          mockCandles.push({
-            timestamp: time,
-            open: parseFloat(open.toFixed(2)),
-            high: parseFloat(high.toFixed(2)),
-            low: parseFloat(low.toFixed(2)),
-            close: parseFloat(close.toFixed(2)),
-            volume: Math.floor(Math.random() * 10000)
-          });
-          currentPrice = close;
-          time += 60 * 1000;
+
+        if (resolution === "D") {
+          const prevTime = time;
+          const todayTime = time + 24 * 60 * 60 * 1000;
+          if (prevClose > 0) {
+            mockCandles.push({
+              timestamp: prevTime,
+              open: prevClose,
+              high: prevClose + 10,
+              low: prevClose - 10,
+              close: prevClose,
+              volume: dbQuote?.volume || 500000
+            });
+          }
+          if (ltp > 0) {
+            mockCandles.push({
+              timestamp: todayTime,
+              open: prevClose > 0 ? prevClose : ltp,
+              high: Math.max(prevClose, ltp) + 15,
+              low: Math.min(prevClose, ltp) - 15,
+              close: ltp,
+              volume: dbQuote?.volume || 650000
+            });
+          }
+        } else {
+          if (ltp > 0) {
+            const count = 75; // 75 5-minute candles = 9:15 AM to 3:30 PM
+            let currentPrice = prevClose > 0 ? prevClose : ltp;
+            const volatility = ltp > 10000 ? 12 : (ltp < 100 ? 0.3 : 2.5);
+
+            for (let i = 0; i < count; i++) {
+              const open = currentPrice;
+              // Drift toward target ltp as time progresses
+              const progress = (i + 1) / count;
+              const targetPath = (prevClose > 0 ? prevClose : ltp) + (ltp - (prevClose > 0 ? prevClose : ltp)) * progress;
+              const noise = (Math.sin(i * 0.4) * volatility) + ((Math.random() - 0.5) * volatility * 0.8);
+              let close = i === count - 1 ? ltp : targetPath + noise;
+              const high = Math.max(open, close) + Math.random() * (volatility * 0.6);
+              const low = Math.min(open, close) - Math.random() * (volatility * 0.6);
+              const volume = Math.floor(Math.random() * 25000) + 5000;
+
+              mockCandles.push({
+                timestamp: time,
+                open: parseFloat(open.toFixed(2)),
+                high: parseFloat(high.toFixed(2)),
+                low: parseFloat(low.toFixed(2)),
+                close: parseFloat(close.toFixed(2)),
+                volume
+              });
+              currentPrice = close;
+              time += 5 * 60 * 1000;
+            }
+          }
         }
         this.historyCache[cacheKey] = { candles: mockCandles, expiry: now + ttlMs };
         return mockCandles;
@@ -403,6 +439,77 @@ export class FyersAdapter implements IBrokerAdapter {
 
     this.historyInflight.set(cacheKey, fetchPromise);
     return fetchPromise;
+  }
+
+  public async getQuotes(symbols: string[]): Promise<{ [symbol: string]: CompactTick }> {
+    const result: { [symbol: string]: CompactTick } = {};
+    const now = Date.now();
+
+    // 1. If live API is connected, query real Fyers API quotes directly
+    if (this.useLiveApi && this.fyersClient) {
+      try {
+        const response = await this.fyersClient.getQuotes(symbols);
+        if (response && response.s === "ok" && Array.isArray(response.d)) {
+          for (const item of response.d) {
+            const sym = item.n || item.symbol || item.v?.symbol;
+            if (!sym) continue;
+            const ltp = item.v?.lp ?? item.lp ?? item.ltp ?? 0;
+            const prevClose = item.v?.prev_close_price ?? item.prev_close_price ?? ltp;
+            const netChange = item.v?.ch ?? item.ch ?? (prevClose > 0 ? ltp - prevClose : 0);
+            const netChangePercent = item.v?.chp ?? item.chp ?? (prevClose > 0 ? (netChange / prevClose) * 100 : 0);
+            const volume = item.v?.volume ?? item.volume ?? 0;
+
+            const tick: CompactTick = {
+              symbol: sym,
+              ltp,
+              prevClose,
+              netChange: parseFloat(netChange.toFixed(2)),
+              netChangePercent: parseFloat(netChangePercent.toFixed(2)),
+              volume,
+              bidPrice: ltp,
+              askPrice: ltp,
+              timestamp: now
+            };
+
+            // Dynamically persist to SQLite database so restarts never lose exact prices
+            DatabaseService.upsertMarketQuote({
+              symbol: sym,
+              ltp,
+              prevClose,
+              netChange: tick.netChange || 0,
+              netChangePercent: tick.netChangePercent,
+              volume,
+              updatedAt: now
+            });
+
+            result[sym] = tick;
+          }
+          return result;
+        }
+      } catch (err: any) {
+        console.warn("[FyersAdapter] Error in live getQuotes, loading from database:", err?.message || err);
+      }
+    }
+
+    // 2. Query SQLite database for saved real market quotes
+    for (const sym of symbols) {
+      const dbQuote = DatabaseService.getMarketQuote(sym);
+      if (dbQuote) {
+        result[sym] = {
+          symbol: sym,
+          ltp: dbQuote.ltp,
+          prevClose: dbQuote.prev_close,
+          netChange: dbQuote.net_change,
+          netChangePercent: dbQuote.net_change_percent,
+          volume: dbQuote.volume || 0,
+          bidPrice: dbQuote.ltp,
+          askPrice: dbQuote.ltp,
+          timestamp: dbQuote.updated_at
+        };
+      }
+    }
+
+    return result;
   }
 
   /**

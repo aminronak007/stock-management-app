@@ -34,6 +34,16 @@ export interface PaperTradeRecord {
   entry_price?: number;
 }
 
+export interface MarketQuoteRecord {
+  symbol: string;
+  ltp: number;
+  prev_close: number;
+  net_change: number;
+  net_change_percent: number;
+  volume?: number;
+  updated_at: number;
+}
+
 export interface SessionRiskSnapshot {
   dailyTradesCount: number;
   dailyLossesCount: number;
@@ -59,6 +69,12 @@ export interface TradeAnalytics {
   largestLoss: number;
   target1HitRate: number;
   target2HitRate: number;
+  stopLossHitRate?: number;
+  trailingStopHitRate?: number;
+  avgTradeDurationMinutes?: number;
+  dailyDrawdownLimit?: number;
+  dailyLossLimitReached?: boolean;
+  consecutiveLosses?: number;
   callWinRate: number;
   putWinRate: number;
   suggestedTargetMultiplier: number;
@@ -67,20 +83,24 @@ export interface TradeAnalytics {
 
 export class DatabaseService {
   private static db: Database.Database | null = null;
+  private static dbPath: string = path.resolve(process.cwd(), "data/state.db");
 
   public static initialize(): Database.Database {
     if (this.db) return this.db;
 
-    const dbDir = path.join(__dirname, "../../data");
-    if (!fs.existsSync(dbDir)) {
-      fs.mkdirSync(dbDir, { recursive: true });
+    const dataDir = path.dirname(this.dbPath);
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
     }
 
-    const dbPath = path.join(dbDir, "state.db");
-    console.log(`[Database] Initializing SQLite database at: ${dbPath}`);
-
-    this.db = new Database(dbPath);
-    this.db.pragma("journal_mode = WAL"); // Write-Ahead Logging for high concurrency
+    console.log(`[Database] Initializing SQLite database at: ${this.dbPath}`);
+    this.db = new Database(this.dbPath);
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
+    this.db.pragma("temp_store = MEMORY");
+    this.db.pragma("busy_timeout = 10000"); // 10s wait for locks on Linux/servers to prevent SQLITE_BUSY
+    this.db.pragma("cache_size = -64000"); // 64MB fast RAM cache
+    this.db.pragma("mmap_size = 268435456"); // 256MB Memory-Mapped I/O for instant reads
 
     this.createTables();
 
@@ -94,7 +114,7 @@ export class DatabaseService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
-        value TEXT
+        value TEXT NOT NULL
       )
     `);
 
@@ -107,7 +127,20 @@ export class DatabaseService {
       )
     `);
 
-    // 3. Advisory Signals Table (log trace)
+    // 3. Dynamic Market Quotes & Prev Closes Cache (Persistent across sessions/restarts)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS market_quotes (
+        symbol TEXT PRIMARY KEY,
+        ltp REAL NOT NULL,
+        prev_close REAL NOT NULL,
+        net_change REAL NOT NULL,
+        net_change_percent REAL NOT NULL,
+        volume INTEGER DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+
+    // 4. Advisory Signals Table (log trace)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS advisory_signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -246,6 +279,54 @@ export class DatabaseService {
     db.prepare("DELETE FROM sessions WHERE provider = ?").run(provider);
   }
 
+  public static upsertMarketQuote(quote: {
+    symbol: string;
+    ltp: number;
+    prevClose: number;
+    netChange: number;
+    netChangePercent: number;
+    volume?: number;
+    updatedAt?: number;
+  }): void {
+    const db = this.initialize();
+    const stmt = db.prepare(`
+      INSERT INTO market_quotes (symbol, ltp, prev_close, net_change, net_change_percent, volume, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(symbol) DO UPDATE SET
+        ltp = excluded.ltp,
+        prev_close = excluded.prev_close,
+        net_change = excluded.net_change,
+        net_change_percent = excluded.net_change_percent,
+        volume = excluded.volume,
+        updated_at = excluded.updated_at
+    `);
+    stmt.run(
+      quote.symbol,
+      quote.ltp,
+      quote.prevClose,
+      quote.netChange,
+      quote.netChangePercent,
+      quote.volume || 0,
+      quote.updatedAt || Date.now()
+    );
+  }
+
+  public static getMarketQuote(symbol: string): MarketQuoteRecord | null {
+    const db = this.initialize();
+    const row = db.prepare("SELECT * FROM market_quotes WHERE symbol = ?").get(symbol) as MarketQuoteRecord | undefined;
+    return row || null;
+  }
+
+  public static getAllMarketQuotes(): { [symbol: string]: MarketQuoteRecord } {
+    const db = this.initialize();
+    const rows = db.prepare("SELECT * FROM market_quotes").all() as MarketQuoteRecord[];
+    const map: { [symbol: string]: MarketQuoteRecord } = {};
+    for (const r of rows) {
+      map[r.symbol] = r;
+    }
+    return map;
+  }
+
   public static logSignal(
     type: string,
     strike: number | undefined,
@@ -289,7 +370,12 @@ export class DatabaseService {
   }): number {
     const db = this.initialize();
     const timestamp = Date.now();
-    const datetime = new Date().toLocaleString("en-IN");
+    const now = new Date();
+    const day = String(now.getDate()).padStart(2, "0");
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const year = now.getFullYear();
+    const time = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+    const datetime = `${day}-${month}-${year}, ${time}`;
     const investedCapital = data.price * data.qty;
     const tier = data.tier || "SNIPER";
     
@@ -468,6 +554,74 @@ export class DatabaseService {
       }
     }
     return consecutiveLosses;
+  }
+
+  /**
+   * Returns total completed/realized distinct market setups across the session for the day
+   */
+  public static getDailyGlobalExitsCount(now: number = Date.now()): number {
+    const db = this.initialize();
+    const today = this.getIstDateKey(now);
+    // Count distinct trade setups on the primary SNIPER tier flow
+    const trades = db.prepare(
+      "SELECT type, timestamp FROM paper_trades WHERE tier = 'SNIPER' ORDER BY id ASC"
+    ).all() as PaperTradeRecord[];
+
+    let count = 0;
+    for (const t of trades) {
+      if (this.getIstDateKey(t.timestamp) === today && this.isExitType(t.type)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Returns consecutive trade setup losses across the session for the day
+   */
+  public static getDailyGlobalConsecutiveLossesCount(now: number = Date.now()): number {
+    const db = this.initialize();
+    const today = this.getIstDateKey(now);
+    const trades = db.prepare(
+      "SELECT type, pnl, net_pnl, timestamp FROM paper_trades WHERE tier = 'SNIPER' ORDER BY id DESC"
+    ).all() as PaperTradeRecord[];
+
+    let consecutiveLosses = 0;
+    for (const t of trades) {
+      if (this.getIstDateKey(t.timestamp) !== today) break;
+      if (!this.isExitType(t.type)) continue;
+
+      const pnlVal = t.net_pnl !== undefined && t.net_pnl !== null ? t.net_pnl : (t.pnl || 0);
+      if (pnlVal < 0 || t.type === "EXIT_STOP_LOSS") {
+        consecutiveLosses++;
+      } else if (pnlVal > 0) {
+        break;
+      }
+    }
+    return consecutiveLosses;
+  }
+
+  /**
+   * Evaluates if account-level daily trading limit (Max 3 trades) or 2-loss circuit breaker is engaged
+   */
+  public static isGlobalDailyTradingLocked(now: number = Date.now(), maxDailyTrades: number = 3): { locked: boolean; reason: string } {
+    const exitsCount = this.getDailyGlobalExitsCount(now);
+    if (exitsCount >= maxDailyTrades) {
+      return {
+        locked: true,
+        reason: `Global Daily Trade Cap reached (${exitsCount}/${maxDailyTrades} completed trades). Trading locked to protect capital and prevent fee bleed.`
+      };
+    }
+
+    const globalLosses = this.getDailyGlobalConsecutiveLossesCount(now);
+    if (globalLosses >= 2) {
+      return {
+        locked: true,
+        reason: "Global 2-Consecutive-Loss Circuit Breaker engaged. Trading locked for the remainder of the session."
+      };
+    }
+
+    return { locked: false, reason: "" };
   }
 
   public static markPaperTradeClosed(

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { API_BASE } from "../config/api";
 
 interface CandlestickChartProps {
   activeSymbol: string;
@@ -60,7 +61,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     let isSubscribed = true;
     const fetchHistory = async () => {
       try {
-        const res = await fetch(`http://localhost:8080/api/history?symbol=${activeSymbol}&resolution=${resolution}`);
+        const res = await fetch(`${API_BASE}/api/history?symbol=${activeSymbol}&resolution=${resolution}`);
         if (!res.ok) throw new Error("History fetch failed");
         const data = await res.json();
         
@@ -76,33 +77,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           setOffset(0); // reset offset on timeframe/symbol shift
         }
       } catch (err) {
-        console.warn("[CandlestickChart] Failed to load real history. Using local mock generator.", err);
-        if (!isSubscribed) return;
-        
-        // Mock fallback if offline or no session key
-        const mockCandles: Candle[] = [];
-        let startPrice = activeSymbol.includes("NIFTY") ? 24350 : activeSymbol.includes("SENSEX") ? 78000 : 1100;
-        let time = Date.now() - 100 * 5 * 60 * 1000;
-        for (let i = 0; i < 120; i++) {
-          const change = (Math.random() - 0.49) * (startPrice * 0.001);
-          const open = startPrice;
-          const close = startPrice + change;
-          const high = Math.max(open, close) + Math.random() * (startPrice * 0.0003);
-          const low = Math.min(open, close) - Math.random() * (startPrice * 0.0003);
-          
-          mockCandles.push({
-            timestamp: time,
-            open,
-            high,
-            low,
-            close,
-            volume: Math.floor(Math.random() * 80000) + 10000
-          });
-          startPrice = close;
-          time += 5 * 60 * 1000;
-        }
-        setCandles(mockCandles);
-        setOffset(0);
+        console.warn("[CandlestickChart] Error loading history from broker:", err);
       }
     };
     fetchHistory();

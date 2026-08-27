@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useMemo, useCallback } from "react";
+import { API_BASE } from "../config/api";
 
 interface DatabaseSignal {
   id: number;
@@ -657,7 +658,7 @@ export const DatabaseViewer: React.FC = () => {
   const fetchData = async () => {
     try {
       setIsLoading(true);
-      const res = await fetch("http://localhost:8080/api/database/overview");
+      const res = await fetch(`${API_BASE}/api/database/overview`);
       if (res.ok) {
         const data = await res.json();
         setPaperTrades(data.paperTrades || []);
@@ -969,7 +970,7 @@ export const DatabaseViewer: React.FC = () => {
         filterType: filterType,
         search: debouncedSearch
       });
-      const res = await fetch(`http://localhost:8080/api/database/trades?${params.toString()}`);
+      const res = await fetch(`${API_BASE}/api/database/trades?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setDbTrades(data.items || []);
@@ -998,7 +999,7 @@ export const DatabaseViewer: React.FC = () => {
         filterType: filterType,
         search: debouncedSearch
       });
-      const res = await fetch(`http://localhost:8080/api/database/signals?${params.toString()}`);
+      const res = await fetch(`${API_BASE}/api/database/signals?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
         setDbSignals(data.items || []);
@@ -1018,7 +1019,7 @@ export const DatabaseViewer: React.FC = () => {
   // Fetch Sessions directly from DB level
   const fetchDbSessions = useCallback(async () => {
     try {
-      const res = await fetch(`http://localhost:8080/api/database/sessions?page=${sessionsPage}&limit=${sessionsLimit}`);
+      const res = await fetch(`${API_BASE}/api/database/sessions?page=${sessionsPage}&limit=${sessionsLimit}`);
       if (res.ok) {
         const data = await res.json();
         setDbSessions(data.items || []);
@@ -1036,7 +1037,7 @@ export const DatabaseViewer: React.FC = () => {
   // Fetch Settings directly from DB level
   const fetchDbSettings = useCallback(async () => {
     try {
-      const res = await fetch(`http://localhost:8080/api/database/settings?page=${settingsPage}&limit=${settingsLimit}`);
+      const res = await fetch(`${API_BASE}/api/database/settings?page=${settingsPage}&limit=${settingsLimit}`);
       if (res.ok) {
         const data = await res.json();
         setDbSettings(data.items || []);
@@ -1112,11 +1113,27 @@ export const DatabaseViewer: React.FC = () => {
 
     if (datetimeStr && datetimeStr.includes(",")) {
       const parts = datetimeStr.split(",");
-      datePart = parts[0].trim();
+      const rawDate = parts[0].trim();
+      if (rawDate.includes("/")) {
+        const slashParts = rawDate.split("/");
+        if (slashParts.length === 3) {
+          const d = slashParts[0].padStart(2, "0");
+          const m = slashParts[1].padStart(2, "0");
+          const y = slashParts[2];
+          datePart = `${d}-${m}-${y}`;
+        } else {
+          datePart = rawDate.replace(/\//g, "-");
+        }
+      } else {
+        datePart = rawDate;
+      }
       timePart = parts.slice(1).join(",").trim();
     } else {
       const d = timestamp && !isNaN(Number(timestamp)) ? new Date(Number(timestamp)) : (datetimeStr ? new Date(datetimeStr) : new Date());
-      datePart = d.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
+      const day = String(d.getDate()).padStart(2, "0");
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      const year = d.getFullYear();
+      datePart = `${day}-${month}-${year}`;
       timePart = d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
     }
 
@@ -1292,8 +1309,8 @@ export const DatabaseViewer: React.FC = () => {
             </div>
             <div className="text-lg font-bold font-outfit text-white mt-1">
               {dynamicAnalytics.overall.winRatePercent ? `${dynamicAnalytics.overall.winRatePercent.toFixed(1)}%` : "0.0%"} WR
-              <span className={`text-xs ml-2 font-mono ${dynamicAnalytics.overall.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {dynamicAnalytics.overall.totalPnl >= 0 ? "+" : ""}₹{dynamicAnalytics.overall.totalPnl.toFixed(2)}
+              <span className={`text-xs ml-2 font-mono font-bold ${dynamicAnalytics.overall.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {dynamicAnalytics.overall.totalPnl >= 0 ? `+₹${dynamicAnalytics.overall.totalPnl.toFixed(2)}` : `-₹${Math.abs(dynamicAnalytics.overall.totalPnl).toFixed(2)}`}
               </span>
             </div>
           </button>
@@ -1309,10 +1326,10 @@ export const DatabaseViewer: React.FC = () => {
               <span className="flex items-center gap-1.5">🎯 Sniper Mode (≥75%)</span>
               <span className="text-[10px] text-emerald-400 font-mono">{dynamicAnalytics.sniper.totalTrades} Trades</span>
             </div>
-            <div className="text-lg font-bold font-outfit text-emerald-400 mt-1">
+            <div className={`text-lg font-bold font-outfit mt-1 ${selectedTier === "SNIPER" ? "text-emerald-300" : "text-white"}`}>
               {dynamicAnalytics.sniper.winRatePercent ? `${dynamicAnalytics.sniper.winRatePercent.toFixed(1)}%` : "0.0%"} WR
-              <span className="text-xs ml-2 font-mono text-emerald-400">
-                {dynamicAnalytics.sniper.totalPnl >= 0 ? "+" : ""}₹{dynamicAnalytics.sniper.totalPnl.toFixed(2)}
+              <span className={`text-xs ml-2 font-mono font-bold ${dynamicAnalytics.sniper.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {dynamicAnalytics.sniper.totalPnl >= 0 ? `+₹${dynamicAnalytics.sniper.totalPnl.toFixed(2)}` : `-₹${Math.abs(dynamicAnalytics.sniper.totalPnl).toFixed(2)}`}
               </span>
             </div>
             <div className="text-[10px] text-emerald-400/70 mt-0.5">Official UI Alert Signals</div>
@@ -1329,10 +1346,10 @@ export const DatabaseViewer: React.FC = () => {
               <span className="flex items-center gap-1.5">⚖️ Balanced (60% - 74%)</span>
               <span className="text-[10px] text-blue-400 font-mono">{dynamicAnalytics.balanced.totalTrades} Trades</span>
             </div>
-            <div className="text-lg font-bold font-outfit text-blue-400 mt-1">
+            <div className={`text-lg font-bold font-outfit mt-1 ${selectedTier === "BALANCED" ? "text-blue-300" : "text-white"}`}>
               {dynamicAnalytics.balanced.winRatePercent ? `${dynamicAnalytics.balanced.winRatePercent.toFixed(1)}%` : "0.0%"} WR
-              <span className={`text-xs ml-2 font-mono ${dynamicAnalytics.balanced.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {dynamicAnalytics.balanced.totalPnl >= 0 ? "+" : ""}₹{dynamicAnalytics.balanced.totalPnl.toFixed(2)}
+              <span className={`text-xs ml-2 font-mono font-bold ${dynamicAnalytics.balanced.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {dynamicAnalytics.balanced.totalPnl >= 0 ? `+₹${dynamicAnalytics.balanced.totalPnl.toFixed(2)}` : `-₹${Math.abs(dynamicAnalytics.balanced.totalPnl).toFixed(2)}`}
               </span>
             </div>
             <div className="text-[10px] text-blue-400/70 mt-0.5">Background Paper Trades</div>
@@ -1349,10 +1366,10 @@ export const DatabaseViewer: React.FC = () => {
               <span className="flex items-center gap-1.5">⚡ Exploratory (&lt;60%)</span>
               <span className="text-[10px] text-amber-400 font-mono">{dynamicAnalytics.exploratory.totalTrades} Trades</span>
             </div>
-            <div className="text-lg font-bold font-outfit text-amber-400 mt-1">
+            <div className={`text-lg font-bold font-outfit mt-1 ${selectedTier === "EXPLORATORY" ? "text-amber-300" : "text-white"}`}>
               {dynamicAnalytics.exploratory.winRatePercent ? `${dynamicAnalytics.exploratory.winRatePercent.toFixed(1)}%` : "0.0%"} WR
-              <span className={`text-xs ml-2 font-mono ${dynamicAnalytics.exploratory.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {dynamicAnalytics.exploratory.totalPnl >= 0 ? "+" : ""}₹{dynamicAnalytics.exploratory.totalPnl.toFixed(2)}
+              <span className={`text-xs ml-2 font-mono font-bold ${dynamicAnalytics.exploratory.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                {dynamicAnalytics.exploratory.totalPnl >= 0 ? `+₹${dynamicAnalytics.exploratory.totalPnl.toFixed(2)}` : `-₹${Math.abs(dynamicAnalytics.exploratory.totalPnl).toFixed(2)}`}
               </span>
             </div>
             <div className="text-[10px] text-amber-400/70 mt-0.5">High-Risk Paper Trades</div>
@@ -1722,9 +1739,9 @@ export const DatabaseViewer: React.FC = () => {
                     {dbTrades.length > 0 ? (
                       dbTrades.map((t) => {
                         const link = tradeLinkages.get(t.id);
-                        const hasPnl = t.pnl !== undefined && t.pnl !== null;
                         const isExit = !t.type.includes("BUY");
-                        const isOpen = t.status === "OPEN" || (!hasPnl && !isExit);
+                        const isOpen = !isExit && (t.status === "OPEN" || t.status === undefined) && !link?.pairedId && link?.status !== "CLOSED";
+                        const hasPnl = t.pnl !== undefined && t.pnl !== null;
                         const isProfit = hasPnl && t.pnl! >= 0;
 
                         return (
@@ -1737,21 +1754,9 @@ export const DatabaseViewer: React.FC = () => {
                               {getTierBadge(t.tier)}
                             </td>
                             <td className="py-3 px-4 whitespace-nowrap">
-                              <div className="flex flex-col items-start gap-1">
-                                <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(t.type)}`}>
-                                  {t.type}
-                                </span>
-                                {isExit && (link?.pairedId || t.parent_trade_id) && (
-                                  <span className="text-[9.5px] font-mono text-cyan-300 bg-cyan-500/10 border border-cyan-500/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
-                                    <span>🔗</span> Closes Buy #{link?.pairedId || t.parent_trade_id}
-                                  </span>
-                                )}
-                                {!isExit && link?.pairedId && (
-                                  <span className="text-[9.5px] font-mono text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded inline-flex items-center gap-1">
-                                    <span>➜</span> Exited by #{link.pairedId}
-                                  </span>
-                                )}
-                              </div>
+                              <span className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${getBadgeClass(t.type)}`}>
+                                {t.type}
+                              </span>
                             </td>
                             <td className="py-3 px-4 whitespace-nowrap">
                               <div className="font-bold text-white">{t.strike ? `NIFTY ${t.strike}` : t.symbol}</div>
@@ -1773,7 +1778,7 @@ export const DatabaseViewer: React.FC = () => {
                             </td>
                             <td className="py-3 px-4 text-emerald-400 whitespace-nowrap">
                               {t.target1 ? `T1: ₹${t.target1.toFixed(2)}` : "--"}
-                              {t.target2 && <span className="block text-[10px] text-emerald-400/80">T2: ₹${t.target2.toFixed(2)}</span>}
+                              {t.target2 && <span className="block text-[10px] text-emerald-400/80">T2: ₹{t.target2.toFixed(2)}</span>}
                             </td>
                             <td className="py-3 px-4 text-gray-300 whitespace-nowrap font-mono">
                               ₹{t.invested_capital.toFixed(2)}
@@ -1793,6 +1798,11 @@ export const DatabaseViewer: React.FC = () => {
                                       Round-Trip #{link?.pairedId || t.parent_trade_id}➜#{t.id}
                                     </span>
                                   )}
+                                  {!isExit && link?.pairedId && (
+                                    <span className="text-[9.5px] text-gray-500 font-mono mt-0.5">
+                                      Exited by #{link.pairedId}
+                                    </span>
+                                  )}
                                 </div>
                               )}
                             </td>
@@ -1805,6 +1815,15 @@ export const DatabaseViewer: React.FC = () => {
                                   {t.pnl_percent !== undefined && t.pnl_percent !== null && (
                                     <span className="block text-[10px] font-normal">
                                       ({t.pnl_percent >= 0 ? "+" : ""}{t.pnl_percent.toFixed(1)}%)
+                                    </span>
+                                  )}
+                                </div>
+                              ) : link?.pnl !== undefined && link.pnl !== null ? (
+                                <div className={`font-bold ${link.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                                  {link.pnl >= 0 ? `+₹${link.pnl.toFixed(2)}` : `-₹${Math.abs(link.pnl).toFixed(2)}`}
+                                  {link.pnlPercent !== undefined && link.pnlPercent !== null && (
+                                    <span className="block text-[10px] font-normal">
+                                      ({link.pnlPercent >= 0 ? "+" : ""}{link.pnlPercent.toFixed(1)}%)
                                     </span>
                                   )}
                                 </div>
