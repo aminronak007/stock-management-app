@@ -1,5 +1,6 @@
 import { QuantitativeEngine } from "../utils/quantitativeEngine";
 import { DatabaseService } from "../utils/database";
+import { CPR } from "../utils/cpr";
 
 console.log("================== VERIFYING CHOP & MEAN REVERSION UPGRADES ==================\n");
 
@@ -11,6 +12,8 @@ const dummyCandles = Array.from({ length: 30 }, (_, i) => ({
   volume: 50000
 }));
 
+const mockCpr = CPR.calculateCPR(24320, 24280, 24300);
+
 // Test 1: ORB Breakout in RANGE regime (Should be blocked, score = 0)
 console.log("Test 1: ORB Breakout in RANGE regime");
 const rangeScoreCard = QuantitativeEngine.calculateConfluence({
@@ -20,7 +23,7 @@ const rangeScoreCard = QuantitativeEngine.calculateConfluence({
   orbLow: 24250,
   triggerType: "CALL_BUY",
   setupType: "ORB_BREAKOUT",
-  cpr: { pivot: 24300, topRange: 24320, bottomRange: 24280 }, // wide CPR -> RANGE
+  cpr: mockCpr, // wide CPR -> RANGE
   pcr: 1.0,
   vix: 14,
   atr: 10,
@@ -41,7 +44,7 @@ const trapReversalScoreCard = QuantitativeEngine.calculateConfluence({
   orbLow: 24250,
   triggerType: "PUT_BUY",
   setupType: "TRAP_REVERSAL",
-  cpr: { pivot: 24300, topRange: 24320, bottomRange: 24280 },
+  cpr: mockCpr,
   pcr: 1.0,
   vix: 11,
   atr: 12,
