@@ -180,7 +180,7 @@ export class AdvisoryManager {
 
   // Risk parameters
   private dailyLossLimit: number = -2.0; // max -2R daily drawdown
-  private dailyMaxTrades: number = 3; // max 3 trades per tier per day to prevent fee accumulation
+  private dailyMaxTrades: number = 2; // max 2 trades per tier per day to prevent fee accumulation and churn
 
   // Delta OI and Delta VIX tracking for Institutional Acceleration Guard
   private prevTotalCallOi: number = 0;
@@ -713,8 +713,8 @@ export class AdvisoryManager {
    * Evaluates if a high-probability breakout direction occurred and routes to appropriate tier
    */
   private async evaluateBreakoutSignals(spot: number, timestamp: number): Promise<void> {
-    // Account-Level Anti-Overtrading Guard: Global Daily Trade Cap (3 trades) & 2-Loss Circuit Breaker
-    const globalLock = DatabaseService.isGlobalDailyTradingLocked(timestamp, 3);
+    // Account-Level Anti-Overtrading Guard: Global Daily Trade Cap (2 trades) & 2-Loss Circuit Breaker
+    const globalLock = DatabaseService.isGlobalDailyTradingLocked(timestamp, this.dailyMaxTrades);
     if (globalLock.locked) {
       this.lastSignalBlockReason = globalLock.reason;
       return;
@@ -759,17 +759,32 @@ export class AdvisoryManager {
     let setupType: StrategySetup = "ORB_BREAKOUT";
     let reasoning = "";
 
+    const closedCandles = this.indexCandles.length > 1 ? this.indexCandles.slice(0, -1) : [];
+    const lastClosedCandle = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1] : undefined;
+
     // -------------------------------------------------------------
-    // STRATEGY 1: TRAP REVERSAL (Priority 1: Fading Failed Breakouts)
+    // STRATEGY 1: TRAP REVERSAL / MEAN REVERSION (Priority 1: Fading Range Boundaries)
     // -------------------------------------------------------------
-    if (this.dayHigh > this.orbHigh + 2 && spot <= this.orbHigh && !isAboveVwap) {
+    const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
+    const isTestingDayLow = this.dayLow <= this.orbLow + 2;
+
+    const hasUpperWickRejection = lastClosedCandle && (
+      (lastClosedCandle.high - Math.max(lastClosedCandle.open, lastClosedCandle.close)) >= 0.25 * Math.max(3, lastClosedCandle.high - lastClosedCandle.low) ||
+      lastClosedCandle.close < lastClosedCandle.open
+    );
+    const hasLowerWickRejection = lastClosedCandle && (
+      (Math.min(lastClosedCandle.open, lastClosedCandle.close) - lastClosedCandle.low) >= 0.25 * Math.max(3, lastClosedCandle.high - lastClosedCandle.low) ||
+      lastClosedCandle.close > lastClosedCandle.open
+    );
+
+    if (isTestingDayHigh && (lastClosedCandle?.high || spot) >= this.orbHigh - 3 && hasUpperWickRejection && spot > this.currentVwap + 6) {
       candidate = "PUT_BUY";
       setupType = "TRAP_REVERSAL";
-      reasoning = `[TRAP REVERSAL] Bull Trap: Failed breakout above Day High (${this.dayHigh.toFixed(2)}) with sharp rejection below ORB High and VWAP (${this.currentVwap.toFixed(1)}).`;
-    } else if (this.dayLow < this.orbLow - 2 && spot >= this.orbLow && isAboveVwap) {
+      reasoning = `[MEAN REVERSION] Bull Trap at Day High (${this.dayHigh.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
+    } else if (isTestingDayLow && (lastClosedCandle?.low || spot) <= this.orbLow + 3 && hasLowerWickRejection && spot < this.currentVwap - 6) {
       candidate = "CALL_BUY";
       setupType = "TRAP_REVERSAL";
-      reasoning = `[TRAP REVERSAL] Bear Trap: Failed breakdown below Day Low (${this.dayLow.toFixed(2)}) with aggressive recovery above ORB Low and VWAP (${this.currentVwap.toFixed(1)}).`;
+      reasoning = `[MEAN REVERSION] Bear Trap at Day Low (${this.dayLow.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
     }
 
     // -------------------------------------------------------------
@@ -805,14 +820,18 @@ export class AdvisoryManager {
 
     // Breakout Candle Confirmation / Anti-Trap Filter (for ORB_BREAKOUT only)
     if (setupType === "ORB_BREAKOUT") {
-      const hasClosedBreakoutCandle = this.indexCandles.slice(-3).some(c => 
+      // Completed candles exclude the active forming bar at index -1
+      const closedCandles = this.indexCandles.length > 1 ? this.indexCandles.slice(0, -1) : [];
+      if (closedCandles.length < 3) {
+        this.lastSignalBlockReason = "Waiting for initial post-9:30 AM 5-minute candle to close before confirming breakout.";
+        return;
+      }
+      const recentClosed = closedCandles.slice(-2);
+      const hasClosedBreakoutCandle = recentClosed.some(c => 
         candidate === "CALL_BUY" ? c.close > this.orbHigh : c.close < this.orbLow
       );
-      const hasStrongBuffer = candidate === "CALL_BUY" 
-        ? spot > this.orbHigh + (buffer * 1.3)
-        : spot < this.orbLow - (buffer * 1.3);
 
-      if (!hasClosedBreakoutCandle && !hasStrongBuffer) {
+      if (!hasClosedBreakoutCandle) {
         this.lastSignalBlockReason = `Waiting for 5m candle close confirmation beyond ${candidate === "CALL_BUY" ? this.orbHigh.toFixed(2) : this.orbLow.toFixed(2)} to filter out wick traps.`;
         return;
       }
@@ -997,15 +1016,18 @@ export class AdvisoryManager {
       const marketRsi = rsiList.length > 0 ? rsiList[rsiList.length - 1] : 50;
 
       // Realistic Risk & Scalp Geometry:
-      // Initial stop-loss: 1.2 * ATR * delta (bounded to 6 to 14 option points)
-      const scaledStopLoss = Math.max(6.0, Math.min(14.0, 1.2 * atrValue * delta));
-      const initialRisk = scaledStopLoss;
+      let scaledStopLoss = Math.max(6.0, Math.min(14.0, 1.2 * atrValue * delta));
+      let scaledTarget1 = parseFloat((scaledStopLoss * 1.25 * targetMultiplier).toFixed(2));
+      let scaledTarget2 = parseFloat((scaledStopLoss * 2.50 * targetMultiplier).toFixed(2));
 
-      // Realistic Targets based on Intraday Option Mechanics:
-      // Target 1 = +1.25R (+15% to +25% option scalp, ~8 to 12 points)
-      // Target 2 = +2.50R (+35% to +50% option runner, ~18 to 25 points)
-      const scaledTarget1 = parseFloat((initialRisk * 1.25 * targetMultiplier).toFixed(2));
-      const scaledTarget2 = parseFloat((initialRisk * 2.50 * targetMultiplier).toFixed(2));
+      // Mean Reversion Scalps target Session VWAP with tighter risk geometry
+      if (setupType === "TRAP_REVERSAL") {
+        const vwapDist = Math.abs(spot - this.currentVwap);
+        const vwapTargetPts = Math.max(6.0, Math.min(15.0, vwapDist * delta));
+        scaledStopLoss = Math.max(5.0, Math.min(10.0, 0.9 * atrValue * delta));
+        scaledTarget1 = parseFloat((vwapTargetPts * targetMultiplier).toFixed(2));
+        scaledTarget2 = parseFloat((vwapTargetPts * 1.6 * targetMultiplier).toFixed(2));
+      }
 
       const stopLossPrice = parseFloat(Math.max(0.50, entryPrice - scaledStopLoss).toFixed(2));
       const targetPrice1 = parseFloat((entryPrice + scaledTarget1).toFixed(2));
@@ -1038,9 +1060,9 @@ export class AdvisoryManager {
 
       // Strict rejection: zero trade on detected false breakout or score < 45
       if (scoreCard.isFalseBreakout || scoreCard.totalScore < 45) {
-        this.lastSignalBlockReason = scoreCard.isFalseBreakout
-          ? "Breakdown printed, then price returned inside the opening range (false breakout)."
-          : `Breakdown is valid, but confluence is ${scoreCard.totalScore}/100 (need at least 45).`;
+        const moveName = triggerType === "CALL_BUY" ? "Breakout" : "Breakdown";
+        const primaryReason = scoreCard.explanation.find(e => e.includes("✕") || e.includes("⚠")) || `${moveName} is valid, but confluence is ${scoreCard.totalScore}/100 (need at least 45)`;
+        this.lastSignalBlockReason = `${moveName} printed, but blocked: ${primaryReason.replace(/^[✕⚠]\s*/, "")}`;
         console.warn(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
         return;
       }
@@ -1080,6 +1102,15 @@ export class AdvisoryManager {
       }
 
       const targetPos = this.tierPositions[tier];
+
+      // Cross-Tier Single-Position & Correlation Lock:
+      // Ensure only 1 active position exists across the entire engine globally (prevent duplicate multi-tier drawdowns)
+      const allTiersList: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
+      const hasAnyActiveTier = allTiersList.some(t => this.tierPositions[t].activeSignal !== null);
+      if (hasAnyActiveTier || DatabaseService.hasAnyOpenBuyTrade()) {
+        this.lastSignalBlockReason = "An active position is already open. Cross-tier duplicate entries are locked to protect capital.";
+        return;
+      }
 
       // Check if this specific tier already has an active position or reached daily limits
       if (targetPos.activeSignal || DatabaseService.tierHasOpenBuy(tier)) {
@@ -1140,11 +1171,14 @@ export class AdvisoryManager {
       let logQty = baseQty;
 
       // Upgrade 2: Dynamic High-Conviction Sizing (Money Multiplier)
-      // Standard setup (Score 75-84): 1 Lot (25 Qty)
-      // SUPER-SNIPER setup (Score >= 85): Double Lot Size (2 Lots = 50 Qty)
-      if (scoreCard.totalScore >= 85) {
+      // Standard setup: 1 Lot (25 Qty)
+      // SUPER-SNIPER setup: Double Lot Size (2 Lots = 50 Qty)
+      // ONLY permitted post-10:15 AM IST (after morning noise settles) with score >= 88 and volume expansion
+      const isPostMorningWindow = istTotalMinutes >= 615; // >= 10:15 AM IST
+      const volumeExpanded = isClosedBarVolumeExpanded(this.indexCandles.map(c => c.volume));
+      if (isPostMorningWindow && scoreCard.totalScore >= 88 && volumeExpanded) {
         logQty = baseQty * 2;
-        console.log(`[AdvisoryManager] 🚀 [SUPER-SNIPER] High Confluence Score (${scoreCard.totalScore}/100) detected! Dynamic Lot Scaling ACTIVE: Executing 2 Lots (${logQty} Qty).`);
+        console.log(`[AdvisoryManager] 🚀 [SUPER-SNIPER] High Confluence Score (${scoreCard.totalScore}/100) + Volume Expansion after 10:15 AM! Dynamic Lot Scaling ACTIVE: Executing 2 Lots (${logQty} Qty).`);
       }
 
       const openTradeId = await ExcelLogger.logTransaction(
@@ -1282,6 +1316,36 @@ export class AdvisoryManager {
       }
     }
 
+    // 1. Halfway Micro-Trail (+0.5R Risk Cut): Cut downside risk by 75% once 50% of T1 is achieved
+    const target1Distance = (pos.activeSignal.targetPrice1 || (pos.activeSignal.entryPrice + initialRisk * 1.25)) - pos.activeSignal.entryPrice;
+    if (target1Distance > 0 && currentPremiumLtp >= pos.activeSignal.entryPrice + target1Distance * 0.50) {
+      const riskCutSl = pos.activeSignal.entryPrice - 2.50;
+      if (riskCutSl > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = parseFloat(riskCutSl.toFixed(2));
+        this.persistOpenPositionState(pos);
+        console.log(`[AdvisoryManager] [${tier}] Halfway Micro-Trail active: SL raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (75% risk reduction)`);
+      }
+    }
+
+    // 2. High-Watermark Peak Profit Guard: Protect accumulated gains when trade reaches >= 70% of T1
+    if (target1Distance > 0 && (pos.peakPremium || currentPremiumLtp) >= pos.activeSignal.entryPrice + target1Distance * 0.70) {
+      const minProfitSl = pos.activeSignal.entryPrice + 1.00;
+      if (minProfitSl > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = parseFloat(minProfitSl.toFixed(2));
+        this.persistOpenPositionState(pos);
+        console.log(`[AdvisoryManager] [${tier}] Peak Profit Guard: Minimum profit locked at ₹${pos.activeSignal.stopLossPrice.toFixed(2)}`);
+      }
+    }
+
+    // 3. Underlying Structural Invalidation Exit: Exit if Spot breaks Session VWAP support/resistance
+    if (pos.activeSignal.type === "CALL_BUY" && spot < this.currentVwap - 6 && this.currentVwap > 0) {
+      this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Session VWAP support (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
+      return;
+    } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.currentVwap + 6 && this.currentVwap > 0) {
+      this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Session VWAP resistance (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
+      return;
+    }
+
     // Dynamic Trailing Stop Loss: Once premium reaches Target 1 (+1.2R equivalent), trail SL to +0.6R
     if (pos.isBreakevenLocked && currentPremiumLtp >= pos.activeSignal.entryPrice + initialRisk * 1.5) {
       const trailedSl = pos.activeSignal.entryPrice + initialRisk * 0.6;
@@ -1349,7 +1413,7 @@ export class AdvisoryManager {
               `[${tier} TIER] Target 1 (+1.25R) Hit! Partial profit booked on 50% lot (${partialQty} qty). Remaining ${remainingQty} qty runner active with SL locked at breakeven.`,
               {
                 tier,
-                pnl: grossPnl,
+                pnl: currentPremiumLtp - entryPx,
                 parentTradeId: pos.openTradeId,
                 entryPrice: entryPx,
                 marketRegime: pos.activeSignal?.regime,

@@ -662,6 +662,14 @@ export class DatabaseService {
     return !!row;
   }
 
+  public static hasAnyOpenBuyTrade(): boolean {
+    const db = this.initialize();
+    const row = db.prepare(
+      "SELECT id FROM paper_trades WHERE status = 'OPEN' AND type LIKE '%BUY%' LIMIT 1"
+    ).get() as { id: number } | undefined;
+    return !!row;
+  }
+
   /**
    * BUY rows that never received a matching exit. Uses LIFO per tier so an exit
    * closes the current in-memory position (the latest buy), which is how the

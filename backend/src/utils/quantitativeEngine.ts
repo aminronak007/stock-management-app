@@ -97,7 +97,19 @@ export class QuantitativeEngine {
     if (triggerType === "CALL_BUY" && spot <= orbHigh) return true;
     if (triggerType === "PUT_BUY" && spot >= orbLow) return true;
     
-    // 2. Heavyweight Divergence Trap - If heavyweights actively oppose breakout, flag false breakout
+    // 2. Bank Nifty Index Synchronicity Check: If Bank Nifty strongly diverges from Nifty 50, flag false breakout
+    const bankNiftyLtp = heavyweightsLtp["NSE:NIFTYBANK-INDEX"] || 0;
+    const bankNiftyVwap = heavyweightsVwap["NSE:NIFTYBANK-INDEX"] || 0;
+    if (bankNiftyLtp > 0 && bankNiftyVwap > 0) {
+      if (triggerType === "CALL_BUY" && bankNiftyLtp < bankNiftyVwap * 0.999) {
+        return true; // Bank Nifty is below VWAP while Nifty attempts Call Breakout -> Divergence Trap!
+      }
+      if (triggerType === "PUT_BUY" && bankNiftyLtp > bankNiftyVwap * 1.001) {
+        return true; // Bank Nifty is above VWAP while Nifty attempts Put Breakdown -> Divergence Trap!
+      }
+    }
+
+    // 2b. Heavyweight Divergence Trap - If heavyweights actively oppose breakout, flag false breakout
     let heavyweightAlignsCount = 0;
     let validActiveCount = 0;
     const trackedKeys = Object.keys(heavyweightsLtp);
@@ -111,7 +123,7 @@ export class QuantitativeEngine {
       }
     });
 
-    if (validActiveCount >= 2 && heavyweightAlignsCount / validActiveCount < 0.35) {
+    if (validActiveCount >= 2 && heavyweightAlignsCount / validActiveCount < 0.45) {
       return true; // Heavyweights strongly opposing spot move -> False Breakout Trap!
     }
 
@@ -266,10 +278,10 @@ export class QuantitativeEngine {
 
     // 1. Market Structure (20 Points)
     if (setupType === "TRAP_REVERSAL") {
-      factors.marketStructure.score += 10;
+      factors.marketStructure.score += 15;
       factors.marketStructure.factors.push(triggerType === "PUT_BUY" 
-        ? "Bull Trap confirmed: Spot failed above ORB High and rejected downwards"
-        : "Bear Trap confirmed: Spot failed below ORB Low and rejected upwards");
+        ? "Bull Trap confirmed: Spot rejected from Day High / ORB High towards VWAP"
+        : "Bear Trap confirmed: Spot rejected from Day Low / ORB Low towards VWAP");
     } else if (setupType === "VWAP_PULLBACK") {
       factors.marketStructure.score += 10;
       factors.marketStructure.factors.push("Pullback to dynamic VWAP / 21 EMA support/resistance verified");
@@ -298,18 +310,23 @@ export class QuantitativeEngine {
     }
 
     // 2. VWAP & Momentum (15 Points)
-    const isAboveVwap = spot > currentVwap;
-    if ((triggerType === "CALL_BUY" && isAboveVwap) || (triggerType === "PUT_BUY" && !isAboveVwap)) {
-      factors.vwapMomentum.score += 8;
-      factors.vwapMomentum.factors.push("Spot aligned with session VWAP direction");
-    }
-    const volumeExpanded = isClosedBarVolumeExpanded(candles5m.map(c => c.volume));
-    if (volumeExpanded) {
-      factors.vwapMomentum.score += 7;
-      factors.vwapMomentum.factors.push("Closed-bar volume expanded vs recent 5m average (1.2×)");
-    } else if (currentVolume >= 1.0 * avgVolume5 && avgVolume5 > 0) {
-      factors.vwapMomentum.score += 4;
-      factors.vwapMomentum.factors.push("Volume above baseline threshold");
+    if (setupType === "TRAP_REVERSAL") {
+      factors.vwapMomentum.score += 12;
+      factors.vwapMomentum.factors.push("Mean Reversion target: Session VWAP reversion path clear");
+    } else {
+      const isAboveVwap = spot > currentVwap;
+      if ((triggerType === "CALL_BUY" && isAboveVwap) || (triggerType === "PUT_BUY" && !isAboveVwap)) {
+        factors.vwapMomentum.score += 8;
+        factors.vwapMomentum.factors.push("Spot aligned with session VWAP direction");
+      }
+      const volumeExpanded = isClosedBarVolumeExpanded(candles5m.map(c => c.volume));
+      if (volumeExpanded) {
+        factors.vwapMomentum.score += 7;
+        factors.vwapMomentum.factors.push("Closed-bar volume expanded vs recent 5m average (1.2×)");
+      } else if (currentVolume >= 1.0 * avgVolume5 && avgVolume5 > 0) {
+        factors.vwapMomentum.score += 4;
+        factors.vwapMomentum.factors.push("Volume above baseline threshold");
+      }
     }
 
     // 3. Heavyweights Confirmation (15 Points)
@@ -385,7 +402,10 @@ export class QuantitativeEngine {
     }
 
     // 6. Regime Alignment & Multi-Timeframe (15m) Trend Confirmation (10 Points)
-    if (triggerType === "CALL_BUY" && regime === "TREND_UP") {
+    if (setupType === "TRAP_REVERSAL") {
+      factors.regimeAlignment.score += 10;
+      factors.regimeAlignment.factors.push("Mean Reversion strategy matches RANGE / Consolidation market regime");
+    } else if (triggerType === "CALL_BUY" && regime === "TREND_UP") {
       factors.regimeAlignment.score += 10;
       factors.regimeAlignment.factors.push("CALL option aligned with 5m & 15m TREND_UP regime");
     } else if (triggerType === "PUT_BUY" && regime === "TREND_DOWN") {
@@ -399,7 +419,10 @@ export class QuantitativeEngine {
     }
 
     // 7. Option Momentum (10 Points)
-    if (optionPremiumRsi > 52 && optionPremiumRsi < 78) {
+    if (setupType === "TRAP_REVERSAL") {
+      factors.optionMomentum.score += 8;
+      factors.optionMomentum.factors.push("Exhaustion momentum confirmed for mean reversion scalp");
+    } else if (optionPremiumRsi > 52 && optionPremiumRsi < 78) {
       factors.optionMomentum.score += 6;
       factors.optionMomentum.factors.push(`Option premium RSI indicates breakout acceleration (${optionPremiumRsi.toFixed(1)})`);
     } else {
@@ -434,13 +457,13 @@ export class QuantitativeEngine {
 
     const isChoppyAdx = currentAdx < 18;
 
-    // Apply strict institutional penalties
-    if (isCounterTrend) {
+    // Apply strict institutional penalties (Exempt TRAP_REVERSAL from counter-trend penalty)
+    if (isCounterTrend && setupType !== "TRAP_REVERSAL") {
       totalScore = Math.max(0, totalScore - 15);
       explanation.push("⚠ 5M COUNTER TREND TRADE PENALTY (-15 points applied)");
     }
 
-    if (is15mCounterTrend) {
+    if (is15mCounterTrend && setupType !== "TRAP_REVERSAL") {
       totalScore = Math.max(0, totalScore - 15);
       explanation.push("⚠ 15M HIGHER TIMEFRAME TREND PENALTY (-15 points): 15m trend opposes breakout direction");
     }
@@ -470,22 +493,38 @@ export class QuantitativeEngine {
       explanation.push(`⚠ VEGA COLLAPSE WARNING (-10 points): India VIX dropped rapidly (${deltaVixPercent.toFixed(1)}%). Premium decay risk.`);
     }
 
-    if (isChoppyAdx) {
+    if (isChoppyAdx && setupType === "ORB_BREAKOUT") {
       totalScore = Math.max(0, totalScore - 15);
       explanation.push(`⚠ CHOPPY MARKET PENALTY (ADX=${currentAdx.toFixed(1)} < 18: -15 points applied)`);
     }
 
-    // RANGE Regime Penalty: Sideways markets kill option premiums via Theta decay
-    if (regime === "RANGE") {
+    // STRICT STRATEGY-REGIME GATE:
+    // Option Buying Breakouts in a RANGE regime or severe chop (ADX < 18) bleed heavily to Theta decay.
+    // In RANGE regimes, ONLY Mean-Reversion / Trap Reversal setups are allowed.
+    if (regime === "RANGE" && setupType === "ORB_BREAKOUT") {
+      totalScore = 0;
+      explanation.push("✕ RANGE REGIME GATE: ORB Breakouts are strictly blocked in consolidation (RANGE) to prevent Theta decay. Only Reversals permitted.");
+    }
+
+    if (currentAdx < 18 && setupType === "ORB_BREAKOUT") {
+      totalScore = 0;
+      explanation.push(`✕ CHOPPY ADX GATE (ADX=${currentAdx.toFixed(1)} < 18): Breakout option buying strictly prohibited in sideways chop.`);
+    }
+
+    // RANGE Regime Penalty: Only applies to trend breakouts, not to Mean Reversion scalps
+    if (regime === "RANGE" && setupType !== "TRAP_REVERSAL") {
       totalScore = Math.max(0, totalScore - 12);
       explanation.push("⚠ RANGE REGIME PENALTY (-12 points): Sideways consolidation detected. Theta decay risk high.");
     }
 
-    if (isFalseBreakout || currentAdx < 14) {
+    if (isFalseBreakout && setupType === "ORB_BREAKOUT") {
       totalScore = 0;
-      explanation.push(isFalseBreakout
-        ? "✕ FALSE BREAKOUT DETECTED: Signal score reset to zero."
-        : `✕ SEVERE CHOP DETECTED (ADX=${currentAdx.toFixed(1)} < 14): Signal score reset to zero.`);
+      explanation.push("✕ FALSE BREAKOUT DETECTED: Breakout signal score reset to zero.");
+    }
+
+    if (currentAdx < 14 && setupType === "ORB_BREAKOUT") {
+      totalScore = 0;
+      explanation.push(`✕ SEVERE CHOP DETECTED (ADX=${currentAdx.toFixed(1)} < 14): Breakout signal score reset to zero.`);
     }
 
     // Quality labeling
