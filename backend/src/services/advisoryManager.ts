@@ -11,6 +11,7 @@ import {
   isClosedBarVolumeExpanded,
   orbConfirmationBuffer
 } from "../utils/niftyOptionsSetup";
+import { GeminiRiskOfficer } from "./geminiRiskOfficer";
 
 export interface AdvisorySignal {
   type: "CALL_BUY" | "PUT_BUY" | "HOLD" | "EXIT_PROFIT" | "EXIT_STOP_LOSS" | "THETA_EXIT" | "SQUARE_OFF";
@@ -76,15 +77,26 @@ export class AdvisoryManager {
     "NSE:FINNIFTY-INDEX": 0,
     "NSE:RELIANCE-EQ": 0,
     "NSE:HDFCBANK-EQ": 0,
-    "NSE:ICICIBANK-EQ": 0
+    "NSE:ICICIBANK-EQ": 0,
+    "NSE:INFY-EQ": 0,
+    "NSE:TCS-EQ": 0,
+    "NSE:LT-EQ": 0,
+    "NSE:AXISBANK-EQ": 0,
+    "NSE:KOTAKBANK-EQ": 0
   };
   private heavyweightVwap: { [symbol: string]: number } = {
     "NSE:NIFTYBANK-INDEX": 0,
     "NSE:FINNIFTY-INDEX": 0,
     "NSE:RELIANCE-EQ": 0,
     "NSE:HDFCBANK-EQ": 0,
-    "NSE:ICICIBANK-EQ": 0
+    "NSE:ICICIBANK-EQ": 0,
+    "NSE:INFY-EQ": 0,
+    "NSE:TCS-EQ": 0,
+    "NSE:LT-EQ": 0,
+    "NSE:AXISBANK-EQ": 0,
+    "NSE:KOTAKBANK-EQ": 0
   };
+  private heavyweightVolumes: { [symbol: string]: { cumVol: number; cumPv: number } } = {};
 
   // Nifty price candles for calculations
   private indexCandles: Candle[] = [];
@@ -673,13 +685,18 @@ export class AdvisoryManager {
       }
     }
 
-    // 3. Track Heavyweights & calculate continuous intraday VWAP baseline
+    // 3. Track Heavyweights & calculate continuous intraday cumulative VWAP
     if (tick.symbol in this.heavyweightLtp && tick.ltp > 0) {
       this.heavyweightLtp[tick.symbol] = tick.ltp;
-      if (!this.heavyweightVwap[tick.symbol] || this.heavyweightVwap[tick.symbol] === 0) {
-        this.heavyweightVwap[tick.symbol] = tick.ltp;
+      const vol = tick.volume || 100;
+      const prev = this.heavyweightVolumes[tick.symbol] || { cumVol: 0, cumPv: 0 };
+      const newVol = prev.cumVol + vol;
+      const newPv = prev.cumPv + tick.ltp * vol;
+      this.heavyweightVolumes[tick.symbol] = { cumVol: newVol, cumPv: newPv };
+      if (newVol > 0) {
+        this.heavyweightVwap[tick.symbol] = parseFloat((newPv / newVol).toFixed(2));
       } else {
-        this.heavyweightVwap[tick.symbol] = this.heavyweightVwap[tick.symbol] * 0.98 + tick.ltp * 0.02;
+        this.heavyweightVwap[tick.symbol] = tick.ltp;
       }
     }
 
@@ -720,7 +737,7 @@ export class AdvisoryManager {
       return;
     }
 
-    // Track whether current bar is inside midday lunch hour (11:30 AM to 1:30 PM IST)
+    // Track whether current bar is inside midday lunch hour (11:00 AM to 1:30 PM IST)
     const istStr = new Intl.DateTimeFormat("en-GB", {
       timeZone: "Asia/Kolkata",
       hour: "2-digit",
@@ -731,7 +748,7 @@ export class AdvisoryManager {
     const istH = parseInt(hStr, 10);
     const istM = parseInt(mStr, 10);
     const istTotalMinutes = istH * 60 + istM;
-    const isLunchHour = istTotalMinutes >= 690 && istTotalMinutes <= 810;
+    const isLunchHour = istTotalMinutes >= 660 && istTotalMinutes < 810;
 
     // CPR Filter Check: If price opened or is sitting inside CPR, trade with caution
     if (this.cpr && CPR.isPriceInsideCPR(spot, this.cpr)) {
@@ -899,18 +916,14 @@ export class AdvisoryManager {
     const atmStrike = Math.round(spot / strikeInterval) * strikeInterval;
     let selectedStrike = atmStrike;
 
-    // Enhancement 2: Dynamic Strike Selection (Delta-Calibrated based on VIX)
-    // Low VIX (<12): Option premiums move slowly due to low IV. We pick slightly In-The-Money (ITM) strike
-    // (-50 pts for CALL_BUY, +50 pts for PUT_BUY) with Delta ~0.62 to ensure faster premium acceleration.
-    // Normal/High VIX (>=12): We stick to At-The-Money (ATM) strike (Delta ~0.50).
-    if (this.indiaVixValue > 0 && this.indiaVixValue < 12) {
-      if (candidate === "CALL_BUY") {
-        selectedStrike = atmStrike - 50;
-      } else if (candidate === "PUT_BUY") {
-        selectedStrike = atmStrike + 50;
-      }
-      console.log(`[AdvisoryManager] Low VIX (${this.indiaVixValue.toFixed(2)}) detected. Selected ITM Strike ${selectedStrike} (ATM: ${atmStrike}) for higher Delta (~0.62).`);
+    // Institutional Strike Selection: Default to High-Delta In-The-Money (ITM) Strike (~0.62–0.68 Delta)
+    // ITM strikes offer intrinsic value protection, minimal percentage Theta decay, and explosive momentum acceleration.
+    if (candidate === "CALL_BUY") {
+      selectedStrike = atmStrike - 50; // 1-Strike In-The-Money Call (Delta ~0.65)
+    } else if (candidate === "PUT_BUY") {
+      selectedStrike = atmStrike + 50; // 1-Strike In-The-Money Put (Delta ~0.65)
     }
+    console.log(`[AdvisoryManager] Selected High-Delta ITM Strike ${selectedStrike} (ATM: ${atmStrike}) for maximum momentum capture.`);
 
     const legFor = (strike: number) => {
       const row = chain.find(item => item.strikePrice === strike);
@@ -1058,22 +1071,46 @@ export class AdvisoryManager {
         deltaVixPercent
       });
 
-      // Strict rejection: zero trade on detected false breakout or score < 45
-      if (scoreCard.isFalseBreakout || scoreCard.totalScore < 45) {
+      // Strict Institutional Gate: Require score >= 75 (High Conviction Only). Block weak chop entries (< 75).
+      const minScoreThreshold = 75;
+      if (scoreCard.isFalseBreakout || scoreCard.totalScore < minScoreThreshold) {
         const moveName = triggerType === "CALL_BUY" ? "Breakout" : "Breakdown";
-        const primaryReason = scoreCard.explanation.find(e => e.includes("✕") || e.includes("⚠")) || `${moveName} is valid, but confluence is ${scoreCard.totalScore}/100 (need at least 45)`;
+        const primaryReason = scoreCard.explanation.find(e => e.includes("✕") || e.includes("⚠")) || `${moveName} is valid, but confluence is ${scoreCard.totalScore}/100 (need at least ${minScoreThreshold} for High Conviction)`;
         this.lastSignalBlockReason = `${moveName} printed, but blocked: ${primaryReason.replace(/^[✕⚠]\s*/, "")}`;
         console.warn(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
         return;
       }
 
-      // Lunch Hour Trend Quality Check:
-      // Block signals during 11:30 AM - 1:30 PM unless scoreCard indicates a high-conviction trend setup (score >= 70)
-      if (isLunchHour && scoreCard.totalScore < 70) {
-        this.lastSignalBlockReason = `Lunch hour consolidation (11:30 AM - 1:30 PM): score ${scoreCard.totalScore}/100 is below high-conviction threshold (70) to prevent midday theta decay.`;
+      // Midday Lunch Blackout (11:00 AM - 1:30 PM IST): Total pause to prevent midday theta melt
+      if (isLunchHour) {
+        this.lastSignalBlockReason = "Midday lunch consolidation (11:00 AM - 1:30 PM): Option trading strictly paused to prevent Theta decay. Afternoon window opens at 1:30 PM IST.";
         console.log(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
         return;
       }
+
+      // 🤖 Autonomous Institutional AI Pre-Trade Audit (Gemini 3.6 Flash - 100% Free AI Gatekeeper)
+      const currentAdx = Indicators.calculateCandleADX(this.indexCandles.slice(-25), 14);
+      const aiAudit = await GeminiRiskOfficer.validateTradeSetup({
+        candidateType: triggerType,
+        setupType,
+        spot,
+        vwap: this.currentVwap,
+        vix: this.indiaVixValue,
+        adx: currentAdx,
+        regime: scoreCard.regime || "UNKNOWN",
+        confluenceScore: scoreCard.totalScore,
+        strike: selectedStrike,
+        heavyweights: this.heavyweightLtp as any,
+        cprWidthPercent: this.cpr ? CPR.getCPRWidthPercentage(this.cpr) : undefined,
+        timeIST: istStr
+      });
+
+      if (!aiAudit.approved) {
+        this.lastSignalBlockReason = `🤖 [GEMINI AI VETO]: ${aiAudit.reasoning}`;
+        console.warn(`[AdvisoryManager] 🚫 TRADE BLOCKED BY AI RISK OFFICER: ${aiAudit.reasoning} (AI Confidence: ${aiAudit.aiConfidence}%)`);
+        return;
+      }
+      console.log(`[AdvisoryManager] 🤖 [GEMINI AI APPROVED]: ${aiAudit.reasoning} (AI Confidence: ${aiAudit.aiConfidence}%)`);
 
       const envScore = process.env.MIN_SIGNAL_SCORE;
       let minSignalScore = envScore !== undefined ? parseInt(envScore, 10) : 75;
@@ -1316,19 +1353,19 @@ export class AdvisoryManager {
       }
     }
 
-    // 1. Halfway Micro-Trail (+0.5R Risk Cut): Cut downside risk by 75% once 50% of T1 is achieved
+    // 1. Capital Shield (+0.40R Breakeven Lock): Move SL to Breakeven (+0.50 pts) once 40% of T1 is achieved
     const target1Distance = (pos.activeSignal.targetPrice1 || (pos.activeSignal.entryPrice + initialRisk * 1.25)) - pos.activeSignal.entryPrice;
-    if (target1Distance > 0 && currentPremiumLtp >= pos.activeSignal.entryPrice + target1Distance * 0.50) {
-      const riskCutSl = pos.activeSignal.entryPrice - 2.50;
+    if (target1Distance > 0 && currentPremiumLtp >= pos.activeSignal.entryPrice + target1Distance * 0.40) {
+      const riskCutSl = pos.activeSignal.entryPrice + 0.50; // Guaranteed Breakeven + fee covered!
       if (riskCutSl > pos.activeSignal.stopLossPrice) {
         pos.activeSignal.stopLossPrice = parseFloat(riskCutSl.toFixed(2));
         this.persistOpenPositionState(pos);
-        console.log(`[AdvisoryManager] [${tier}] Halfway Micro-Trail active: SL raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (75% risk reduction)`);
+        console.log(`[AdvisoryManager] [${tier}] 🛡️ Capital Shield Active: SL raised to Breakeven ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (+0.50 locked)`);
       }
     }
 
     // 2. High-Watermark Peak Profit Guard: Protect accumulated gains when trade reaches >= 70% of T1
-    if (target1Distance > 0 && (pos.peakPremium || currentPremiumLtp) >= pos.activeSignal.entryPrice + target1Distance * 0.70) {
+    if (target1Distance > 0 && (pos.peakPremiumLtp || currentPremiumLtp) >= pos.activeSignal.entryPrice + target1Distance * 0.70) {
       const minProfitSl = pos.activeSignal.entryPrice + 1.00;
       if (minProfitSl > pos.activeSignal.stopLossPrice) {
         pos.activeSignal.stopLossPrice = parseFloat(minProfitSl.toFixed(2));
@@ -1338,12 +1375,24 @@ export class AdvisoryManager {
     }
 
     // 3. Underlying Structural Invalidation Exit: Exit if Spot breaks Session VWAP support/resistance
-    if (pos.activeSignal.type === "CALL_BUY" && spot < this.currentVwap - 6 && this.currentVwap > 0) {
-      this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Session VWAP support (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
-      return;
-    } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.currentVwap + 6 && this.currentVwap > 0) {
-      this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Session VWAP resistance (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
-      return;
+    const isVwapPullbackOrBreakout = pos.activeSignal.reasoning?.includes("VWAP PULLBACK") || pos.activeSignal.reasoning?.includes("ORB");
+    if (isVwapPullbackOrBreakout) {
+      if (pos.activeSignal.type === "CALL_BUY" && spot < this.currentVwap - 6 && this.currentVwap > 0) {
+        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Session VWAP support (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
+        return;
+      } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.currentVwap + 6 && this.currentVwap > 0) {
+        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Session VWAP resistance (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
+        return;
+      }
+    } else if (pos.activeSignal.reasoning?.includes("MEAN REVERSION")) {
+      // For Mean Reversion, invalidation occurs if price breaks past the swing extreme
+      if (pos.activeSignal.type === "CALL_BUY" && spot < this.dayLow - 5) {
+        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Day Low (${this.dayLow.toFixed(1)}). Mean reversion invalidated.`, timestamp, currentPremiumLtp);
+        return;
+      } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.dayHigh + 5) {
+        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Day High (${this.dayHigh.toFixed(1)}). Mean reversion invalidated.`, timestamp, currentPremiumLtp);
+        return;
+      }
     }
 
     // Dynamic Trailing Stop Loss: Once premium reaches Target 1 (+1.2R equivalent), trail SL to +0.6R

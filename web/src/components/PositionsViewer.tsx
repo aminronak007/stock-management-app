@@ -59,10 +59,10 @@ export const PositionsViewer: React.FC<PositionsViewerProps> = ({
             <span className="text-2xl lg:text-3xl font-extrabold font-outfit text-white">
               {positions.length}
             </span>
-            <span className="text-xs font-semibold text-gray-400">/ 3 Max Tiers</span>
+            <span className="text-xs font-semibold text-gray-400">/ 1 Max Global Lock</span>
           </div>
           <span className="text-[11px] text-gray-500 mt-1">
-            {positions.length === 0 ? "Zero market exposure" : "Real-time tick evaluated"}
+            {positions.length === 0 ? "Zero market exposure" : "Single-Position Capital Shield active"}
           </span>
         </div>
 

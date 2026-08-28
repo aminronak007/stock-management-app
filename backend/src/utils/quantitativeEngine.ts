@@ -206,7 +206,7 @@ export class QuantitativeEngine {
     const avgVolume5 = prev5Volumes.length > 0 ? prev5Volumes.reduce((a, b) => a + b, 0) / prev5Volumes.length : 0;
     const currentVolume = currentCandle ? currentCandle.volume : 0;
 
-    const isFalseBreakout = setupType === "ORB_BREAKOUT" 
+    let isFalseBreakout = setupType === "ORB_BREAKOUT" 
       ? this.detectFalseBreakout(
           spot,
           orbHigh,
@@ -240,13 +240,15 @@ export class QuantitativeEngine {
         closes15m.push(candles5m[i].close);
       }
       if (closes15m.length >= 5) {
-        const { trendBullish: b15, trendBearish: br15 } = getIntradayEmaTrend(closes15m, spot);
-        if (triggerType === "CALL_BUY") {
-          if (b15) is15mTrendAligned = true;
-          if (br15) is15mCounterTrend = true;
-        } else if (triggerType === "PUT_BUY") {
-          if (br15) is15mTrendAligned = true;
-          if (b15) is15mCounterTrend = true;
+        const { trendBullish: b15, trendBearish: br15, ready: ready15 } = getIntradayEmaTrend(closes15m, spot, 5, 13);
+        if (ready15) {
+          if (triggerType === "CALL_BUY") {
+            if (b15) is15mTrendAligned = true;
+            if (br15) is15mCounterTrend = true;
+          } else if (triggerType === "PUT_BUY") {
+            if (br15) is15mTrendAligned = true;
+            if (b15) is15mCounterTrend = true;
+          }
         }
       }
     }
@@ -464,8 +466,9 @@ export class QuantitativeEngine {
     }
 
     if (is15mCounterTrend && setupType !== "TRAP_REVERSAL") {
-      totalScore = Math.max(0, totalScore - 15);
-      explanation.push("⚠ 15M HIGHER TIMEFRAME TREND PENALTY (-15 points): 15m trend opposes breakout direction");
+      totalScore = 0;
+      isFalseBreakout = true;
+      explanation.push("✕ 15M INSTITUTIONAL TREND GATE: 15-minute higher timeframe trend opposes breakout. High probability failure.");
     }
 
     if (isNearCallWall) {
@@ -478,14 +481,14 @@ export class QuantitativeEngine {
       explanation.push(`⚠ PUT SUPPORT WALL PENALTY (-15 points): Spot approaching Max Put OI Support Wall at ${maxPutOiStrike}`);
     }
 
-    if (triggerType === "CALL_BUY" && deltaCallOi !== undefined && deltaCallOi > 50000) {
-      totalScore = Math.max(0, totalScore - 10);
-      explanation.push("⚠ CALL WRITING PENALTY (-10 points): Institutional Call Writers adding contracts into breakout");
+    if (triggerType === "CALL_BUY" && deltaCallOi !== undefined && deltaCallOi > 30000) {
+      totalScore = Math.max(0, totalScore - 20);
+      explanation.push("⚠ INSTITUTIONAL CALL WRITING WALL (-20 points): Heavy call addition into breakout.");
     }
 
-    if (triggerType === "PUT_BUY" && deltaPutOi !== undefined && deltaPutOi > 50000) {
-      totalScore = Math.max(0, totalScore - 10);
-      explanation.push("⚠ PUT WRITING PENALTY (-10 points): Institutional Put Writers adding contracts into breakdown");
+    if (triggerType === "PUT_BUY" && deltaPutOi !== undefined && deltaPutOi > 30000) {
+      totalScore = Math.max(0, totalScore - 20);
+      explanation.push("⚠ INSTITUTIONAL PUT WRITING WALL (-20 points): Heavy put addition into breakdown.");
     }
 
     if (deltaVixPercent !== undefined && deltaVixPercent < -3.0) {
@@ -496,6 +499,29 @@ export class QuantitativeEngine {
     if (isChoppyAdx && setupType === "ORB_BREAKOUT") {
       totalScore = Math.max(0, totalScore - 15);
       explanation.push(`⚠ CHOPPY MARKET PENALTY (ADX=${currentAdx.toFixed(1)} < 18: -15 points applied)`);
+    }
+
+    // BANK NIFTY & HEAVYWEIGHT INSTITUTIONAL CONSENSUS GATES:
+    const bnfLtp = heavyweightsLtp["NSE:NIFTYBANK-INDEX"] || 0;
+    const bnfVwap = heavyweightsVwap["NSE:NIFTYBANK-INDEX"] || 0;
+    const isBankNiftyDiverging = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap) ||
+                                 (triggerType === "PUT_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp > bnfVwap);
+
+    if (isBankNiftyDiverging && setupType !== "TRAP_REVERSAL") {
+      totalScore = Math.max(0, totalScore - 20);
+      explanation.push("⚠ BANK NIFTY DIVERGENCE PENALTY (-20 points): Bank Nifty opposing Nifty breakout direction.");
+    }
+
+    const relLtp = heavyweightsLtp["NSE:RELIANCE-EQ"] || 0;
+    const relVwap = heavyweightsVwap["NSE:RELIANCE-EQ"] || 0;
+    const hdfcLtp = heavyweightsLtp["NSE:HDFCBANK-EQ"] || 0;
+    const hdfcVwap = heavyweightsVwap["NSE:HDFCBANK-EQ"] || 0;
+    const areTopTwoOpposing = (triggerType === "CALL_BUY" && relLtp > 0 && relLtp < relVwap && hdfcLtp > 0 && hdfcLtp < hdfcVwap) ||
+                              (triggerType === "PUT_BUY" && relLtp > 0 && relLtp > relVwap && hdfcLtp > 0 && hdfcLtp > hdfcVwap);
+    if (areTopTwoOpposing && setupType !== "TRAP_REVERSAL") {
+      totalScore = 0;
+      isFalseBreakout = true;
+      explanation.push("✕ INSTITUTIONAL DIVERGENCE GATE: Both Reliance and HDFC Bank opposing breakout. 100% False Breakout Trap.");
     }
 
     // STRICT STRATEGY-REGIME GATE:

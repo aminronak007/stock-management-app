@@ -29,15 +29,20 @@ export function lastEma(values: number[]): number {
 /**
  * 5-minute 9/21 trend. If EMAs are not ready yet, trend gates pass so session VWAP remains the first filter.
  */
-export function getIntradayEmaTrend(closes: number[], spot: number): IntradayTrend {
-  const emaFastList = Indicators.calculateEMA(closes, NIFTY_OPTIONS_EMA_FAST);
-  const emaSlowList = Indicators.calculateEMA(closes, NIFTY_OPTIONS_EMA_SLOW);
+export function getIntradayEmaTrend(
+  closes: number[],
+  spot: number,
+  fast: number = NIFTY_OPTIONS_EMA_FAST,
+  slow: number = NIFTY_OPTIONS_EMA_SLOW
+): IntradayTrend {
+  const emaFastList = Indicators.calculateEMA(closes, fast);
+  const emaSlowList = Indicators.calculateEMA(closes, slow);
   const emaFast = lastEma(emaFastList);
   const emaSlow = lastEma(emaSlowList);
   const ready = emaFast > 0 && emaSlow > 0;
 
   if (!ready) {
-    return { trendBullish: true, trendBearish: true, emaFast, emaSlow, ready: false };
+    return { trendBullish: false, trendBearish: false, emaFast, emaSlow, ready: false };
   }
 
   return {

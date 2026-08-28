@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { Watchlist } from "../components/Watchlist";
 import { CandlestickChart } from "../components/CandlestickChart";
 import { AdvisoryPanel } from "../components/AdvisoryPanel";
@@ -100,6 +100,8 @@ export default function Home() {
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [isBrokerAuth, setIsBrokerAuth] = useState<boolean>(false);
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
+  const [soundAlertsEnabled, setSoundAlertsEnabled] = useState<boolean>(true);
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
   const [activeWlTab, setActiveWlTab] = useState<number>(1);
   const [watchlistTabs, setWatchlistTabs] = useState<{ [tabId: number]: string[] }>({
@@ -349,10 +351,8 @@ export default function Home() {
               }, 8000);
             }
 
-            // Play auditory sound alert
-            if (signal.type === "CALL_BUY") playAlertSound(440);
-            else if (signal.type === "PUT_BUY") playAlertSound(330);
-            else playAlertSound(550);
+            // Play auditory sound alert, speech announcement, and desktop notification
+            triggerAudioAndNotification(signal);
           } else if (message.type === "WELCOME") {
             setLogs(prev => [...prev, `[Broker] Session status received (Broker Provider: ${message.payload.provider})`]);
             setEnableSimulator(message.payload.enableSimulator === true);
@@ -402,28 +402,92 @@ export default function Home() {
       if (ws) ws.close(); // Clean close
       if (reconnectTimer) clearTimeout(reconnectTimer);
     };
-  }, []);
+  }, [soundAlertsEnabled]);
 
-  // Play audio synthesizer alerts
-  const playAlertSound = (frequency: number) => {
+  // Shared persistent audio context getter
+  const getAudioContext = () => {
+    if (!audioCtxRef.current && typeof window !== "undefined") {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioContextClass) {
+        audioCtxRef.current = new AudioContextClass();
+      }
+    }
+    if (audioCtxRef.current && audioCtxRef.current.state === "suspended") {
+      audioCtxRef.current.resume();
+    }
+    return audioCtxRef.current;
+  };
+
+  // Play rich multi-tone chime, clear voice announcement, and desktop notification
+  const triggerAudioAndNotification = (signal: { type: string; strike?: any; entry?: any; sl?: any; t1?: any; reasoning?: string }) => {
+    if (!soundAlertsEnabled) return;
+
+    // 1. Synthesize rich audio chime
     try {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const oscillator = audioCtx.createOscillator();
-      const gainNode = audioCtx.createGain();
-      
-      oscillator.type = "sine";
-      oscillator.frequency.value = frequency;
-      gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.4);
-      
-      oscillator.connect(gainNode);
-      gainNode.connect(audioCtx.destination);
-      
-      oscillator.start();
-      oscillator.stop(audioCtx.currentTime + 0.5);
+      const ctx = getAudioContext();
+      if (ctx) {
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        if (signal.type === "CALL_BUY" || signal.type === "PUT_BUY") {
+          // Melodic BUY chime (587Hz -> 880Hz)
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(587.33, now);
+          osc.frequency.setValueAtTime(880.00, now + 0.15);
+          gain.gain.setValueAtTime(0.25, now);
+          gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+          osc.start(now);
+          osc.stop(now + 0.55);
+        } else if (signal.type.includes("PROFIT")) {
+          // Triumph Profit Chime (523Hz -> 659Hz -> 784Hz)
+          osc.type = "triangle";
+          osc.frequency.setValueAtTime(523.25, now);
+          osc.frequency.setValueAtTime(659.25, now + 0.12);
+          osc.frequency.setValueAtTime(783.99, now + 0.24);
+          gain.gain.setValueAtTime(0.3, now);
+          gain.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
+          osc.start(now);
+          osc.stop(now + 0.65);
+        } else {
+          // Warning Exit Tone (440Hz -> 330Hz)
+          osc.type = "sawtooth";
+          osc.frequency.setValueAtTime(440.00, now);
+          osc.frequency.setValueAtTime(329.63, now + 0.15);
+          gain.gain.setValueAtTime(0.18, now);
+          gain.gain.exponentialRampToValueAtTime(0.01, now + 0.45);
+          osc.start(now);
+          osc.stop(now + 0.5);
+        }
+      }
     } catch (e) {
       console.warn("Audio Context alert failed to play", e);
     }
+
+    // 2. Clear Speech Synthesis Voice Announcement
+    try {
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+        const cleanType = signal.type.replace(/_/g, " ");
+        const text = signal.strike ? `${cleanType} on Nifty ${signal.strike}` : `${cleanType} alert`;
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.rate = 1.05;
+        utterance.pitch = 1.05;
+        utterance.volume = 0.9;
+        window.speechSynthesis.speak(utterance);
+      }
+    } catch (e) {}
+
+    // 3. Native Browser Desktop Notification
+    try {
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+        new Notification(`⚡ Nifty Advisory Alert: ${signal.type}`, {
+          body: `Strike: ${signal.strike || "Nifty"} | Entry: ₹${signal.entry || "--"} | SL: ₹${signal.sl || "--"} | T1: ₹${signal.t1 || "--"}\n${signal.reasoning || ""}`
+        });
+      }
+    } catch (e) {}
   };
 
   // Helper values for active symbol
@@ -549,6 +613,28 @@ export default function Home() {
                     className="text-[9.5px] font-semibold text-gray-300 hover:text-white bg-white/10 hover:bg-rose-500/20 border border-white/10 hover:border-rose-500/30 px-2 py-0.5 rounded transition-all cursor-pointer flex items-center gap-1"
                   >
                     🔄 Re-Auth
+                  </button>
+                  <button
+                    onClick={() => {
+                      const next = !soundAlertsEnabled;
+                      setSoundAlertsEnabled(next);
+                      localStorage.setItem("soundAlertsEnabled", String(next));
+                      if (next) {
+                        getAudioContext();
+                        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
+                          Notification.requestPermission();
+                        }
+                        triggerAudioAndNotification({ type: "CALL_BUY", strike: "24100 CE", entry: 185, sl: 173, t1: 197, reasoning: "Audio chime and voice alerts enabled!" });
+                      }
+                    }}
+                    title="Toggle Audio Chimes & Desktop Notifications (Click to test sound)"
+                    className={`text-[9.5px] font-semibold px-2 py-0.5 rounded transition-all cursor-pointer flex items-center gap-1 border ${
+                      soundAlertsEnabled
+                        ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20"
+                        : "bg-white/5 text-gray-400 border-white/10 hover:bg-white/10"
+                    }`}
+                  >
+                    {soundAlertsEnabled ? "🔔 AUDIO: ON" : "🔕 AUDIO: OFF"}
                   </button>
                 </>
               ) : (

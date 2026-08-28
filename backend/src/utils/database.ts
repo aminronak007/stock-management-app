@@ -562,9 +562,9 @@ export class DatabaseService {
   public static getDailyGlobalExitsCount(now: number = Date.now()): number {
     const db = this.initialize();
     const today = this.getIstDateKey(now);
-    // Count distinct trade setups on the primary SNIPER tier flow
+    // Count distinct trade setups across all tiers globally
     const trades = db.prepare(
-      "SELECT type, timestamp FROM paper_trades WHERE tier = 'SNIPER' ORDER BY id ASC"
+      "SELECT type, timestamp FROM paper_trades ORDER BY id ASC"
     ).all() as PaperTradeRecord[];
 
     let count = 0;
@@ -577,13 +577,13 @@ export class DatabaseService {
   }
 
   /**
-   * Returns consecutive trade setup losses across the session for the day
+   * Returns consecutive trade setup losses across the session for the day globally across all tiers
    */
   public static getDailyGlobalConsecutiveLossesCount(now: number = Date.now()): number {
     const db = this.initialize();
     const today = this.getIstDateKey(now);
     const trades = db.prepare(
-      "SELECT type, pnl, net_pnl, timestamp FROM paper_trades WHERE tier = 'SNIPER' ORDER BY id DESC"
+      "SELECT type, pnl, net_pnl, timestamp FROM paper_trades ORDER BY id DESC"
     ).all() as PaperTradeRecord[];
 
     let consecutiveLosses = 0;

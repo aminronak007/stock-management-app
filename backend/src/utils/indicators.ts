@@ -228,4 +228,16 @@ export class Indicators {
 
     return adx;
   }
+
+  /**
+   * Helper to calculate ADX directly from a Candle array
+   */
+  public static calculateCandleADX(candles: { high: number; low: number; close: number }[], period: number = 14): number {
+    if (!candles || candles.length < period * 2) return 15.0;
+    const highs = candles.map(c => c.high);
+    const lows = candles.map(c => c.low);
+    const closes = candles.map(c => c.close);
+    const adxList = this.calculateADX(highs, lows, closes, period);
+    return adxList.length > 0 ? parseFloat(adxList[adxList.length - 1].toFixed(2)) : 15.0;
+  }
 }

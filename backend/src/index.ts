@@ -868,7 +868,12 @@ async function main() {
     "NSE:INDIAVIX-INDEX",
     "NSE:RELIANCE-EQ",
     "NSE:HDFCBANK-EQ",
-    "NSE:ICICIBANK-EQ"
+    "NSE:ICICIBANK-EQ",
+    "NSE:INFY-EQ",
+    "NSE:TCS-EQ",
+    "NSE:LT-EQ",
+    "NSE:AXISBANK-EQ",
+    "NSE:KOTAKBANK-EQ"
   ];
 
   console.log("[Broker] Subscribing to core streams...");
