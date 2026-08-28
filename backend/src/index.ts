@@ -893,6 +893,15 @@ async function main() {
 
       console.log(`[HTTP API] History query: ${symbol} | Resolution: ${resolution} | Range: ${fromDate} to ${toDate}`);
       const candles = await broker.getHistoricalCandles(symbol, resolution, fromDate, toDate);
+      if (symbol.includes("NIFTY") && symbol.includes("FUT") && Array.isArray(candles) && candles.length > 0) {
+        const liveGift = GiftNiftyService.getGiftNiftyData();
+        if (liveGift && liveGift.ltp > 0) {
+          const lastCandle = candles[candles.length - 1];
+          lastCandle.close = liveGift.ltp;
+          lastCandle.high = Math.max(lastCandle.high, liveGift.ltp);
+          lastCandle.low = Math.min(lastCandle.low, liveGift.ltp);
+        }
+      }
       res.json(candles);
     } catch (e: any) {
       console.error("[HTTP API] Failed to fetch history:", e.message);

@@ -335,9 +335,9 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       });
 
       // 6. Draw Realtime LTP (Last Traded Price) Horizontal Tracking line
-      const lastCandle = candles[candles.length - 1];
-      if (lastCandle && offset === 0) {
-        const ltpY = paddingTop + chartHeight * (1 - (lastCandle.close - minPrice) / priceRange);
+      const effectiveLtp = currentPrice > 0 ? currentPrice : (candles[candles.length - 1]?.close || 0);
+      if (effectiveLtp > 0 && offset === 0) {
+        const ltpY = paddingTop + chartHeight * (1 - (effectiveLtp - minPrice) / priceRange);
         if (ltpY >= paddingTop && ltpY <= paddingTop + chartHeight) {
           ctx.save();
           ctx.strokeStyle = "rgba(99, 102, 241, 0.4)";
@@ -354,7 +354,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           ctx.fillStyle = "white";
           ctx.font = "bold 9px Inter";
           ctx.textAlign = "center";
-          ctx.fillText(lastCandle.close.toFixed(1), canvas.width - 36, ltpY + 3);
+          ctx.fillText(effectiveLtp.toFixed(1), canvas.width - 36, ltpY + 3);
           ctx.restore();
         }
       }
@@ -424,18 +424,19 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
   // Active HUD values
   const hudCandle = hoveredCandle || (candles.length > 0 ? candles[candles.length - 1] : null);
+  const effectiveClose = hoveredCandle ? hoveredCandle.close : (currentPrice > 0 ? currentPrice : (hudCandle?.close || 0));
   
   const hudO = hudCandle ? hudCandle.open.toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "--";
-  const hudH = hudCandle ? hudCandle.high.toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "--";
-  const hudL = hudCandle ? hudCandle.low.toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "--";
-  const hudC = hudCandle ? hudCandle.close.toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "--";
+  const hudH = hudCandle ? (hoveredCandle ? hudCandle.high : Math.max(hudCandle.high, currentPrice || 0)).toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "--";
+  const hudL = hudCandle ? (hoveredCandle ? hudCandle.low : Math.min(hudCandle.low, currentPrice > 0 ? currentPrice : hudCandle.low)).toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "--";
+  const hudC = effectiveClose > 0 ? effectiveClose.toLocaleString("en-IN", { minimumFractionDigits: 2 }) : "--";
   const hudV = hudCandle ? hudCandle.volume.toLocaleString("en-IN") : "--";
   
   // EMA values for current HUD readout
   const activeEma50 = hoveredCandle ? hoveredEma50 : (candles.length > 0 ? calculateEMAValues(candles.map(c => c.close), 50).slice(-1)[0] : 0);
   const activeEma200 = hoveredCandle ? hoveredEma200 : (candles.length > 0 ? calculateEMAValues(candles.map(c => c.close), 200).slice(-1)[0] : 0);
 
-  const isHudBullish = hudCandle ? hudCandle.close >= hudCandle.open : true;
+  const isHudBullish = hudCandle ? effectiveClose >= hudCandle.open : true;
   const hudColor = isHudBullish ? "text-[var(--color-positive)]" : "text-[var(--color-negative)]";
 
   return (
