@@ -147,6 +147,11 @@ async function main() {
       }
     }
 
+    // Ignore domestic broker ticks for NSE:NIFTY26SEPFUT as it is exclusively streamed by GiftNiftyService
+    if (tick.symbol === "NSE:NIFTY26SEPFUT") {
+      return;
+    }
+
     brokerTickCache[tick.symbol] = {
       ltp: tick.ltp,
       change: changePercent || 0.0,
@@ -609,11 +614,43 @@ async function main() {
           allCached = false;
         }
       }
+
+      // Ensure live GIFT Nifty data is seamlessly injected for NSE:NIFTY26SEPFUT
+      const liveGift = GiftNiftyService.getGiftNiftyData(brokerTickCache["NSE:NIFTY50-INDEX"]?.ltp || 24175.65);
+      if (liveGift && liveGift.ltp > 0) {
+        const displayChange = liveGift.sessionChange !== undefined ? liveGift.sessionChange : liveGift.netChange;
+        const displayPct = liveGift.sessionPercentChange !== undefined ? liveGift.sessionPercentChange : liveGift.percentChange;
+        cachedResult["NSE:NIFTY26SEPFUT"] = {
+          symbol: "NSE:NIFTY26SEPFUT",
+          ltp: liveGift.ltp,
+          netChange: displayChange,
+          netChangePercent: displayPct,
+          prevClose: liveGift.prevClose,
+          bidPrice: liveGift.ltp,
+          askPrice: liveGift.ltp,
+          timestamp: Date.now()
+        };
+      }
+
       if (allCached && Object.keys(cachedResult).length > 0) {
         return res.json(cachedResult);
       }
 
-      const quotes = await (broker.getQuotes ? broker.getQuotes(coreSymbols) : Promise.resolve({}));
+      const quotes: any = await (broker.getQuotes ? broker.getQuotes(coreSymbols) : Promise.resolve({}));
+      if (liveGift && liveGift.ltp > 0) {
+        const displayChange = liveGift.sessionChange !== undefined ? liveGift.sessionChange : liveGift.netChange;
+        const displayPct = liveGift.sessionPercentChange !== undefined ? liveGift.sessionPercentChange : liveGift.percentChange;
+        quotes["NSE:NIFTY26SEPFUT"] = {
+          symbol: "NSE:NIFTY26SEPFUT",
+          ltp: liveGift.ltp,
+          netChange: displayChange,
+          netChangePercent: displayPct,
+          prevClose: liveGift.prevClose,
+          bidPrice: liveGift.ltp,
+          askPrice: liveGift.ltp,
+          timestamp: Date.now()
+        };
+      }
       res.json(quotes);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -863,11 +900,10 @@ async function main() {
     }
   });
 
-  // 6. Subscribe to core Nifty 50 tokens
+  // 6. Subscribe to core Nifty 50 tokens (Domestic)
   const coreSymbols = [
     "BSE:SENSEX-INDEX",
     "NSE:NIFTY50-INDEX",
-    "NSE:NIFTY26SEPFUT",
     "NSE:NIFTYBANK-INDEX",
     "NSE:FINNIFTY-INDEX",
     "NSE:INDIAVIX-INDEX",
