@@ -173,6 +173,7 @@ export class QuantitativeEngine {
     deltaCallOi?: number;
     deltaPutOi?: number;
     deltaVixPercent?: number;
+    giftNiftyDelta?: number;
   }): SignalScoreCard {
     const {
       spot,
@@ -194,7 +195,8 @@ export class QuantitativeEngine {
       maxPutOiStrike,
       deltaCallOi,
       deltaPutOi,
-      deltaVixPercent
+      deltaVixPercent,
+      giftNiftyDelta
     } = params;
 
     const explanation: string[] = [];
@@ -522,6 +524,29 @@ export class QuantitativeEngine {
       totalScore = 0;
       isFalseBreakout = true;
       explanation.push("✕ INSTITUTIONAL DIVERGENCE GATE: Both Reliance and HDFC Bank opposing breakout. 100% False Breakout Trap.");
+    }
+
+    // Global Macro Factor: GIFT Nifty (NSE IFSC) Leading Indicator
+    if (giftNiftyDelta !== undefined) {
+      if (triggerType === "CALL_BUY") {
+        if (giftNiftyDelta > 20) {
+          totalScore = Math.min(100, totalScore + 5);
+          explanation.push(`🌍 GLOBAL MACRO TAILWIND (+5 points): GIFT Nifty bullish lead (+${giftNiftyDelta.toFixed(1)} pts)`);
+        } else if (giftNiftyDelta < -35) {
+          totalScore = 0;
+          isFalseBreakout = true;
+          explanation.push(`✕ GLOBAL MACRO DIVERGENCE: GIFT Nifty dumping (-${Math.abs(giftNiftyDelta).toFixed(1)} pts) into domestic CALL breakout. High risk bull trap.`);
+        }
+      } else if (triggerType === "PUT_BUY") {
+        if (giftNiftyDelta < -20) {
+          totalScore = Math.min(100, totalScore + 5);
+          explanation.push(`🌍 GLOBAL MACRO TAILWIND (+5 points): GIFT Nifty bearish breakdown lead (${giftNiftyDelta.toFixed(1)} pts)`);
+        } else if (giftNiftyDelta > 35) {
+          totalScore = 0;
+          isFalseBreakout = true;
+          explanation.push(`✕ GLOBAL MACRO DIVERGENCE: GIFT Nifty surging (+${giftNiftyDelta.toFixed(1)} pts) against domestic PUT breakdown. High risk bear trap.`);
+        }
+      }
     }
 
     // STRICT STRATEGY-REGIME GATE:

@@ -105,7 +105,7 @@ export default function Home() {
 
   const [activeWlTab, setActiveWlTab] = useState<number>(1);
   const [watchlistTabs, setWatchlistTabs] = useState<{ [tabId: number]: string[] }>({
-    1: ["BSE:SENSEX-INDEX", "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX", "NSE:FINNIFTY-INDEX", "NSE:INDIAVIX-INDEX"],
+    1: ["BSE:SENSEX-INDEX", "NSE:NIFTY50-INDEX", "NSE:NIFTYBANK-INDEX", "NSE:FINNIFTY-INDEX", "NSE:INDIAVIX-INDEX", "NSE:NIFTY26SEPFUT"],
     2: ["NSE:RELIANCE-EQ", "NSE:TCS-EQ", "NSE:HDFCBANK-EQ"],
     3: [],
     4: [],
@@ -117,7 +117,19 @@ export default function Home() {
     try {
       const saved = localStorage.getItem("watchlistTabs");
       if (saved) {
-        setWatchlistTabs(JSON.parse(saved));
+        const parsed = JSON.parse(saved);
+        // Ensure GIFT Nifty is present in Tab 1 directly below INDIA VIX
+        if (parsed && Array.isArray(parsed[1])) {
+          if (!parsed[1].includes("NSE:NIFTY26SEPFUT")) {
+            const vixIdx = parsed[1].indexOf("NSE:INDIAVIX-INDEX");
+            if (vixIdx !== -1) {
+              parsed[1].splice(vixIdx + 1, 0, "NSE:NIFTY26SEPFUT");
+            } else {
+              parsed[1].push("NSE:NIFTY26SEPFUT");
+            }
+          }
+        }
+        setWatchlistTabs(parsed);
       }
     } catch (e) {
       console.warn("Failed to load watchlistTabs from localStorage:", e);
@@ -382,15 +394,10 @@ export default function Home() {
         }
       };
 
-      ws.onclose = (event) => {
-        console.warn("[WebSocket] Connection lost.");
+      ws.onclose = () => {
+        console.warn("[WebSocket] Connection lost. Reconnecting in 3s...");
         setSystemState("DISCONNECTED");
         setSocket(null);
-        
-        // If clean close (from React strict mode cleanup), do not trigger reconnect
-        if (event.wasClean) return;
-        
-        setLogs(prev => [...prev, "[System] Connection lost. Retrying in 3 seconds..."]);
         reconnectTimer = setTimeout(connect, 3000);
       };
     }

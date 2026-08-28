@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { SignalGateStatus, EngineStatus } from "./SignalGateStatus";
+import { SignalGateStatus, GiftNiftyCard, EngineStatus } from "./SignalGateStatus";
 
 interface ConfluenceBreakdown {
   score: number;
@@ -21,22 +21,11 @@ interface QuantitativePanelsProps {
     targetPrice2?: number;
     reasoning?: string;
     scoreCard?: {
-      totalScore: number;
-      qualityLabel: string;
-      regime: string;
-      isFalseBreakout: boolean;
-      isCounterTrend: boolean;
-      factors: {
-        marketStructure: ConfluenceBreakdown;
-        vwapMomentum: ConfluenceBreakdown;
-        heavyweights: ConfluenceBreakdown;
-        optionsStructure: ConfluenceBreakdown;
-        volatility: ConfluenceBreakdown;
-        regimeAlignment: ConfluenceBreakdown;
-        optionMomentum: ConfluenceBreakdown;
-        riskReward: ConfluenceBreakdown;
-      };
-      explanation: string[];
+      totalScore?: number;
+      qualityLabel?: string;
+      regime?: string;
+      explanation?: string[];
+      factors?: { [key: string]: any };
     };
   } | null;
   engineStatus?: EngineStatus | null;
@@ -60,7 +49,7 @@ export const QuantitativePanels: React.FC<QuantitativePanelsProps> = ({
     <div className="quant-grid flex flex-col gap-6 w-full">
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-stretch">
-        {/* Expected Intraday Volatility Cone */}
+        {/* Card 1: Expected Intraday Volatility Cone */}
         <div className="card p-5 rounded-xl border border-white/5 bg-[#12141a]/90 flex flex-col h-full min-w-0">
           <span className="text-[10px] text-gray-500 font-semibold tracking-wider uppercase">Expected Volatility Cone</span>
           <div className="flex flex-col gap-1 mt-2">
@@ -92,11 +81,12 @@ export const QuantitativePanels: React.FC<QuantitativePanelsProps> = ({
           </div>
         </div>
 
+        {/* Card 2: Signal Gates (ORB) */}
         <div className="card p-5 rounded-xl border border-white/5 bg-[#12141a]/90 h-full min-w-0">
           <SignalGateStatus status={engineStatus || null} />
         </div>
 
-        {/* Regime Classification */}
+        {/* Card 3: Regime Classification */}
         <div className="card bg-gradient-to-br from-[#12141a]/90 to-[#181b24]/90 p-5 rounded-xl border border-white/5 relative overflow-hidden h-full min-w-0 flex flex-col">
           <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/10 rounded-full blur-xl"></div>
           <span className="text-[10px] text-indigo-400 font-semibold tracking-wider uppercase">Live Market Regime</span>

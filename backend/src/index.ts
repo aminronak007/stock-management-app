@@ -16,6 +16,7 @@ import { DatabaseService } from "./utils/database";
 import { ExcelLogger } from "./utils/excelLogger";
 import { GoogleSheetsService } from "./services/googleSheetsService";
 import { TelegramService } from "./services/telegramService";
+import { GiftNiftyService } from "./services/giftNiftyService";
 
 function rupee(value?: number): string {
   return typeof value === "number" && Number.isFinite(value) ? `₹${value.toFixed(2)}` : "₹--";
@@ -151,6 +152,9 @@ async function main() {
       change: changePercent || 0.0,
       netChange: netChange
     };
+
+    // Feed real-time ticks to the GIFT Nifty / Futures Service
+    GiftNiftyService.updateFromTick(tick);
 
     // Feed real-time ticks to the Advisory Strategy Engine (full speed, no throttling)
     advisory.processTick(tick).catch((err) => {
@@ -863,6 +867,7 @@ async function main() {
   const coreSymbols = [
     "BSE:SENSEX-INDEX",
     "NSE:NIFTY50-INDEX",
+    "NSE:NIFTY26SEPFUT",
     "NSE:NIFTYBANK-INDEX",
     "NSE:FINNIFTY-INDEX",
     "NSE:INDIAVIX-INDEX",
@@ -886,6 +891,7 @@ async function main() {
         const quotes = await broker.getQuotes(coreSymbols);
         for (const sym of Object.keys(quotes)) {
           const q = quotes[sym];
+          GiftNiftyService.updateFromTick(q);
           brokerTickCache[sym] = {
             ltp: q.ltp,
             change: q.netChangePercent,
@@ -923,6 +929,37 @@ async function main() {
       payload: advisory.getEngineStatus()
     });
   }, 2000);
+
+  // Continuously fetch and broadcast live NSE IX GIFT Nifty ticks to Watchlist
+  setInterval(async () => {
+    try {
+      const spotLtp = brokerTickCache["NSE:NIFTY50-INDEX"]?.ltp || 24175.65;
+      const gift = await GiftNiftyService.fetchLiveGiftNifty(spotLtp);
+      if (gift && gift.ltp > 0) {
+        const displayChange = gift.sessionChange !== undefined ? gift.sessionChange : gift.netChange;
+        const displayPct = gift.sessionPercentChange !== undefined ? gift.sessionPercentChange : gift.percentChange;
+        
+        brokerTickCache["NSE:NIFTY26SEPFUT"] = {
+          ltp: gift.ltp,
+          netChange: displayChange,
+          change: displayPct
+        };
+
+        broadcast({
+          type: "TICK",
+          payload: {
+            symbol: "NSE:NIFTY26SEPFUT",
+            ltp: gift.ltp,
+            netChange: displayChange,
+            netChangePercent: displayPct,
+            bidPrice: gift.ltp - 0.25,
+            askPrice: gift.ltp + 0.25,
+            timestamp: Date.now()
+          }
+        });
+      }
+    } catch {}
+  }, 3000);
 
   // Don't rely only on a Nifty tick arriving at 15:15 — flatten leftover paper positions on a timer
   setInterval(() => {

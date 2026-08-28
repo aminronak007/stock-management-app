@@ -9,6 +9,7 @@ export interface AIAuditInput {
   confluenceScore: number;
   strike: number | string;
   heavyweights: { [symbol: string]: { ltp: number; changePercent?: number } };
+  giftNifty?: { ltp: number; delta: number; sentiment: string; premiumDiscount: number };
   cprWidthPercent?: number;
   timeIST: string;
 }
@@ -42,6 +43,10 @@ export class GeminiRiskOfficer {
       };
     }
 
+    const giftNiftyText = input.giftNifty
+      ? `LTP: ${input.giftNifty.ltp.toFixed(2)}, Delta: ${input.giftNifty.delta > 0 ? "+" : ""}${input.giftNifty.delta.toFixed(1)} pts (${input.giftNifty.sentiment}), Spread: +${input.giftNifty.premiumDiscount} pts`
+      : "Aligned";
+
     const prompt = `
 You are an ultra-strict Institutional Head of Risk for an Intraday Nifty 50 Options Trading Desk.
 Your sole job is to PROTECT TRADING CAPITAL from false breakouts, theta decay, and bull/bear traps.
@@ -52,6 +57,7 @@ Evaluate this candidate option buying trade:
 - Nifty Spot: ${input.spot.toFixed(2)} | Session VWAP: ${input.vwap.toFixed(2)}
 - Market Regime: ${input.regime} | Trend Strength ADX: ${input.adx.toFixed(1)}
 - India VIX: ${input.vix.toFixed(2)}% | CPR Width: ${input.cprWidthPercent ? input.cprWidthPercent.toFixed(3) + "%" : "Normal"}
+- GIFT Nifty (Global Macro): ${giftNiftyText}
 - Heavyweights: ${JSON.stringify(input.heavyweights)}
 - Time (IST): ${input.timeIST}
 - Quantitative Confluence Score: ${input.confluenceScore}/100
@@ -60,7 +66,8 @@ STRICT VETO RULES:
 1. If ADX < 18 or Regime is RANGE/CONSOLIDATION without clear momentum, VETO (reason: Theta decay in sideways chop).
 2. If CALL_BUY and Bank Nifty or ICICI Bank is Red/diverging negatively, VETO (reason: Index divergence bull trap).
 3. If PUT_BUY and Bank Nifty or Reliance is Green/rallying, VETO (reason: Heavyweight divergence bear trap).
-4. If between 11:00 AM - 1:15 PM IST, VETO (reason: Midday volume drop & theta decay).
+4. If CALL_BUY and GIFT Nifty is heavily dumping (Delta < -40 pts), or PUT_BUY and GIFT Nifty is strongly surging (Delta > +40 pts), VETO (reason: Global macro divergence).
+5. If between 11:00 AM - 1:15 PM IST, VETO (reason: Midday volume drop & theta decay).
 
 Respond ONLY with a valid JSON object matching this exact schema (no markdown, no backticks):
 {

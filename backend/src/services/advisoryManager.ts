@@ -12,6 +12,7 @@ import {
   orbConfirmationBuffer
 } from "../utils/niftyOptionsSetup";
 import { GeminiRiskOfficer } from "./geminiRiskOfficer";
+import { GiftNiftyService, GiftNiftyData } from "./giftNiftyService";
 
 export interface AdvisorySignal {
   type: "CALL_BUY" | "PUT_BUY" | "HOLD" | "EXIT_PROFIT" | "EXIT_STOP_LOSS" | "THETA_EXIT" | "SQUARE_OFF";
@@ -97,6 +98,7 @@ export class AdvisoryManager {
     "NSE:KOTAKBANK-EQ": 0
   };
   private heavyweightVolumes: { [symbol: string]: { cumVol: number; cumPv: number } } = {};
+  private latestGiftNifty: GiftNiftyData | null = null;
 
   // Nifty price candles for calculations
   private indexCandles: Candle[] = [];
@@ -1047,6 +1049,8 @@ export class AdvisoryManager {
       const targetPrice2 = parseFloat((entryPrice + scaledTarget2).toFixed(2));
 
       // Quantitative Score Confluence calculation
+      const giftNifty = await GiftNiftyService.getGiftNiftyData(spot);
+      this.latestGiftNifty = giftNifty;
       const riskReward = scaledTarget2 / Math.max(1, scaledStopLoss);
       const scoreCard = QuantitativeEngine.calculateConfluence({
         spot,
@@ -1068,7 +1072,8 @@ export class AdvisoryManager {
         maxPutOiStrike,
         deltaCallOi,
         deltaPutOi,
-        deltaVixPercent
+        deltaVixPercent,
+        giftNiftyDelta: giftNifty.netChange
       });
 
       // Strict Institutional Gate: Require score >= 75 (High Conviction Only). Block weak chop entries (< 75).
@@ -1101,6 +1106,12 @@ export class AdvisoryManager {
         confluenceScore: scoreCard.totalScore,
         strike: selectedStrike,
         heavyweights: this.heavyweightLtp as any,
+        giftNifty: {
+          ltp: giftNifty.ltp,
+          delta: giftNifty.netChange,
+          sentiment: giftNifty.sentiment,
+          premiumDiscount: giftNifty.premiumDiscount
+        },
         cprWidthPercent: this.cpr ? CPR.getCPRWidthPercentage(this.cpr) : undefined,
         timeIST: istStr
       });
@@ -1714,11 +1725,12 @@ export class AdvisoryManager {
       targetPutLevel = Math.min(targetPutLevel, this.lastTriggeredBreakoutLevel.PUT_BUY - 5);
     }
 
-    const ptsToCall = hasOrb ? parseFloat((targetCallLevel - spot).toFixed(2)) : 0;
-    const ptsToPut = hasOrb ? parseFloat((spot - targetPutLevel).toFixed(2)) : 0;
-    const insideOrb = hasOrb && spot <= this.orbHigh && spot >= this.orbLow;
-    const brokeCall = hasOrb && spot >= targetCallLevel;
-    const brokePut = hasOrb && spot <= targetPutLevel;
+    const spotValid = spot > 0;
+    const ptsToCall = (hasOrb && spotValid && targetCallLevel > spot) ? parseFloat((targetCallLevel - spot).toFixed(2)) : 0;
+    const ptsToPut = (hasOrb && spotValid && spot > targetPutLevel) ? parseFloat((spot - targetPutLevel).toFixed(2)) : 0;
+    const insideOrb = hasOrb && spotValid && spot <= this.orbHigh && spot >= this.orbLow;
+    const brokeCall = hasOrb && spotValid && spot >= targetCallLevel;
+    const brokePut = hasOrb && spotValid && spot <= targetPutLevel;
 
     const dbOpenBuys = DatabaseService.getOpenBuyTrades();
     const openBuyTier = (["SNIPER", "BALANCED", "EXPLORATORY"] as const).find(
@@ -1789,7 +1801,8 @@ export class AdvisoryManager {
         volumeHigh,
         trendBullish,
         trendBearish
-      }
+      },
+      giftNifty: GiftNiftyService.getGiftNiftyData(spot)
     };
   }
 

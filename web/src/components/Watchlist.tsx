@@ -22,12 +22,13 @@ interface WatchlistProps {
 
 // Database of top liquid Indian indices and stocks
 const SEARCH_DATABASE = [
-  // Core Indices
+  // Core Indices & Derivatives
   { id: "BSE:SENSEX-INDEX", displayName: "Sensex", desc: "BSE Spot Index" },
   { id: "NSE:NIFTY50-INDEX", displayName: "Nifty 50", desc: "NSE Spot Index" },
   { id: "NSE:NIFTYBANK-INDEX", displayName: "Nifty Bank", desc: "NSE Banking Index" },
   { id: "NSE:FINNIFTY-INDEX", displayName: "Fin Nifty", desc: "NSE Financial Index" },
   { id: "NSE:INDIAVIX-INDEX", displayName: "India VIX", desc: "NSE Volatility Index" },
+  { id: "NSE:NIFTY26SEPFUT", displayName: "GIFT Nifty", desc: "NSE IX / Global Derivatives" },
   // Liquid Equities
   { id: "NSE:RELIANCE-EQ", displayName: "RELIANCE", desc: "Reliance Industries Ltd." },
   { id: "NSE:TCS-EQ", displayName: "TCS", desc: "Tata Consultancy Services Ltd." },
