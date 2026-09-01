@@ -506,12 +506,19 @@ export class QuantitativeEngine {
     // BANK NIFTY & HEAVYWEIGHT INSTITUTIONAL CONSENSUS GATES:
     const bnfLtp = heavyweightsLtp["NSE:NIFTYBANK-INDEX"] || 0;
     const bnfVwap = heavyweightsVwap["NSE:NIFTYBANK-INDEX"] || 0;
-    const isBankNiftyDiverging = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap) ||
-                                 (triggerType === "PUT_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp > bnfVwap);
+    const isBankNiftyDiverging = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap * 0.999) ||
+                                 (triggerType === "PUT_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp > bnfVwap * 1.001);
+
+    const isBankNiftyAligned = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp > bnfVwap * 1.001) ||
+                               (triggerType === "PUT_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap * 0.999);
 
     if (isBankNiftyDiverging && setupType !== "TRAP_REVERSAL") {
-      totalScore = Math.max(0, totalScore - 20);
-      explanation.push("⚠ BANK NIFTY DIVERGENCE PENALTY (-20 points): Bank Nifty opposing Nifty breakout direction.");
+      totalScore = 0;
+      isFalseBreakout = true;
+      explanation.push("✕ BANK NIFTY MULTI-INDEX DIVERGENCE GATE: Bank Nifty strongly opposing Nifty breakout direction. False Breakout Trap!");
+    } else if (isBankNiftyAligned) {
+      totalScore = Math.min(100, totalScore + 10);
+      explanation.push("🏛️ MULTI-INDEX CONSENSUS TAILWIND (+10 points): Bank Nifty & Nifty 50 perfectly aligned in trend direction.");
     }
 
     const relLtp = heavyweightsLtp["NSE:RELIANCE-EQ"] || 0;
@@ -547,6 +554,14 @@ export class QuantitativeEngine {
           explanation.push(`✕ GLOBAL MACRO DIVERGENCE: GIFT Nifty surging (+${giftNiftyDelta.toFixed(1)} pts) against domestic PUT breakdown. High risk bear trap.`);
         }
       }
+    }
+
+    // Bollinger Band Squeeze & Volatility Expansion Boost
+    const closesList = candles5m.map(c => c.close);
+    const bb = Indicators.calculateBollingerBands(closesList, 20, 2.0);
+    if (bb && bb.bandwidth < 2.2 && currentVolume >= 1.2 * avgVolume5 && avgVolume5 > 0) {
+      totalScore = Math.min(100, totalScore + 10);
+      explanation.push(`💥 VOLATILITY SQUEEZE EXPANSION (+10 points): Squeeze Bandwidth (${bb.bandwidth}%) breaking out with volume explosion!`);
     }
 
     // STRICT STRATEGY-REGIME GATE:

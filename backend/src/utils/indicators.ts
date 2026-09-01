@@ -240,4 +240,28 @@ export class Indicators {
     const adxList = this.calculateADX(highs, lows, closes, period);
     return adxList.length > 0 ? parseFloat(adxList[adxList.length - 1].toFixed(2)) : 15.0;
   }
+
+  /**
+   * Calculates Bollinger Bands and Bandwidth %
+   */
+  public static calculateBollingerBands(
+    prices: number[],
+    period: number = 20,
+    stdDevMultiplier: number = 2.0
+  ): { upper: number; middle: number; lower: number; bandwidth: number } | null {
+    if (prices.length < period) return null;
+    const slice = prices.slice(-period);
+    const middle = slice.reduce((a, b) => a + b, 0) / period;
+    const variance = slice.reduce((sum, p) => sum + Math.pow(p - middle, 2), 0) / period;
+    const stdDev = Math.sqrt(variance);
+    const upper = middle + stdDevMultiplier * stdDev;
+    const lower = middle - stdDevMultiplier * stdDev;
+    const bandwidth = middle > 0 ? ((upper - lower) / middle) * 100 : 0;
+    return {
+      upper: parseFloat(upper.toFixed(2)),
+      middle: parseFloat(middle.toFixed(2)),
+      lower: parseFloat(lower.toFixed(2)),
+      bandwidth: parseFloat(bandwidth.toFixed(2))
+    };
+  }
 }

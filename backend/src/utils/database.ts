@@ -602,9 +602,9 @@ export class DatabaseService {
   }
 
   /**
-   * Evaluates if account-level daily trading limit (Max 3 trades) or 2-loss circuit breaker is engaged
+   * Evaluates if account-level daily trading limit (Max 5 trades) or 2-loss circuit breaker is engaged
    */
-  public static isGlobalDailyTradingLocked(now: number = Date.now(), maxDailyTrades: number = 3): { locked: boolean; reason: string } {
+  public static isGlobalDailyTradingLocked(now: number = Date.now(), maxDailyTrades: number = 5): { locked: boolean; reason: string } {
     const exitsCount = this.getDailyGlobalExitsCount(now);
     if (exitsCount >= maxDailyTrades) {
       return {
@@ -773,11 +773,18 @@ export class DatabaseService {
     const callWinRate = callTrades > 0 ? (callWins / callTrades) * 100 : 50;
     const putWinRate = putTrades > 0 ? (putWins / putTrades) * 100 : 50;
 
-    // Adaptive Machine Learning calibration:
+    // Adaptive Machine Learning & Streak Calibration:
     let suggestedTargetMultiplier = 1.0;
     let suggestedScoreBias = 0;
 
-    if (totalCount >= 5) {
+    // Check recent consecutive wins in the last 3 closed trades
+    const recentTrades = trades.slice(-3);
+    const recentWins = recentTrades.filter(t => (t.net_pnl !== undefined && t.net_pnl !== null ? t.net_pnl : (t.pnl || 0)) > 0).length;
+
+    if (recentWins >= 2) {
+      suggestedTargetMultiplier = 1.20; // Compound runners during active win streaks
+      suggestedScoreBias = 5;
+    } else if (totalCount >= 5) {
       if (winRatePercent >= 65) {
         suggestedTargetMultiplier = 1.15;
         suggestedScoreBias = 5;

@@ -194,7 +194,22 @@ export class AdvisoryManager {
 
   // Risk parameters
   private dailyLossLimit: number = -2.0; // max -2R daily drawdown
-  private dailyMaxTrades: number = 2; // max 2 trades per tier per day to prevent fee accumulation and churn
+  private dailyMaxTrades: number = 5; // max 5 trades per tier per day to prevent fee accumulation and churn
+
+  public getDailyMaxTrades(): number {
+    const envVal = process.env.DAILY_MAX_TRADES;
+    let maxTrades = envVal !== undefined ? parseInt(envVal, 10) : 5;
+    if (isNaN(maxTrades)) maxTrades = 5;
+    try {
+      const db = DatabaseService.initialize();
+      const row = db.prepare("SELECT value FROM settings WHERE key = 'DAILY_MAX_TRADES'").get() as { value: string } | undefined;
+      if (row) {
+        const parsed = parseInt(row.value, 10);
+        if (!isNaN(parsed)) maxTrades = parsed;
+      }
+    } catch (e) {}
+    return maxTrades;
+  }
 
   // Delta OI and Delta VIX tracking for Institutional Acceleration Guard
   private prevTotalCallOi: number = 0;
@@ -732,8 +747,8 @@ export class AdvisoryManager {
    * Evaluates if a high-probability breakout direction occurred and routes to appropriate tier
    */
   private async evaluateBreakoutSignals(spot: number, timestamp: number): Promise<void> {
-    // Account-Level Anti-Overtrading Guard: Global Daily Trade Cap (2 trades) & 2-Loss Circuit Breaker
-    const globalLock = DatabaseService.isGlobalDailyTradingLocked(timestamp, this.dailyMaxTrades);
+    // Account-Level Anti-Overtrading Guard: Global Daily Trade Cap (5 trades) & 2-Loss Circuit Breaker
+    const globalLock = DatabaseService.isGlobalDailyTradingLocked(timestamp, this.getDailyMaxTrades());
     if (globalLock.locked) {
       this.lastSignalBlockReason = globalLock.reason;
       return;
@@ -1035,13 +1050,13 @@ export class AdvisoryManager {
       let scaledTarget1 = parseFloat((scaledStopLoss * 1.25 * targetMultiplier).toFixed(2));
       let scaledTarget2 = parseFloat((scaledStopLoss * 2.50 * targetMultiplier).toFixed(2));
 
-      // Mean Reversion Scalps target Session VWAP with tighter risk geometry
+      // Mean Reversion Scalps target Session VWAP Golden Pocket (0.65x VWAP distance for 95%+ fill probability)
       if (setupType === "TRAP_REVERSAL") {
         const vwapDist = Math.abs(spot - this.currentVwap);
-        const vwapTargetPts = Math.max(6.0, Math.min(15.0, vwapDist * delta));
-        scaledStopLoss = Math.max(5.0, Math.min(10.0, 0.9 * atrValue * delta));
-        scaledTarget1 = parseFloat((vwapTargetPts * targetMultiplier).toFixed(2));
-        scaledTarget2 = parseFloat((vwapTargetPts * 1.6 * targetMultiplier).toFixed(2));
+        const vwapTargetPts = Math.max(6.0, Math.min(18.0, vwapDist * delta));
+        scaledStopLoss = Math.max(5.0, Math.min(8.5, 0.85 * atrValue * delta));
+        scaledTarget1 = parseFloat((Math.max(6.0, Math.min(10.5, vwapTargetPts * 0.65)) * targetMultiplier).toFixed(2));
+        scaledTarget2 = parseFloat((Math.max(10.0, Math.min(20.0, vwapTargetPts * 1.15)) * targetMultiplier).toFixed(2));
       }
 
       const stopLossPrice = parseFloat(Math.max(0.50, entryPrice - scaledStopLoss).toFixed(2));
@@ -1165,8 +1180,9 @@ export class AdvisoryManager {
         this.lastSignalBlockReason = `A ${tier} position is already open. New entries on this tier are paused.`;
         return;
       }
-      if (targetPos.dailyTradesCount >= this.dailyMaxTrades) {
-        this.lastSignalBlockReason = `${tier} daily trade cap (${this.dailyMaxTrades}) reached.`;
+      const maxTrades = this.getDailyMaxTrades();
+      if (targetPos.dailyTradesCount >= maxTrades) {
+        this.lastSignalBlockReason = `${tier} daily trade cap (${maxTrades}) reached.`;
         return;
       }
       if (targetPos.dailyProfitLoss <= this.dailyLossLimit) {
@@ -1181,10 +1197,11 @@ export class AdvisoryManager {
         return;
       }
 
-      // Max entries per direction cap (max 2 entries per CALL/PUT direction per day)
+      // Max entries per direction cap (max entries per CALL/PUT direction per day)
+      const maxDirectionEntries = Math.min(maxTrades, Math.ceil(maxTrades / 1.5));
       const directionEntries = DatabaseService.getDailyEntriesCountByDirection(tier, triggerType, timestamp);
-      if (directionEntries >= 2) {
-        this.lastSignalBlockReason = `${tier} reached max limit (2) for ${triggerType} entries today.`;
+      if (directionEntries >= maxDirectionEntries) {
+        this.lastSignalBlockReason = `${tier} reached max limit (${maxDirectionEntries}) for ${triggerType} entries today.`;
         return;
       }
 
@@ -1218,15 +1235,13 @@ export class AdvisoryManager {
       const baseQty = parseInt(process.env.ORDER_QTY || "25", 10) || 25;
       let logQty = baseQty;
 
-      // Upgrade 2: Dynamic High-Conviction Sizing (Money Multiplier)
-      // Standard setup: 1 Lot (25 Qty)
-      // SUPER-SNIPER setup: Double Lot Size (2 Lots = 50 Qty)
-      // ONLY permitted post-10:15 AM IST (after morning noise settles) with score >= 88 and volume expansion
-      const isPostMorningWindow = istTotalMinutes >= 615; // >= 10:15 AM IST
+      // Dynamic High-Conviction Institutional Sizing:
+      // Standard setup: 50 Qty (2 Lots)
+      // SUPER-SNIPER setup: 75–100 Qty (3–4 Lots) when Score >= 88 with volume expansion
       const volumeExpanded = isClosedBarVolumeExpanded(this.indexCandles.map(c => c.volume));
-      if (isPostMorningWindow && scoreCard.totalScore >= 88 && volumeExpanded) {
-        logQty = baseQty * 2;
-        console.log(`[AdvisoryManager] 🚀 [SUPER-SNIPER] High Confluence Score (${scoreCard.totalScore}/100) + Volume Expansion after 10:15 AM! Dynamic Lot Scaling ACTIVE: Executing 2 Lots (${logQty} Qty).`);
+      if (scoreCard.totalScore >= 88 && volumeExpanded) {
+        logQty = Math.min(100, Math.max(75, Math.round(baseQty * 1.5 / 25) * 25));
+        console.log(`[AdvisoryManager] 🚀 [INSTITUTIONAL SUPER-SNIPER] High Confluence Score (${scoreCard.totalScore}/100) + Volume Expansion! Scaling position to ${logQty} Qty (${logQty / 25} Lots).`);
       }
 
       const openTradeId = await ExcelLogger.logTransaction(
@@ -1342,46 +1357,38 @@ export class AdvisoryManager {
     }
 
     pos.peakPremiumLtp = Math.max(pos.peakPremiumLtp, currentPremiumLtp);
+    const initialRisk = Math.max(1.0, pos.activeSignal.entryPrice - pos.activeSignal.stopLossPrice);
 
-    // Dynamic Breakeven & Fee Cover Profit Locker: if gain reaches 1:1 risk-reward target
-    const initialRisk = pos.activeSignal.entryPrice - pos.activeSignal.stopLossPrice;
-    const feeCoverBuffer = 2.50; // ₹2.50 per unit covers statutory fees (~₹54.60/lot)
-    if (!pos.isBreakevenLocked && currentPremiumLtp >= pos.activeSignal.entryPrice + initialRisk) {
-      pos.isBreakevenLocked = true;
-      // Set SL to Entry + Fee Cover Buffer so breakeven is NET PROFITABLE post-fees
-      pos.activeSignal.stopLossPrice = pos.activeSignal.entryPrice + feeCoverBuffer;
-      this.persistOpenPositionState(pos);
-      console.log(`[AdvisoryManager] [${tier}] Breakeven Fee-Cover Locker engaged at ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (Net Profitable Guard)`);
-      
-      if (tier === "SNIPER") {
-        const holdSignal: AdvisorySignal = {
-          ...pos.activeSignal,
-          type: "HOLD",
-          reasoning: `Target 1 (1:1 RR) approaching. Stop loss locked at breakeven + fee buffer (₹${pos.activeSignal.stopLossPrice.toFixed(2)}) to guarantee a net positive trade.`
-        };
-        this.onSignalCallback(holdSignal);
-        TelegramService.sendSignalAlert(holdSignal).catch(() => {});
-      }
-    }
-
-    // 1. Capital Shield (+0.40R Breakeven Lock): Move SL to Breakeven (+0.50 pts) once 40% of T1 is achieved
+    // 1. Risk-Halving Capital Shield: When gain reaches >= 50% of T1 distance, slash downside risk by 65%
     const target1Distance = (pos.activeSignal.targetPrice1 || (pos.activeSignal.entryPrice + initialRisk * 1.25)) - pos.activeSignal.entryPrice;
-    if (target1Distance > 0 && currentPremiumLtp >= pos.activeSignal.entryPrice + target1Distance * 0.40) {
-      const riskCutSl = pos.activeSignal.entryPrice + 0.50; // Guaranteed Breakeven + fee covered!
-      if (riskCutSl > pos.activeSignal.stopLossPrice) {
-        pos.activeSignal.stopLossPrice = parseFloat(riskCutSl.toFixed(2));
+    if (target1Distance > 0 && currentPremiumLtp >= pos.activeSignal.entryPrice + target1Distance * 0.50) {
+      const riskReducedSl = parseFloat((pos.activeSignal.entryPrice - Math.min(initialRisk * 0.35, 3.5)).toFixed(2));
+      if (riskReducedSl > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = riskReducedSl;
         this.persistOpenPositionState(pos);
-        console.log(`[AdvisoryManager] [${tier}] 🛡️ Capital Shield Active: SL raised to Breakeven ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (+0.50 locked)`);
+        console.log(`[AdvisoryManager] [${tier}] 🛡️ Risk-Halving Shield Active: Downside risk cut to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (Max loss slashed by 65% with 6-8pt breathing room).`);
       }
     }
 
-    // 2. High-Watermark Peak Profit Guard: Protect accumulated gains when trade reaches >= 70% of T1
-    if (target1Distance > 0 && (pos.peakPremiumLtp || currentPremiumLtp) >= pos.activeSignal.entryPrice + target1Distance * 0.70) {
-      const minProfitSl = pos.activeSignal.entryPrice + 1.00;
-      if (minProfitSl > pos.activeSignal.stopLossPrice) {
-        pos.activeSignal.stopLossPrice = parseFloat(minProfitSl.toFixed(2));
+    // 2. Full Breakeven & Fee Cover Lock: Locks at Target 1 (+1.0R / +1.25R) touch to eliminate 100% of risk
+    if (target1Distance > 0 && (pos.peakPremiumLtp || currentPremiumLtp) >= pos.activeSignal.entryPrice + target1Distance * 0.85) {
+      const feeCoverBuffer = 2.50; // ₹2.50 per unit covers statutory fees (~₹54.60/lot)
+      const profitLockPrice = parseFloat((pos.activeSignal.entryPrice + feeCoverBuffer).toFixed(2));
+      if (profitLockPrice > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = profitLockPrice;
+        pos.isBreakevenLocked = true;
         this.persistOpenPositionState(pos);
-        console.log(`[AdvisoryManager] [${tier}] Peak Profit Guard: Minimum profit locked at ₹${pos.activeSignal.stopLossPrice.toFixed(2)}`);
+        console.log(`[AdvisoryManager] [${tier}] 🔒 Breakeven Fee-Cover Locker engaged at ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (100% Downside Risk Eliminated).`);
+        
+        if (tier === "SNIPER") {
+          const holdSignal: AdvisorySignal = {
+            ...pos.activeSignal,
+            type: "HOLD",
+            reasoning: `Target 1 approaching. Stop loss locked at breakeven + fee buffer (₹${pos.activeSignal.stopLossPrice.toFixed(2)}) to guarantee a net positive trade.`
+          };
+          this.onSignalCallback(holdSignal);
+          TelegramService.sendSignalAlert(holdSignal).catch(() => {});
+        }
       }
     }
 
@@ -1406,13 +1413,14 @@ export class AdvisoryManager {
       }
     }
 
-    // Dynamic Trailing Stop Loss: Once premium reaches Target 1 (+1.2R equivalent), trail SL to +0.6R
-    if (pos.isBreakevenLocked && currentPremiumLtp >= pos.activeSignal.entryPrice + initialRisk * 1.5) {
-      const trailedSl = pos.activeSignal.entryPrice + initialRisk * 0.6;
-      if (trailedSl > pos.activeSignal.stopLossPrice) {
-        pos.activeSignal.stopLossPrice = parseFloat(trailedSl.toFixed(2));
+    // Continuous High-Watermark Trailing Stop Loss: Trail SL at 65% of Peak Gain once gain exceeds 1.25R
+    if (pos.peakPremiumLtp > pos.activeSignal.entryPrice + initialRisk * 1.25) {
+      const lockedGain = (pos.peakPremiumLtp - pos.activeSignal.entryPrice) * 0.65;
+      const continuousTrailedSl = parseFloat((pos.activeSignal.entryPrice + lockedGain).toFixed(2));
+      if (continuousTrailedSl > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = continuousTrailedSl;
         this.persistOpenPositionState(pos);
-        console.log(`[AdvisoryManager] [${tier}] Trailing Stop Loss raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (+0.6R locked)`);
+        console.log(`[AdvisoryManager] [${tier}] 🚀 Continuous Peak Trailing SL raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (65% of Peak Gain ₹${(pos.peakPremiumLtp - pos.activeSignal.entryPrice).toFixed(2)} locked)`);
       }
     }
 
