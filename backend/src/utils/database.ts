@@ -32,6 +32,27 @@ export interface PaperTradeRecord {
   is_target1_locked?: number;
   parent_trade_id?: number;
   entry_price?: number;
+  is_runner?: number;
+  partial_exit_price?: number;
+  initial_stop_loss?: number;
+}
+
+export interface PostExitRecord {
+  id?: number;
+  trade_id: number;
+  symbol: string;
+  exit_price: number;
+  exit_timestamp: number;
+  exit_datetime: string;
+  tier?: string;
+  mfe_price?: number;
+  mfe_percent?: number;
+  price_5m?: number;
+  price_15m?: number;
+  price_30m?: number;
+  price_60m?: number;
+  eod_price?: number;
+  updated_at?: number;
 }
 
 export interface MarketQuoteRecord {
@@ -214,6 +235,36 @@ export class DatabaseService {
     try {
       this.db.exec("ALTER TABLE paper_trades ADD COLUMN entry_price REAL");
     } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN is_runner INTEGER DEFAULT 0");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN partial_exit_price REAL");
+    } catch {}
+    try {
+      this.db.exec("ALTER TABLE paper_trades ADD COLUMN initial_stop_loss REAL");
+    } catch {}
+
+    // Post-Exit Analytics Table
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS post_exit_analytics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_id INTEGER,
+        symbol TEXT NOT NULL,
+        exit_price REAL NOT NULL,
+        exit_timestamp INTEGER NOT NULL,
+        exit_datetime TEXT NOT NULL,
+        tier TEXT,
+        mfe_price REAL,
+        mfe_percent REAL,
+        price_5m REAL,
+        price_15m REAL,
+        price_30m REAL,
+        price_60m REAL,
+        eod_price REAL,
+        updated_at INTEGER
+      )
+    `);
 
     try {
       this.db.exec(`
@@ -367,6 +418,9 @@ export class DatabaseService {
     peakPremium?: number;
     parentTradeId?: number;
     entryPrice?: number;
+    isRunner?: boolean;
+    partialExitPrice?: number;
+    initialStopLoss?: number;
   }): number {
     const db = this.initialize();
     const timestamp = Date.now();
@@ -393,8 +447,8 @@ export class DatabaseService {
         stop_loss, target1, target2, invested_capital, pnl, pnl_percent,
         fees, net_pnl, reasoning, market_regime, confluence_score, status,
         entry_spot, peak_premium, is_breakeven_locked, is_target1_locked,
-        parent_trade_id, entry_price
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parent_trade_id, entry_price, is_runner, partial_exit_price, initial_stop_loss
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
@@ -423,7 +477,10 @@ export class DatabaseService {
       0,
       0,
       data.parentTradeId ?? null,
-      data.entryPrice ?? null
+      data.entryPrice ?? null,
+      data.isRunner ? 1 : 0,
+      data.partialExitPrice ?? null,
+      data.initialStopLoss ?? (data.stopLoss ?? null)
     );
     return Number(result.lastInsertRowid);
   }
@@ -435,6 +492,8 @@ export class DatabaseService {
       peakPremium?: number;
       isBreakevenLocked?: boolean;
       isTarget1Locked?: boolean;
+      isRunner?: boolean;
+      partialExitPrice?: number;
     }
   ): void {
     const db = this.initialize();
@@ -443,13 +502,17 @@ export class DatabaseService {
       SET stop_loss = COALESCE(?, stop_loss),
           peak_premium = COALESCE(?, peak_premium),
           is_breakeven_locked = COALESCE(?, is_breakeven_locked),
-          is_target1_locked = COALESCE(?, is_target1_locked)
+          is_target1_locked = COALESCE(?, is_target1_locked),
+          is_runner = COALESCE(?, is_runner),
+          partial_exit_price = COALESCE(?, partial_exit_price)
       WHERE id = ? AND status = 'OPEN'
     `).run(
       data.stopLoss ?? null,
       data.peakPremium ?? null,
       data.isBreakevenLocked === undefined ? null : (data.isBreakevenLocked ? 1 : 0),
       data.isTarget1Locked === undefined ? null : (data.isTarget1Locked ? 1 : 0),
+      data.isRunner === undefined ? null : (data.isRunner ? 1 : 0),
+      data.partialExitPrice ?? null,
       id
     );
   }
@@ -1069,5 +1132,92 @@ export class DatabaseService {
     const placeholders = ids.map(() => "?").join(",");
     const res = db.prepare(`DELETE FROM paper_trades WHERE id IN (${placeholders})`).run(...ids);
     return res.changes;
+  }
+
+  /**
+   * Record initial exit event into post_exit_analytics
+   */
+  public static recordPostExit(record: Omit<PostExitRecord, "id">): number {
+    const db = this.initialize();
+    const stmt = db.prepare(`
+      INSERT INTO post_exit_analytics (
+        trade_id, symbol, exit_price, exit_timestamp, exit_datetime,
+        tier, mfe_price, mfe_percent, price_5m, price_15m, price_30m, price_60m, eod_price, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const res = stmt.run(
+      record.trade_id,
+      record.symbol,
+      record.exit_price,
+      record.exit_timestamp,
+      record.exit_datetime,
+      record.tier ?? "SNIPER",
+      record.mfe_price ?? record.exit_price,
+      record.mfe_percent ?? 0,
+      record.price_5m ?? null,
+      record.price_15m ?? null,
+      record.price_30m ?? null,
+      record.price_60m ?? null,
+      record.eod_price ?? null,
+      record.updated_at ?? Date.now()
+    );
+    return Number(res.lastInsertRowid);
+  }
+
+  /**
+   * Update post-exit metrics (MFE, multi-interval high/LTP)
+   */
+  public static updatePostExitAnalytics(
+    tradeId: number,
+    data: {
+      mfe_price?: number;
+      mfe_percent?: number;
+      price_5m?: number;
+      price_15m?: number;
+      price_30m?: number;
+      price_60m?: number;
+      eod_price?: number;
+    }
+  ): void {
+    const db = this.initialize();
+    db.prepare(`
+      UPDATE post_exit_analytics
+      SET mfe_price = COALESCE(?, mfe_price),
+          mfe_percent = COALESCE(?, mfe_percent),
+          price_5m = COALESCE(?, price_5m),
+          price_15m = COALESCE(?, price_15m),
+          price_30m = COALESCE(?, price_30m),
+          price_60m = COALESCE(?, price_60m),
+          eod_price = COALESCE(?, eod_price),
+          updated_at = ?
+      WHERE trade_id = ?
+    `).run(
+      data.mfe_price ?? null,
+      data.mfe_percent ?? null,
+      data.price_5m ?? null,
+      data.price_15m ?? null,
+      data.price_30m ?? null,
+      data.price_60m ?? null,
+      data.eod_price ?? null,
+      Date.now(),
+      tradeId
+    );
+  }
+
+  /**
+   * Fetch recent post-exit tracking records
+   */
+  public static getPostExitAnalytics(limit: number = 50): PostExitRecord[] {
+    const db = this.initialize();
+    return db.prepare("SELECT * FROM post_exit_analytics ORDER BY id DESC LIMIT ?").all(limit) as PostExitRecord[];
+  }
+
+  /**
+   * Fetch a single post-exit record by trade ID
+   */
+  public static getPostExitRecordByTradeId(tradeId: number): PostExitRecord | null {
+    const db = this.initialize();
+    const row = db.prepare("SELECT * FROM post_exit_analytics WHERE trade_id = ?").get(tradeId) as PostExitRecord | undefined;
+    return row || null;
   }
 }

@@ -13,6 +13,7 @@ import {
 } from "../utils/niftyOptionsSetup";
 import { GeminiRiskOfficer } from "./geminiRiskOfficer";
 import { GiftNiftyService, GiftNiftyData } from "./giftNiftyService";
+import { PostExitTracker } from "../utils/postExitTracker";
 
 export interface AdvisorySignal {
   type: "CALL_BUY" | "PUT_BUY" | "HOLD" | "EXIT_PROFIT" | "EXIT_STOP_LOSS" | "THETA_EXIT" | "SQUARE_OFF";
@@ -741,6 +742,11 @@ export class AdvisoryManager {
         }
       }
     }
+
+    // 6. Update Post-Exit Intelligence Tracker for closed positions
+    if (tick.ltp > 0) {
+      PostExitTracker.onPriceTick(tick.symbol, tick.ltp, Date.now());
+    }
   }
 
   /**
@@ -1372,121 +1378,34 @@ export class AdvisoryManager {
     }
 
     pos.peakPremiumLtp = Math.max(pos.peakPremiumLtp, currentPremiumLtp);
-    const initialRisk = Math.max(1.0, pos.activeSignal.entryPrice - pos.activeSignal.stopLossPrice);
+    const initialRisk = Math.max(1.0, pos.activeSignal.entryPrice - (pos.activeSignal.stopLossPrice || (pos.activeSignal.entryPrice - 8)));
 
-    // 1. Risk-Halving Capital Shield: When gain reaches >= 50% of T1 distance, slash downside risk by 65%
-    const target1Distance = (pos.activeSignal.targetPrice1 || (pos.activeSignal.entryPrice + initialRisk * 1.25)) - pos.activeSignal.entryPrice;
-    if (target1Distance > 0 && currentPremiumLtp >= pos.activeSignal.entryPrice + target1Distance * 0.50) {
-      const riskReducedSl = parseFloat((pos.activeSignal.entryPrice - Math.min(initialRisk * 0.35, 3.5)).toFixed(2));
-      if (riskReducedSl > pos.activeSignal.stopLossPrice) {
-        pos.activeSignal.stopLossPrice = riskReducedSl;
-        this.persistOpenPositionState(pos);
-        console.log(`[AdvisoryManager] [${tier}] 🛡️ Risk-Halving Shield Active: Downside risk cut to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (Max loss slashed by 65% with 6-8pt breathing room).`);
-      }
-    }
+    // Calculate Dynamic ATR-based Breathing Cushion for Stop Loss Trailing
+    const highsList = this.indexCandles.map(c => c.high);
+    const lowsList = this.indexCandles.map(c => c.low);
+    const closePrices = this.indexCandles.map(c => c.close);
+    const atrList = Indicators.calculateATR(highsList, lowsList, closePrices, 14);
+    const atrValue = atrList.length > 0 ? atrList[atrList.length - 1] : 12;
+    const deltaEst = 0.55;
+    // Hard breathing cushion: Never let a trailing SL sit closer than 8.0 - 15.0 pts below peak
+    const minBreathingRoom = Math.max(8.0, Math.min(15.0, 1.2 * atrValue * deltaEst));
 
-    // 2. Full Breakeven & Fee Cover Lock: Locks at Target 1 (+1.0R / +1.25R) touch to eliminate 100% of risk
-    if (target1Distance > 0 && (pos.peakPremiumLtp || currentPremiumLtp) >= pos.activeSignal.entryPrice + target1Distance * 0.85) {
-      const feeCoverBuffer = 2.50; // ₹2.50 per unit covers statutory fees (~₹54.60/lot)
-      const profitLockPrice = parseFloat((pos.activeSignal.entryPrice + feeCoverBuffer).toFixed(2));
-      if (profitLockPrice > pos.activeSignal.stopLossPrice) {
-        pos.activeSignal.stopLossPrice = profitLockPrice;
-        pos.isBreakevenLocked = true;
-        this.persistOpenPositionState(pos);
-        console.log(`[AdvisoryManager] [${tier}] 🔒 Breakeven Fee-Cover Locker engaged at ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (100% Downside Risk Eliminated).`);
-        
-        if (tier === "SNIPER") {
-          const holdSignal: AdvisorySignal = {
-            ...pos.activeSignal,
-            type: "HOLD",
-            reasoning: `Target 1 approaching. Stop loss locked at breakeven + fee buffer (₹${pos.activeSignal.stopLossPrice.toFixed(2)}) to guarantee a net positive trade.`
-          };
-          this.onSignalCallback(holdSignal);
-          TelegramService.sendSignalAlert(holdSignal).catch(() => {});
-        }
-      }
-    }
-
-    // 2b. Spot VWAP Cross Auto-Profit Step: For Mean Reversions, lock +0.75R profit as soon as Spot crosses VWAP
-    if (pos.activeSignal.reasoning?.includes("MEAN REVERSION") && this.currentVwap > 0) {
-      const isCallReclaimingVwap = pos.activeSignal.type === "CALL_BUY" && spot >= this.currentVwap;
-      const isPutReclaimingVwap = pos.activeSignal.type === "PUT_BUY" && spot <= this.currentVwap;
-      if (isCallReclaimingVwap || isPutReclaimingVwap) {
-        const vwapCrossSl = parseFloat((pos.activeSignal.entryPrice + initialRisk * 0.75).toFixed(2));
-        if (vwapCrossSl > pos.activeSignal.stopLossPrice && currentPremiumLtp > vwapCrossSl) {
-          pos.activeSignal.stopLossPrice = vwapCrossSl;
-          pos.isBreakevenLocked = true;
-          this.persistOpenPositionState(pos);
-          console.log(`[AdvisoryManager] [${tier}] 🎯 Spot crossed Session VWAP (${this.currentVwap.toFixed(1)})! Mean Reversion target secured, SL trailed to +0.75R (₹${pos.activeSignal.stopLossPrice.toFixed(2)}).`);
-        }
-      }
-    }
-
-    // 3. Underlying Structural Invalidation Exit: Exit if Spot breaks Session VWAP support/resistance
-    const isVwapPullbackOrBreakout = pos.activeSignal.reasoning?.includes("VWAP PULLBACK") || pos.activeSignal.reasoning?.includes("ORB");
-    if (isVwapPullbackOrBreakout) {
-      if (pos.activeSignal.type === "CALL_BUY" && spot < this.currentVwap - 6 && this.currentVwap > 0) {
-        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Session VWAP support (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
-        return;
-      } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.currentVwap + 6 && this.currentVwap > 0) {
-        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Session VWAP resistance (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
-        return;
-      }
-    } else if (pos.activeSignal.reasoning?.includes("MEAN REVERSION")) {
-      // For Mean Reversion, invalidation occurs if price breaks past the swing extreme
-      if (pos.activeSignal.type === "CALL_BUY" && spot < this.dayLow - 5) {
-        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Day Low (${this.dayLow.toFixed(1)}). Mean reversion invalidated.`, timestamp, currentPremiumLtp);
-        return;
-      } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.dayHigh + 5) {
-        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Day High (${this.dayHigh.toFixed(1)}). Mean reversion invalidated.`, timestamp, currentPremiumLtp);
-        return;
-      }
-    }
-
-    // Continuous High-Watermark Trailing Stop Loss: Trail SL at 65% of Peak Gain once gain exceeds 1.25R
-    if (pos.peakPremiumLtp > pos.activeSignal.entryPrice + initialRisk * 1.25) {
-      const lockedGain = (pos.peakPremiumLtp - pos.activeSignal.entryPrice) * 0.65;
-      const continuousTrailedSl = parseFloat((pos.activeSignal.entryPrice + lockedGain).toFixed(2));
-      if (continuousTrailedSl > pos.activeSignal.stopLossPrice) {
-        pos.activeSignal.stopLossPrice = continuousTrailedSl;
-        this.persistOpenPositionState(pos);
-        console.log(`[AdvisoryManager] [${tier}] 🚀 Continuous Peak Trailing SL raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (65% of Peak Gain ₹${(pos.peakPremiumLtp - pos.activeSignal.entryPrice).toFixed(2)} locked)`);
-      }
-    }
-
-    // Theta Exit check: position open too long in sideways chop.
-    // Tier-dependent timeout: high-conviction SNIPER trades get more room to develop.
-    // Skip when entrySpot is unknown (restored from DB after restart) to avoid a false chop exit.
-    // Adaptive rule: Do NOT exit if spot is moving in the intended direction (spotMovementGain > 0).
-    const thetaTimeoutMs = tier === "SNIPER" ? 25 * 60 * 1000
-                         : tier === "BALANCED" ? 20 * 60 * 1000
-                         : 18 * 60 * 1000;
-    if (elapsed > thetaTimeoutMs && pos.entrySpot > 0) {
-      const percentageChange = Math.abs(spotMovementGain / spot) * 100;
-      if (percentageChange < 0.15 && spotMovementGain <= 0) {
-        const timeoutMins = Math.round(thetaTimeoutMs / 60000);
-        this.triggerTierExit(tier, "THETA_EXIT", `Option premium decay warning. Sideways chop > ${timeoutMins} minutes without directional progress.`, timestamp, currentPremiumLtp);
-        return;
-      }
-    }
-
-    // Hard Stop Loss check
-    if (currentPremiumLtp <= pos.activeSignal.stopLossPrice) {
-      this.triggerTierExit(tier, "EXIT_STOP_LOSS", "Stop loss threshold crossed.", timestamp, currentPremiumLtp);
-      return;
-    }
-
-    // Full Profit Target 2 check
-    if (pos.activeSignal.targetPrice2 && currentPremiumLtp >= pos.activeSignal.targetPrice2) {
-      this.triggerTierExit(tier, "EXIT_PROFIT", "Target 2 achieved. Full profit booked.", timestamp, currentPremiumLtp);
-      return;
-    }
-    
-    // Target 1 Trail Step-up & Multi-Lot Partial Profit Booking (50% Lot Exit)
+    // =========================================================================
+    // 1. TARGET 1 HIT (+1.25R / +1.5R): MULTI-LOT 50% PARTIAL BOOKING + RUNNER ACTIVATION
+    // =========================================================================
     if (pos.activeSignal.targetPrice1 && currentPremiumLtp >= pos.activeSignal.targetPrice1 && !pos.isTarget1Locked) {
       pos.isTarget1Locked = true;
-      const profitLockPrice = pos.activeSignal.entryPrice + 2.50;
-      pos.activeSignal.stopLossPrice = parseFloat(profitLockPrice.toFixed(2));
+      pos.isBreakevenLocked = true;
+
+      // Move Runner SL to Cost / Breakeven + fee buffer (ensure buffer >= Entry Price)
+      const feeBuffer = 1.00;
+      const profitLockPrice = parseFloat((pos.activeSignal.entryPrice + feeBuffer).toFixed(2));
+      const maxSafeSl = parseFloat((pos.peakPremiumLtp - minBreathingRoom).toFixed(2));
+      const newSl = Math.min(profitLockPrice, maxSafeSl > pos.activeSignal.entryPrice ? maxSafeSl : profitLockPrice);
+      
+      if (newSl > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = newSl;
+      }
       this.persistOpenPositionState(pos);
 
       // Perform Partial Profit Booking on 50% lot if position is multi-lot (>25 qty)
@@ -1508,7 +1427,7 @@ export class AdvisoryManager {
               pos.activeSignal?.strikePrice || "",
               partialQty,
               currentPremiumLtp,
-              `[${tier} TIER] Target 1 (+1.25R) Hit! Partial profit booked on 50% lot (${partialQty} qty). Remaining ${remainingQty} qty runner active with SL locked at breakeven.`,
+              `[${tier} TIER] Target 1 (+1.25R) Hit! 50% partial profit booked (${partialQty} qty @ ₹${currentPremiumLtp.toFixed(2)}). Remaining ${remainingQty} qty runner active with SL locked at breakeven.`,
               {
                 tier,
                 pnl: currentPremiumLtp - entryPx,
@@ -1519,25 +1438,129 @@ export class AdvisoryManager {
               }
             ).catch(() => {});
 
-            db.prepare("UPDATE paper_trades SET qty = ? WHERE id = ?").run(remainingQty, pos.openTradeId);
-            console.log(`[AdvisoryManager] [${tier}] Multi-Lot Partial Profit Booked: ${partialQty} qty @ ₹${currentPremiumLtp.toFixed(2)} (Net PnL: ₹${netPnl.toFixed(2)}). Remaining ${remainingQty} qty runner active.`);
+            db.prepare("UPDATE paper_trades SET qty = ?, is_runner = 1, partial_exit_price = ? WHERE id = ?").run(remainingQty, currentPremiumLtp, pos.openTradeId);
+            console.log(`[AdvisoryManager] [${tier}] 🎯 Multi-Lot Partial Profit Booked: ${partialQty} qty @ ₹${currentPremiumLtp.toFixed(2)} (Net PnL: ₹${netPnl.toFixed(2)}). Remaining ${remainingQty} qty Trend Runner active!`);
           }
         } catch (e) {
           console.error(`[AdvisoryManager] Error performing partial profit booking:`, e);
         }
       }
 
-      console.log(`[AdvisoryManager] [${tier}] Target 1 crossed! Trailing stop stepped up to ₹${profitLockPrice.toFixed(2)}`);
+      console.log(`[AdvisoryManager] [${tier}] Target 1 crossed! Trailing stop stepped up to ₹${pos.activeSignal.stopLossPrice.toFixed(2)}`);
       
       if (tier === "SNIPER") {
         const targetLockSignal: AdvisorySignal = {
           ...pos.activeSignal,
           type: "HOLD",
-          reasoning: `Target 1 (+1.25R) achieved! 50% partial profit booked. Trailing stop locked at breakeven (₹${profitLockPrice.toFixed(2)}) for remaining 50% runner.`
+          reasoning: `Target 1 (+1.25R) achieved at ₹${currentPremiumLtp.toFixed(2)}! 50% partial profit booked. Trailing stop locked at breakeven (₹${pos.activeSignal.stopLossPrice.toFixed(2)}) for remaining Trend Runner.`
         };
         this.onSignalCallback(targetLockSignal);
         TelegramService.sendSignalAlert(targetLockSignal).catch(() => {});
       }
+    }
+
+    // =========================================================================
+    // 2. FULL TAKE-PROFIT TARGET 2 EXIT (+2.50R / Multi-Bagger Climax)
+    // =========================================================================
+    if (pos.activeSignal.targetPrice2 && currentPremiumLtp >= pos.activeSignal.targetPrice2) {
+      this.triggerTierExit(tier, "EXIT_PROFIT", "Target 2 achieved. Full profit booked.", timestamp, currentPremiumLtp);
+      return;
+    }
+
+    // =========================================================================
+    // 3. CONTINUOUS TREND RUNNER HIGH-WATERMARK TRAILING (With Minimum Breathing Room)
+    // =========================================================================
+    if (pos.isTarget1Locked || pos.peakPremiumLtp > pos.activeSignal.entryPrice + initialRisk * 1.5) {
+      const lockedGain = (pos.peakPremiumLtp - pos.activeSignal.entryPrice) * 0.50; // Lock 50% of peak expansion
+      const rawTrailedSl = parseFloat((pos.activeSignal.entryPrice + lockedGain).toFixed(2));
+      // Enforce breathing cushion: Trailing SL must NEVER choke closer than minBreathingRoom below peak
+      const maxSafeSl = parseFloat((pos.peakPremiumLtp - minBreathingRoom).toFixed(2));
+      const dynamicTrailedSl = Math.min(rawTrailedSl, maxSafeSl);
+
+      if (dynamicTrailedSl > pos.activeSignal.stopLossPrice && dynamicTrailedSl >= pos.activeSignal.entryPrice) {
+        pos.activeSignal.stopLossPrice = dynamicTrailedSl;
+        this.persistOpenPositionState(pos);
+        console.log(`[AdvisoryManager] [${tier}] 🚀 Runner Trailing SL raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (Peak: ₹${pos.peakPremiumLtp.toFixed(2)}, Buffer: ₹${(pos.peakPremiumLtp - pos.activeSignal.stopLossPrice).toFixed(2)})`);
+      }
+    }
+
+    // =========================================================================
+    // 4. PRE-TARGET-1 RISK-HALVING SHIELD (When gain reaches >= 60% of T1 distance)
+    // =========================================================================
+    const target1Distance = (pos.activeSignal.targetPrice1 || (pos.activeSignal.entryPrice + initialRisk * 1.25)) - pos.activeSignal.entryPrice;
+    if (!pos.isTarget1Locked && target1Distance > 0 && currentPremiumLtp >= pos.activeSignal.entryPrice + target1Distance * 0.60) {
+      const riskReducedSl = parseFloat((pos.activeSignal.entryPrice - Math.min(initialRisk * 0.45, 4.0)).toFixed(2));
+      const maxSafeSl = parseFloat((pos.peakPremiumLtp - minBreathingRoom).toFixed(2));
+      const finalSl = Math.min(riskReducedSl, maxSafeSl);
+      if (finalSl > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = finalSl;
+        this.persistOpenPositionState(pos);
+        console.log(`[AdvisoryManager] [${tier}] 🛡️ Risk-Halving Shield Active: Downside risk cut to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} with ₹${minBreathingRoom.toFixed(1)} breathing room.`);
+      }
+    }
+
+    // =========================================================================
+    // 5. MEAN REVERSION VWAP RECLAIM (Move SL to Cost only if breathing room exists)
+    // =========================================================================
+    if (!pos.isBreakevenLocked && pos.activeSignal.reasoning?.includes("MEAN REVERSION") && this.currentVwap > 0) {
+      const isCallReclaimingVwap = pos.activeSignal.type === "CALL_BUY" && spot >= this.currentVwap;
+      const isPutReclaimingVwap = pos.activeSignal.type === "PUT_BUY" && spot <= this.currentVwap;
+      if (isCallReclaimingVwap || isPutReclaimingVwap) {
+        if (currentPremiumLtp >= pos.activeSignal.entryPrice + minBreathingRoom) {
+          const vwapCostSl = parseFloat((pos.activeSignal.entryPrice + 1.00).toFixed(2));
+          if (vwapCostSl > pos.activeSignal.stopLossPrice) {
+            pos.activeSignal.stopLossPrice = vwapCostSl;
+            pos.isBreakevenLocked = true;
+            this.persistOpenPositionState(pos);
+            console.log(`[AdvisoryManager] [${tier}] 🎯 Spot crossed Session VWAP (${this.currentVwap.toFixed(1)})! Mean Reversion target secured, SL trailed to Cost (₹${pos.activeSignal.stopLossPrice.toFixed(2)}).`);
+          }
+        }
+      }
+    }
+
+    // =========================================================================
+    // 6. UNDERLYING STRUCTURAL SPOT INVALIDATION (Wider 10-point Structural Thresholds)
+    // =========================================================================
+    const isVwapPullbackOrBreakout = pos.activeSignal.reasoning?.includes("VWAP PULLBACK") || pos.activeSignal.reasoning?.includes("ORB");
+    if (isVwapPullbackOrBreakout) {
+      if (pos.activeSignal.type === "CALL_BUY" && spot < this.currentVwap - 10 && this.currentVwap > 0) {
+        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Session VWAP support (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
+        return;
+      } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.currentVwap + 10 && this.currentVwap > 0) {
+        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Session VWAP resistance (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
+        return;
+      }
+    } else if (pos.activeSignal.reasoning?.includes("MEAN REVERSION")) {
+      if (pos.activeSignal.type === "CALL_BUY" && spot < this.dayLow - 10) {
+        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Day Low (${this.dayLow.toFixed(1)}). Mean reversion invalidated.`, timestamp, currentPremiumLtp);
+        return;
+      } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.dayHigh + 10) {
+        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Day High (${this.dayHigh.toFixed(1)}). Mean reversion invalidated.`, timestamp, currentPremiumLtp);
+        return;
+      }
+    }
+
+    // =========================================================================
+    // 7. THETA TIMEOUT EXIT (Consolidation without directional progress)
+    // =========================================================================
+    const thetaTimeoutMs = tier === "SNIPER" ? 25 * 60 * 1000
+                         : tier === "BALANCED" ? 20 * 60 * 1000
+                         : 18 * 60 * 1000;
+    if (elapsed > thetaTimeoutMs && pos.entrySpot > 0) {
+      const percentageChange = Math.abs(spotMovementGain / spot) * 100;
+      if (percentageChange < 0.15 && spotMovementGain <= 0) {
+        const timeoutMins = Math.round(thetaTimeoutMs / 60000);
+        this.triggerTierExit(tier, "THETA_EXIT", `Option premium decay warning. Sideways chop > ${timeoutMins} minutes without directional progress.`, timestamp, currentPremiumLtp);
+        return;
+      }
+    }
+
+    // =========================================================================
+    // 8. HARD STOP LOSS CHECK (Only after target checks & breathing room have been evaluated)
+    // =========================================================================
+    if (currentPremiumLtp <= pos.activeSignal.stopLossPrice) {
+      this.triggerTierExit(tier, "EXIT_STOP_LOSS", "Stop loss threshold crossed.", timestamp, currentPremiumLtp);
+      return;
     }
   }
 
@@ -1552,31 +1575,27 @@ export class AdvisoryManager {
     const exit = exitPrice || entry;
     const pnl = entry > 0 ? (exit - entry) : 0;
 
-    // Unsubscribe option contract from broker WebSocket stream upon exit
-    if (optionSymbol) {
-      console.log(`[AdvisoryManager] [${tier}] Unsubscribing WebSocket from closed option contract: ${optionSymbol}`);
-      this.broker.unsubscribeTicks([optionSymbol]);
-    }
-
     const initialRisk = Math.max(1.0, entry - (pos.activeSignal.stopLossPrice || 0));
     const ratio = pnl / initialRisk;
 
     if (pnl < 0) {
       pos.dailyLossesCount++;
       pos.dailyProfitLoss += ratio;
-      pos.stoppedCooldownUntil = timestamp + 15 * 60 * 1000;
+      pos.stoppedCooldownUntil = timestamp + 10 * 60 * 1000; // 10 min cooldown on loss
       console.log(`[Risk Engine] [${tier}] Loss exit (${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
     } else {
       // Profitable exit (including Trailing Stop Profit Lock & Take-Profit targets)
       pos.dailyLossesCount = 0; // Reset consecutive loss counter on profit!
       pos.dailyProfitLoss += ratio;
-      const cooldownMs = type === "THETA_EXIT" ? 30 * 60 * 1000 : 5 * 60 * 1000;
+      // Smart Cooldown: Only 2 minutes cooldown on profitable/breakeven exits to allow continuation re-entry
+      const cooldownMs = type === "THETA_EXIT" ? 20 * 60 * 1000 : 2 * 60 * 1000;
       pos.stoppedCooldownUntil = timestamp + cooldownMs;
-      console.log(`[Risk Engine] [${tier}] Profitable exit (+${ratio.toFixed(2)}R). Consecutive loss counter reset. Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
+      console.log(`[Risk Engine] [${tier}] Profitable/Breakeven exit (+${ratio.toFixed(2)}R). Consecutive loss counter reset. Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
     }
+
     // Retrieve the actual entry qty from the open SQLite record (critical for dynamic lot sizing)
     let openTradeId: number | undefined = pos.openTradeId ?? undefined;
-    let qty = parseInt(process.env.ORDER_QTY || "25", 10) || 25; // fallback default
+    let qty = parseInt(process.env.ORDER_QTY || "50", 10) || 50; // fallback default
     if (!openTradeId) {
       const openBuys = DatabaseService.getOpenBuyTrades(tier);
       if (openBuys.length > 0) {
@@ -1597,6 +1616,10 @@ export class AdvisoryManager {
     const netPnl = grossPnl - fees;
     if (openTradeId) {
       DatabaseService.markPaperTradeClosed(openTradeId, { pnl: grossPnl, fees, netPnl });
+      // Register with Post-Exit Intelligence Tracker
+      if (optionSymbol && exit > 0) {
+        PostExitTracker.registerExit(openTradeId, optionSymbol, exit, tier, timestamp);
+      }
     }
 
     // Auto Execution SELL exit only for SNIPER Tier
