@@ -739,6 +739,9 @@ export class AdvisoryManager {
 
         if (matchesExact || matchesSuffix || matchesStrike) {
           p.liveOptionLtp = tick.ltp;
+          if (this.indexSpotPrice > 0) {
+            this.monitorTierRiskState(t, this.indexSpotPrice, timestamp);
+          }
         }
       }
     }
@@ -1722,7 +1725,8 @@ export class AdvisoryManager {
       stopLoss: pos.activeSignal.stopLossPrice,
       peakPremium: pos.peakPremiumLtp,
       isBreakevenLocked: pos.isBreakevenLocked,
-      isTarget1Locked: pos.isTarget1Locked
+      isTarget1Locked: pos.isTarget1Locked,
+      isRunner: pos.isTarget1Locked
     });
   }
 

@@ -1,6 +1,6 @@
 # Nifty 50 Algorithmic Trading Desktop Terminal: Component & Process Architecture
 
-An enterprise-grade, single-user algorithmic trading terminal for Nifty 50 Index Options (NSE FnO). Engineered with quantitative options physics, 8-factor confluence scoring, real-time live WebSocket tick streaming, sub-second Telegram push alerts, and direct-to-cloud Google Drive accounting.
+An enterprise-grade, single-user algorithmic trading terminal for Nifty 50 Index Options (NSE FnO). Engineered with quantitative options physics, 10-factor confluence scoring, real-time live WebSocket tick streaming, sub-second Telegram push alerts, dynamic ATR breathing cushion, 50% partial profit booking + trend runner architecture, and direct-to-cloud Google Drive accounting.
 
 ---
 
@@ -8,29 +8,30 @@ An enterprise-grade, single-user algorithmic trading terminal for Nifty 50 Index
 
 ### Black-Scholes Greeks Risk Models
 The analytical engine computes options Greeks in real-time to filter strikes and manage structural risks:
-*   **Delta ($\Delta$):** Measures price sensitivity relative to a 1-point move in Nifty spot. The system filters for At-The-Money (ATM) contracts with Delta between $0.48 \text{ and } 0.55$.
-*   **Gamma ($\Gamma$):** Monitors acceleration on Weekly Expiry Days (Thursdays).
-*   **Theta ($\Theta$):** Models intraday time decay (~2.5%/hr). Exits positions if spot moves $< 0.15\%$ for longer than **12 minutes**.
-*   **Vega & Implied Volatility ($IV$):** Restricts long options during high IV percentiles to prevent IV crush.
+*   **Delta ($\Delta$):** Measures price sensitivity relative to a 1-point move in Nifty spot. The system filters for At-The-Money (ATM) and Near-ITM contracts with Delta between $0.46 \text{ and } 0.65$.
+*   **Gamma ($\Gamma$):** Monitors acceleration on Weekly Expiry Days.
+*   **Theta ($\Theta$):** Models intraday time decay (~2.5%/hr). Exits positions if spot consolidates without progress.
+*   **Vega & Implied Volatility ($IV$):** Restricts long options during extreme IV percentiles to prevent IV crush.
 
-### Volatility Target Geometry (IV Cones)
-Calculates expected daily moves using the formula:
-$$\text{Expected Intraday Range} = \text{Spot Price} \times \frac{IV_{ATM}}{\sqrt{365}}$$
-*   **Target 1 (Conservative Boundary):** Spot $\pm 0.5 \times \text{Expected Intraday Range}$.
-*   **Target 2 (Volatile Boundary):** Spot $\pm 1.0 \times \text{Expected Intraday Range}$.
+### Volatility Target Geometry & Dynamic Trailing Cushion
+Calculates expected moves using Nifty 14-period ATR and Option Delta:
+$$\text{Base SL} = \text{clamp}(6.0, 14.0, 1.2 \times \text{ATR} \times \Delta)$$
+$$\text{Target 1} = \text{Entry} + (\text{Base SL} \times 1.25 \times \text{TargetMultiplier})$$
+$$\text{Target 2} = \text{Entry} + (\text{Base SL} \times 2.50 \times \text{TargetMultiplier})$$
+$$\text{MinBreathingRoom} = \max(8.0, \min(15.0, 1.2 \times \text{ATR} \times \Delta))$$
 
 ---
 
-## 2. 8-Factor Confluence Scoring Matrix (0–100 Points)
+## 2. 10-Factor Confluence Scoring Matrix (0–100 Points)
 
-Every trade setup is evaluated across 8 independent quantitative dimensions before any signal is generated:
+Every trade setup is evaluated across 10 independent quantitative dimensions before any signal is generated:
 
 ```
-[Raw Breakout Trigger (ORB 9:15 - 9:30 AM)]
+[Raw Trigger (ORB / VWAP Pullback / Mean Reversion)]
                    │
                    ▼
 ┌────────────────────────────────────────────────────────┐
-│             8-Factor Confluence Engine                 │
+│            10-Factor Confluence Engine                 │
 │                                                        │
 │ 1. Market Structure (ORB Breakout + CPR Clear) [20 pts]│
 │ 2. VWAP & Volume Acceleration (> 1.3x Avg Vol) [15 pts]│
@@ -39,38 +40,50 @@ Every trade setup is evaluated across 8 independent quantitative dimensions befo
 │ 5. Volatility Optimal Band (12 <= VIX <= 18)   [10 pts]│
 │ 6. Market Regime Alignment (Trend vs Range)    [10 pts]│
 │ 7. Option Premium RSI Momentum (52 < RSI < 78) [10 pts]│
-│ 8. Risk-to-Reward Ratio (RR >= 1.50)           [ 5 pts]│
+│ 8. GIFT Nifty International Sentiment          [ 5 pts]│
+│ 9. Risk-to-Reward Ratio (RR >= 1.50)           [ 5 pts]│
+│ 10. Autonomous Gemini AI Risk Officer Gate     [Audit] │
 └────────────────────────────────────────────────────────┘
                    │
                    ▼
-  Score >= 80 -> [SNIPER TIER] Official Signal Triggered!
+  Score >= 75 -> [SNIPER TIER] Official Signal Triggered!
 ```
 
 *   **False Breakout Trap Filter:** Resets score to **0** if spot re-enters ORB or heavyweight momentum diverges 100%.
 *   **Counter-Trend Penalty:** **-15 points** if moving against 50/200 EMA.
-*   **Lunch Dead Zone (11:30 AM - 1:30 PM):** Hard block on all new trade entries.
+*   **Adaptive Midday Lunch Filter:** Pauses standard setups between 11:45 AM and 1:15 PM unless score is $\ge 88/100$ with volume expansion.
 
 ---
 
-## 3. Real-Time Telegram Alerts Subsystem
+## 3. Position Management & Trend Runner Architecture
+
+1. **50% Partial Booking:** Upon reaching Target 1 (+1.25R), 50% of the lot is booked at market.
+2. **Trend Runner Mode:** Stop Loss on the remaining 50% runner moves to Cost (Entry + ₹1.00) and trails at 50% of peak expansion while respecting the dynamic ATR breathing cushion.
+3. **Smart Cooldown:** 2-minute cooldown on green exits allows high-conviction continuation re-entry.
+4. **Post-Exit Intelligence Tracker:** Measures Maximum Favorable Excursion (MFE) across 120 minutes post-exit.
+
+---
+
+## 4. Real-Time Telegram Alerts Subsystem
 
 All official **SNIPER** trade alerts are delivered to your phone in **< 300ms** via IPv4 HTTPS sockets:
 *   🎯 **Trade Entry**: Action (Call/Put), Strike, Entry Price, Stop Loss, Target 1, Target 2, Risk per Lot, Confluence Score.
-*   🔒 **Breakeven Profit Lock**: Alert when Stop Loss is stepped up to Entry Price at +1R gain (Risk = ₹0.00).
-*   💰 **Target Achieved / Exit**: Alert on Target 1/2 hit, Theta exit, or 3:15 PM mandatory square-off.
+*   💰 **Target 1 Achieved**: Alert on 50% lot booked + Runner activated.
+*   🚀 **Runner Updates**: Real-time high-watermark trailing stop advancements.
+*   🔒 **Target 2 / Exit**: Alert on full target completion, theta timeout, or square-off.
 
 ---
 
-## 4. 100% Direct-to-Cloud Google Drive Accounting
+## 5. Direct-to-Cloud Google Drive Accounting
 
 Local `.csv` files have been completely eliminated. All trade transactions are streamed directly to your Google Drive:
 *   **Dynamic Hierarchy**: Automatically creates `My Drive > Stock Mock > [Year] > [Month] > [Date Tab]`.
-*   **Professional Formatting**: Frozen headers, dark slate theme, auto-filters across columns A–O, and custom column widths.
+*   **Professional Formatting**: Frozen headers, dark slate theme, auto-filters, and custom column widths.
 *   **Indian FnO Statutory Deductions**: Every trade deducts Brokerage (₹40 round-trip), STT (0.125%), Exchange Fee (0.0505%), GST (18%), and Stamp Duty (~₹54.60/lot).
 
 ---
 
-## 5. System Execution Modes
+## 6. System Execution Modes
 
 | Mode | `AUTO_ORDER_EXECUTION` | Behavior |
 | :--- | :---: | :--- |
