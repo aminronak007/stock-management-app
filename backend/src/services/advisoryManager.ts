@@ -765,7 +765,7 @@ export class AdvisoryManager {
     const istH = parseInt(hStr, 10);
     const istM = parseInt(mStr, 10);
     const istTotalMinutes = istH * 60 + istM;
-    const isLunchHour = istTotalMinutes >= 660 && istTotalMinutes < 810;
+    const isLunchHour = istTotalMinutes >= 705 && istTotalMinutes < 795; // 11:45 AM to 1:15 PM IST
 
     // CPR Filter Check: If price opened or is sitting inside CPR, trade with caution
     if (this.cpr && CPR.isPriceInsideCPR(spot, this.cpr)) {
@@ -933,14 +933,14 @@ export class AdvisoryManager {
     const atmStrike = Math.round(spot / strikeInterval) * strikeInterval;
     let selectedStrike = atmStrike;
 
-    // Institutional Strike Selection: Default to High-Delta In-The-Money (ITM) Strike (~0.62–0.68 Delta)
-    // ITM strikes offer intrinsic value protection, minimal percentage Theta decay, and explosive momentum acceleration.
+    // Institutional Strike Selection: Default to High-Delta Deep In-The-Money (ITM) Strike (~0.75–0.85 Delta)
+    // Deep ITM strikes offer massive intrinsic value (>80%), negligible Theta decay, and direct cash point-for-point tracking.
     if (candidate === "CALL_BUY") {
-      selectedStrike = atmStrike - 50; // 1-Strike In-The-Money Call (Delta ~0.65)
+      selectedStrike = atmStrike - 100; // 2-Strike Deep ITM Call (Delta ~0.78 - 0.85)
     } else if (candidate === "PUT_BUY") {
-      selectedStrike = atmStrike + 50; // 1-Strike In-The-Money Put (Delta ~0.65)
+      selectedStrike = atmStrike + 100; // 2-Strike Deep ITM Put (Delta ~0.78 - 0.85)
     }
-    console.log(`[AdvisoryManager] Selected High-Delta ITM Strike ${selectedStrike} (ATM: ${atmStrike}) for maximum momentum capture.`);
+    console.log(`[AdvisoryManager] Selected High-Delta Deep ITM Strike ${selectedStrike} (ATM: ${atmStrike}) for maximum momentum capture.`);
 
     const legFor = (strike: number) => {
       const row = chain.find(item => item.strikePrice === strike);
@@ -1101,11 +1101,16 @@ export class AdvisoryManager {
         return;
       }
 
-      // Midday Lunch Blackout (11:00 AM - 1:30 PM IST): Total pause to prevent midday theta melt
-      if (isLunchHour) {
-        this.lastSignalBlockReason = "Midday lunch consolidation (11:00 AM - 1:30 PM): Option trading strictly paused to prevent Theta decay. Afternoon window opens at 1:30 PM IST.";
+      // Adaptive Midday Lunch Gate (11:45 AM - 1:15 PM IST):
+      // Standard/Moderate setups (Score < 88) are paused to protect against Theta decay.
+      // Exceptional Institutional Setups (Score >= 88 with volume expansion) are ALLOWED.
+      const isVolumeExpanded = isClosedBarVolumeExpanded(this.indexCandles.map(c => c.volume));
+      if (isLunchHour && (scoreCard.totalScore < 88 || !isVolumeExpanded)) {
+        this.lastSignalBlockReason = `Midday lunch lull (11:45 AM - 1:15 PM): Setup score (${scoreCard.totalScore}/100) is below lunch institutional threshold (88/100 with 1.2x volume). Signal paused to protect against Theta decay.`;
         console.log(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
         return;
+      } else if (isLunchHour && scoreCard.totalScore >= 88 && isVolumeExpanded) {
+        console.log(`[AdvisoryManager] 🚀 [LUNCH BREAKOUT EXCEPTION] Super-High Conviction Setup (${scoreCard.totalScore}/100) + Volume Expansion during lunch hours! Allowing execution.`);
       }
 
       // 🤖 Autonomous Institutional AI Pre-Trade Audit (Gemini 3.6 Flash - 100% Free AI Gatekeeper)
@@ -1388,6 +1393,21 @@ export class AdvisoryManager {
           };
           this.onSignalCallback(holdSignal);
           TelegramService.sendSignalAlert(holdSignal).catch(() => {});
+        }
+      }
+    }
+
+    // 2b. Spot VWAP Cross Auto-Profit Step: For Mean Reversions, lock +0.75R profit as soon as Spot crosses VWAP
+    if (pos.activeSignal.reasoning?.includes("MEAN REVERSION") && this.currentVwap > 0) {
+      const isCallReclaimingVwap = pos.activeSignal.type === "CALL_BUY" && spot >= this.currentVwap;
+      const isPutReclaimingVwap = pos.activeSignal.type === "PUT_BUY" && spot <= this.currentVwap;
+      if (isCallReclaimingVwap || isPutReclaimingVwap) {
+        const vwapCrossSl = parseFloat((pos.activeSignal.entryPrice + initialRisk * 0.75).toFixed(2));
+        if (vwapCrossSl > pos.activeSignal.stopLossPrice && currentPremiumLtp > vwapCrossSl) {
+          pos.activeSignal.stopLossPrice = vwapCrossSl;
+          pos.isBreakevenLocked = true;
+          this.persistOpenPositionState(pos);
+          console.log(`[AdvisoryManager] [${tier}] 🎯 Spot crossed Session VWAP (${this.currentVwap.toFixed(1)})! Mean Reversion target secured, SL trailed to +0.75R (₹${pos.activeSignal.stopLossPrice.toFixed(2)}).`);
         }
       }
     }
@@ -1704,7 +1724,7 @@ export class AdvisoryManager {
     const hasOrb = this.orbHigh > 0 && this.orbLow > 0;
     const spot = this.indexSpotPrice;
     this.refreshSessionVwap(timestamp, spot);
-    const isLunchBlock = totalMinutes >= 690 && totalMinutes <= 810;
+    const isLunchBlock = totalMinutes >= 705 && totalMinutes < 795;
     const insideCpr = !!(this.cpr && spot > 0 && CPR.isPriceInsideCPR(spot, this.cpr));
 
     let sessionPhase = "CLOSED";
@@ -1745,10 +1765,10 @@ export class AdvisoryManager {
       (t) => this.tierPositions[t].activeSignal?.type.includes("BUY")
     ) || (dbOpenBuys[0]?.tier as SignalTier | undefined);
 
-    let waitingReason = "Waiting for market data.";
+    let waitingReason = "";
     if (openBuyTier) {
       waitingReason = isLunchBlock
-        ? `Open ${openBuyTier} trade is still managed through lunch (stop-loss, targets, theta). New entries stay blocked until 1:30 PM.`
+        ? `Open ${openBuyTier} trade is still managed through lunch (stop-loss, targets, theta).`
         : `Active ${openBuyTier} signal is live. Targets are on the signal card.`;
     } else if (!hasOrb) {
       waitingReason = "Opening range is not captured yet. ORB is built from 9:15–9:30 AM IST.";
@@ -1757,7 +1777,7 @@ export class AdvisoryManager {
     } else if (sessionPhase === "ORB") {
       waitingReason = `Building opening range. CALL above ${this.orbHigh.toFixed(2)}, PUT below ${this.orbLow.toFixed(2)}.`;
     } else if (sessionPhase === "LUNCH") {
-      waitingReason = "Lunch dead zone (11:30 AM–1:30 PM IST). New entries are blocked. Open trades would still exit on stop-loss, targets, or theta.";
+      waitingReason = "Midday lunch window (11:45 AM–1:15 PM IST). High-conviction institutional setups (Score >= 88) active; moderate chop paused.";
     } else if (sessionPhase === "SQUARE_OFF" || sessionPhase === "CLOSED") {
       waitingReason = "New entries are closed for the day (3:15 PM square-off).";
     } else if (insideCpr) {
