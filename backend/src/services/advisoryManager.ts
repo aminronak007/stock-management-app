@@ -1236,16 +1236,26 @@ export class AdvisoryManager {
         ? (triggerType === "CALL_BUY" ? atmChain.call.symbol : atmChain.put.symbol)
         : this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
 
-      // Persist the BUY to SQLite first. RAM is only a cache of that row.
-      const baseQty = parseInt(process.env.ORDER_QTY || "25", 10) || 25;
-      let logQty = baseQty;
+      // Kelly-Criterion Dynamic Capital Compounding Ladder:
+      // Baseline Qty: 50 Qty (2 Lots)
+      // For every +₹5,000 in cumulative net profit, scale +1 Lot (25 Qty) up to max 150 Qty (6 Lots)
+      const baseQty = parseInt(process.env.ORDER_QTY || "50", 10) || 50;
+      let compoundedQty = baseQty;
+      try {
+        const cumulativeProfit = DatabaseService.getCumulativeNetProfit();
+        if (cumulativeProfit >= 5000) {
+          const extraLots = Math.min(4, Math.floor(cumulativeProfit / 5000));
+          compoundedQty = baseQty + extraLots * 25;
+          console.log(`[AdvisoryManager] 📈 [CAPITAL COMPOUNDING LADDER] Cumulative Net Profit: ₹${cumulativeProfit.toFixed(2)}. Compounding Base Sizing to ${compoundedQty} Qty (${compoundedQty / 25} Lots).`);
+        }
+      } catch {}
 
+      let logQty = compoundedQty;
       // Dynamic High-Conviction Institutional Sizing:
-      // Standard setup: 50 Qty (2 Lots)
-      // SUPER-SNIPER setup: 75–100 Qty (3–4 Lots) when Score >= 88 with volume expansion
+      // SUPER-SNIPER setup: 75–150 Qty (3–6 Lots) when Score >= 88 with volume expansion
       const volumeExpanded = isClosedBarVolumeExpanded(this.indexCandles.map(c => c.volume));
       if (scoreCard.totalScore >= 88 && volumeExpanded) {
-        logQty = Math.min(100, Math.max(75, Math.round(baseQty * 1.5 / 25) * 25));
+        logQty = Math.min(150, Math.max(75, Math.round(compoundedQty * 1.5 / 25) * 25));
         console.log(`[AdvisoryManager] 🚀 [INSTITUTIONAL SUPER-SNIPER] High Confluence Score (${scoreCard.totalScore}/100) + Volume Expansion! Scaling position to ${logQty} Qty (${logQty / 25} Lots).`);
       }
 
@@ -1548,25 +1558,21 @@ export class AdvisoryManager {
       this.broker.unsubscribeTicks([optionSymbol]);
     }
 
-    if (type === "EXIT_STOP_LOSS") {
+    const initialRisk = Math.max(1.0, entry - (pos.activeSignal.stopLossPrice || 0));
+    const ratio = pnl / initialRisk;
+
+    if (pnl < 0) {
       pos.dailyLossesCount++;
-      pos.dailyProfitLoss -= 1.0;
+      pos.dailyProfitLoss += ratio;
       pos.stoppedCooldownUntil = timestamp + 15 * 60 * 1000;
-      console.log(`[Risk Engine] [${tier}] Stop-loss hit. Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
-    } else if (type === "EXIT_PROFIT") {
-      const initialRisk = entry - (pos.activeSignal.stopLossPrice || 0);
-      const ratio = initialRisk > 0 ? (pnl / initialRisk) : 1.5;
+      console.log(`[Risk Engine] [${tier}] Loss exit (${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
+    } else {
+      // Profitable exit (including Trailing Stop Profit Lock & Take-Profit targets)
+      pos.dailyLossesCount = 0; // Reset consecutive loss counter on profit!
       pos.dailyProfitLoss += ratio;
-      pos.stoppedCooldownUntil = timestamp + 5 * 60 * 1000;
-      console.log(`[Risk Engine] [${tier}] Take-profit achieved (+${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
-    } else if (type === "THETA_EXIT" || type === "SQUARE_OFF") {
-      const initialRisk = entry - (pos.activeSignal.stopLossPrice || 0);
-      const ratio = initialRisk > 0 ? (pnl / initialRisk) : 0;
-      pos.dailyProfitLoss += ratio;
-      // 45 minute cooldown after Theta Exit to prevent continuous chop re-entry loop
-      const cooldownMs = type === "THETA_EXIT" ? 45 * 60 * 1000 : 5 * 60 * 1000;
+      const cooldownMs = type === "THETA_EXIT" ? 30 * 60 * 1000 : 5 * 60 * 1000;
       pos.stoppedCooldownUntil = timestamp + cooldownMs;
-      console.log(`[Risk Engine] [${tier}] ${type} triggered (${ratio >= 0 ? '+' : ''}${ratio.toFixed(2)}R). 45-minute chop quarantine active until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}.`);
+      console.log(`[Risk Engine] [${tier}] Profitable exit (+${ratio.toFixed(2)}R). Consecutive loss counter reset. Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
     }
     // Retrieve the actual entry qty from the open SQLite record (critical for dynamic lot sizing)
     let openTradeId: number | undefined = pos.openTradeId ?? undefined;

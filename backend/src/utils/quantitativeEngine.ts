@@ -533,6 +533,54 @@ export class QuantitativeEngine {
       explanation.push("✕ INSTITUTIONAL DIVERGENCE GATE: Both Reliance and HDFC Bank opposing breakout. 100% False Breakout Trap.");
     }
 
+    // 3b. Institutional Heavyweight Weighted Breadth Calculation (>65% Index Weight)
+    const stockWeights: { [symbol: string]: number } = {
+      "NSE:HDFCBANK-EQ": 13.5,
+      "NSE:RELIANCE-EQ": 10.0,
+      "NSE:ICICIBANK-EQ": 8.0,
+      "NSE:INFY-EQ": 5.5,
+      "NSE:TCS-EQ": 4.0,
+      "NSE:LT-EQ": 4.0,
+      "NSE:AXISBANK-EQ": 3.5,
+      "NSE:KOTAKBANK-EQ": 3.0,
+      "NSE:NIFTYBANK-INDEX": 35.0
+    };
+
+    let totalActiveWeight = 0;
+    let alignedWeight = 0;
+    Object.keys(stockWeights).forEach(sym => {
+      const ltp = heavyweightsLtp[sym] || 0;
+      const vwap = heavyweightsVwap[sym] || 0;
+      const weight = stockWeights[sym];
+      if (ltp > 0 && vwap > 0) {
+        totalActiveWeight += weight;
+        if (triggerType === "CALL_BUY" && ltp > vwap) alignedWeight += weight;
+        if (triggerType === "PUT_BUY" && ltp < vwap) alignedWeight += weight;
+      }
+    });
+
+    const weightedBreadthRatio = totalActiveWeight > 0 ? (alignedWeight / totalActiveWeight) : 0.5;
+
+    if (weightedBreadthRatio >= 0.70) {
+      totalScore = Math.min(100, totalScore + 15);
+      explanation.push(`🏛️ INSTITUTIONAL WEIGHTED BREADTH TAILWIND (+15 points): ${(weightedBreadthRatio * 100).toFixed(0)}% of Nifty heavyweight mass strongly aligned with trend!`);
+    } else if (weightedBreadthRatio < 0.30 && setupType !== "TRAP_REVERSAL") {
+      totalScore = 0;
+      isFalseBreakout = true;
+      explanation.push(`✕ INSTITUTIONAL BREADTH GATE: Only ${(weightedBreadthRatio * 100).toFixed(0)}% of heavyweight mass supports the move. 100% False Breakout Trap.`);
+    }
+
+    // 4. India VIX Vega Surge Momentum Booster
+    if (deltaVixPercent !== undefined) {
+      if (triggerType === "PUT_BUY" && deltaVixPercent > 2.0) {
+        totalScore = Math.min(100, totalScore + 10);
+        explanation.push(`⚡ INDIA VIX VEGA SURGE (+10 points): Volatility expanding (+${deltaVixPercent.toFixed(1)}%). Vega supercharges Put premium acceleration!`);
+      } else if (triggerType === "CALL_BUY" && deltaVixPercent <= 0 && vix >= 10 && vix <= 16) {
+        totalScore = Math.min(100, totalScore + 5);
+        explanation.push(`📈 ORDERLY BULL TREND (+5 points): Spot rising with calm VIX (${vix.toFixed(1)}). Institutional accumulation pattern.`);
+      }
+    }
+
     // Global Macro Factor: GIFT Nifty (NSE IFSC) Leading Indicator
     if (giftNiftyDelta !== undefined) {
       if (triggerType === "CALL_BUY") {

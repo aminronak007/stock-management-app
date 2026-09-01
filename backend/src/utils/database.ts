@@ -547,7 +547,7 @@ export class DatabaseService {
       if (!this.isExitType(t.type)) continue;
 
       const pnlVal = t.net_pnl !== undefined && t.net_pnl !== null ? t.net_pnl : (t.pnl || 0);
-      if (pnlVal < 0 || t.type === "EXIT_STOP_LOSS") {
+      if (pnlVal < 0) {
         consecutiveLosses++;
       } else if (pnlVal > 0) {
         break; // Stop counting on first winning trade
@@ -592,10 +592,10 @@ export class DatabaseService {
       if (!this.isExitType(t.type)) continue;
 
       const pnlVal = t.net_pnl !== undefined && t.net_pnl !== null ? t.net_pnl : (t.pnl || 0);
-      if (pnlVal < 0 || t.type === "EXIT_STOP_LOSS") {
+      if (pnlVal < 0) {
         consecutiveLosses++;
       } else if (pnlVal > 0) {
-        break;
+        break; // Stop counting on first winning trade
       }
     }
     return consecutiveLosses;
@@ -622,6 +622,23 @@ export class DatabaseService {
     }
 
     return { locked: false, reason: "" };
+  }
+
+  /**
+   * Returns total cumulative net profit realized across all closed paper trades
+   */
+  public static getCumulativeNetProfit(): number {
+    try {
+      const db = this.initialize();
+      const row = db.prepare(`
+        SELECT COALESCE(SUM(CASE WHEN net_pnl IS NOT NULL THEN net_pnl ELSE pnl END), 0) as totalNet
+        FROM paper_trades
+        WHERE status = 'CLOSED' AND (type LIKE 'EXIT_%' OR type = 'SQUARE_OFF' OR type = 'THETA_EXIT')
+      `).get() as { totalNet: number };
+      return row ? row.totalNet : 0;
+    } catch {
+      return 0;
+    }
   }
 
   public static markPaperTradeClosed(
