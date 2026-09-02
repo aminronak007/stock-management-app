@@ -27,8 +27,8 @@ Check your `backend/.env` settings:
 ```ini
 # Real Market Paper-Trading Mode (Zero Capital Risk)
 AUTO_ORDER_EXECUTION=false
-ORDER_QTY=25
-MIN_SIGNAL_SCORE=80
+ORDER_QTY=50
+MIN_SIGNAL_SCORE=75
 
 # Cloud Ledger (Google Drive > Stock Mock > Year > Month > Date Tab)
 GOOGLE_SHEETS_WEBHOOK_URL=https://script.google.com/macros/s/.../exec
@@ -66,13 +66,14 @@ TELEGRAM_CHAT_ID=7134217382
 
 * **Telegram Push Alerts**: You will receive instant phone notifications when:
   * 🎯 **Entry Triggered**: Strike, Entry Price, Stop Loss, Target 1, Target 2, Confluence Score.
-  * 🔒 **Breakeven Locked**: Stop Loss moves to Entry Price (+1R gain) $\rightarrow$ Risk becomes ₹0.00.
-  * 💰 **Target Achieved / Exit**: Target 1/2 hit, Theta exit (>12m chop), or Stop Loss.
+  * 💰 **Target 1 Achieved (+1.25R)**: 50% lot booked at market, SL moved to breakeven for remaining Trend Runner.
+  * 🚀 **Runner Trailing**: Dynamic ATR cushion updates as the runner participates in macro trend expansions.
+  * 🔒 **Exit Confirmation**: Full Target 2 achieved, Theta exit, or Stop Loss.
 * **3:15 PM Universal Square-Off**: The terminal automatically closes any open paper position before market close.
 
 ---
 
 ## 📊 Step 5: End-of-Day Journal Review (3:35 PM)
 All trades are logged **100% directly to your Google Drive**:
-* Open Google Drive $\rightarrow$ `Stock Mock` $\rightarrow$ `2026` $\rightarrow$ `August` $\rightarrow$ Select today's tab (e.g. `21 Aug`).
-* Review your trades with **custom column widths, auto-filters, gross P&L, statutory taxes & brokerage deductions (~₹54.60/lot), and net realized returns**.
+* Open Google Drive $\rightarrow$ `Stock Mock` $\rightarrow$ `2026` $\rightarrow$ `[Month]` $\rightarrow$ Select today's tab.
+* Review your trades with **gross P&L, statutory taxes & brokerage deductions (~₹54.60/lot), net realized returns, and post-exit MFE analytics**.

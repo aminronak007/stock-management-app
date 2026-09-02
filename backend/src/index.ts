@@ -844,6 +844,16 @@ async function main() {
     }
   });
 
+  app.get("/api/post-exit-analytics", (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit as string, 10) || 50;
+      const records = DatabaseService.getPostExitAnalytics(limit);
+      res.json(records);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   app.post("/api/backtest", async (req, res) => {
     try {
       const { symbol, minScore, slippageMultiplier, fromDate, toDate, useWfo } = req.body;
