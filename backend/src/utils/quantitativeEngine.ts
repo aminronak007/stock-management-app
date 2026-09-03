@@ -533,6 +533,18 @@ export class QuantitativeEngine {
       explanation.push("✕ INSTITUTIONAL DIVERGENCE GATE: Both Reliance and HDFC Bank opposing breakout. 100% False Breakout Trap.");
     }
 
+    // Tsunami Trend Gate: If Bank Nifty is plunging (>0.25% below VWAP) or surging (>0.25% above VWAP),
+    // NEVER allow a counter-trend Mean Reversion trade that attempts to catch a falling/rising knife!
+    if (setupType === "TRAP_REVERSAL") {
+      const bnfPlunging = triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap * 0.9975;
+      const bnfSurging = triggerType === "PUT_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp > bnfVwap * 1.0025;
+      if (bnfPlunging || bnfSurging) {
+        totalScore = 0;
+        isFalseBreakout = true;
+        explanation.push(`✕ TSUNAMI TREND GATE: Bank Nifty in severe one-directional momentum (${bnfPlunging ? 'Plunging below VWAP' : 'Surging above VWAP'}). Counter-trend Mean Reversion strictly prohibited.`);
+      }
+    }
+
     // 3b. Institutional Heavyweight Weighted Breadth Calculation (>65% Index Weight)
     const stockWeights: { [symbol: string]: number } = {
       "NSE:HDFCBANK-EQ": 13.5,
@@ -564,7 +576,7 @@ export class QuantitativeEngine {
     if (weightedBreadthRatio >= 0.70) {
       totalScore = Math.min(100, totalScore + 15);
       explanation.push(`🏛️ INSTITUTIONAL WEIGHTED BREADTH TAILWIND (+15 points): ${(weightedBreadthRatio * 100).toFixed(0)}% of Nifty heavyweight mass strongly aligned with trend!`);
-    } else if (weightedBreadthRatio < 0.30 && setupType !== "TRAP_REVERSAL") {
+    } else if (weightedBreadthRatio < 0.30 && totalActiveWeight >= 40 && setupType !== "TRAP_REVERSAL") {
       totalScore = 0;
       isFalseBreakout = true;
       explanation.push(`✕ INSTITUTIONAL BREADTH GATE: Only ${(weightedBreadthRatio * 100).toFixed(0)}% of heavyweight mass supports the move. 100% False Breakout Trap.`);
@@ -612,33 +624,33 @@ export class QuantitativeEngine {
       explanation.push(`💥 VOLATILITY SQUEEZE EXPANSION (+10 points): Squeeze Bandwidth (${bb.bandwidth}%) breaking out with volume explosion!`);
     }
 
-    // STRICT STRATEGY-REGIME GATE:
-    // Option Buying Breakouts in a RANGE regime or severe chop (ADX < 18) bleed heavily to Theta decay.
-    // In RANGE regimes, ONLY Mean-Reversion / Trap Reversal setups are allowed.
-    if (regime === "RANGE" && setupType === "ORB_BREAKOUT") {
+    // ADAPTIVE RANGE BREAKOUT GATE:
+    // When the market has been consolidating (regime === "RANGE"), an ORB Breakout is valid
+    // if backed by institutional volume expansion (currentVolume >= 1.1 * avgVolume5) or strong Heavyweight breadth (>= 60%).
+    // If volume is dry/weak (< 1.1x avg) and breadth is weak in a RANGE, then it is a low-liquidity fakeout and blocked.
+    const isVolumeSupportedBreakout = currentVolume >= 1.1 * avgVolume5 && avgVolume5 > 0;
+    const isBreadthSupported = weightedBreadthRatio >= 0.60;
+
+    if (regime === "RANGE" && setupType === "ORB_BREAKOUT" && !isVolumeSupportedBreakout && !isBreadthSupported) {
       totalScore = 0;
-      explanation.push("✕ RANGE REGIME GATE: ORB Breakouts are strictly blocked in consolidation (RANGE) to prevent Theta decay. Only Reversals permitted.");
+      explanation.push("✕ LOW-VOLUME RANGE DRIFT GATE: Breakout in consolidation lacks institutional volume expansion (< 1.1x avg) and heavyweight support. Blocked to prevent Theta decay.");
     }
 
-    if (currentAdx < 18 && setupType === "ORB_BREAKOUT") {
+    // Severe Chop Gate: Only block if ADX < 14 AND volume is NOT expanded
+    if (currentAdx < 14 && setupType === "ORB_BREAKOUT" && !isVolumeSupportedBreakout) {
       totalScore = 0;
-      explanation.push(`✕ CHOPPY ADX GATE (ADX=${currentAdx.toFixed(1)} < 18): Breakout option buying strictly prohibited in sideways chop.`);
+      explanation.push(`✕ SEVERE CHOP DETECTED (ADX=${currentAdx.toFixed(1)} < 14 without volume): Breakout signal score reset to zero.`);
     }
 
-    // RANGE Regime Penalty: Only applies to trend breakouts, not to Mean Reversion scalps
+    // RANGE Regime Penalty: Apply mild -10 point penalty if breaking out of RANGE, but allow high-conviction volume breakouts to execute!
     if (regime === "RANGE" && setupType !== "TRAP_REVERSAL") {
-      totalScore = Math.max(0, totalScore - 12);
-      explanation.push("⚠ RANGE REGIME PENALTY (-12 points): Sideways consolidation detected. Theta decay risk high.");
+      totalScore = Math.max(0, totalScore - 10);
+      explanation.push("⚠ RANGE REGIME PENALTY (-10 points): Breaking out of sideways consolidation.");
     }
 
     if (isFalseBreakout && setupType === "ORB_BREAKOUT") {
       totalScore = 0;
       explanation.push("✕ FALSE BREAKOUT DETECTED: Breakout signal score reset to zero.");
-    }
-
-    if (currentAdx < 14 && setupType === "ORB_BREAKOUT") {
-      totalScore = 0;
-      explanation.push(`✕ SEVERE CHOP DETECTED (ADX=${currentAdx.toFixed(1)} < 14): Breakout signal score reset to zero.`);
     }
 
     // Quality labeling

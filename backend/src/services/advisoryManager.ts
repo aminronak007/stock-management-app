@@ -128,6 +128,7 @@ export class AdvisoryManager {
   };
   private sampleActiveTiers: Set<SignalTier> = new Set<SignalTier>();
   private sessionRealizedPnl: number = 0;
+  private failedTrapLevels: { level: number; type: "HIGH" | "LOW"; expiredAt: number }[] = [];
 
   // 3-Tier Independent Position State Machines:
   // 1. SNIPER (Score >= 75%) -> Official Alert & Optional Real Execution
@@ -811,20 +812,27 @@ export class AdvisoryManager {
     const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
     const isTestingDayLow = this.dayLow <= this.orbLow + 2;
 
-    const hasUpperWickRejection = lastClosedCandle && (
-      (lastClosedCandle.high - Math.max(lastClosedCandle.open, lastClosedCandle.close)) >= 0.25 * Math.max(3, lastClosedCandle.high - lastClosedCandle.low) ||
-      lastClosedCandle.close < lastClosedCandle.open
+    const candleRange = lastClosedCandle ? Math.max(4, lastClosedCandle.high - lastClosedCandle.low) : 10;
+    const upperWick = lastClosedCandle ? (lastClosedCandle.high - Math.max(lastClosedCandle.open, lastClosedCandle.close)) : 0;
+    const lowerWick = lastClosedCandle ? (Math.min(lastClosedCandle.open, lastClosedCandle.close) - lastClosedCandle.low) : 0;
+
+    // Genuine Rejection Wick: Lower/Upper shadow must be at least 35% of total candle range and larger than opposite wick
+    const hasUpperWickRejection = lastClosedCandle && upperWick >= 0.35 * candleRange && upperWick > lowerWick;
+    const hasLowerWickRejection = lastClosedCandle && lowerWick >= 0.35 * candleRange && lowerWick > upperWick;
+
+    // Anti-Whipsaw Filter: Check if this specific level recently failed a Trap Reversal
+    const isDayHighQuarantined = this.failedTrapLevels.some(
+      f => f.type === "HIGH" && Math.abs(f.level - this.dayHigh) <= 12 && f.expiredAt > timestamp
     );
-    const hasLowerWickRejection = lastClosedCandle && (
-      (Math.min(lastClosedCandle.open, lastClosedCandle.close) - lastClosedCandle.low) >= 0.25 * Math.max(3, lastClosedCandle.high - lastClosedCandle.low) ||
-      lastClosedCandle.close > lastClosedCandle.open
+    const isDayLowQuarantined = this.failedTrapLevels.some(
+      f => f.type === "LOW" && Math.abs(f.level - this.dayLow) <= 12 && f.expiredAt > timestamp
     );
 
-    if (isTestingDayHigh && (lastClosedCandle?.high || spot) >= this.orbHigh - 3 && hasUpperWickRejection && spot > this.currentVwap + 6) {
+    if (isTestingDayHigh && !isDayHighQuarantined && (lastClosedCandle?.high || spot) >= this.orbHigh - 3 && hasUpperWickRejection && spot > this.currentVwap + 6) {
       candidate = "PUT_BUY";
       setupType = "TRAP_REVERSAL";
       reasoning = `[MEAN REVERSION] Bull Trap at Day High (${this.dayHigh.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
-    } else if (isTestingDayLow && (lastClosedCandle?.low || spot) <= this.orbLow + 3 && hasLowerWickRejection && spot < this.currentVwap - 6) {
+    } else if (isTestingDayLow && !isDayLowQuarantined && (lastClosedCandle?.low || spot) <= this.orbLow + 3 && hasLowerWickRejection && spot < this.currentVwap - 6) {
       candidate = "CALL_BUY";
       setupType = "TRAP_REVERSAL";
       reasoning = `[MEAN REVERSION] Bear Trap at Day Low (${this.dayLow.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
@@ -1584,7 +1592,20 @@ export class AdvisoryManager {
     if (pnl < 0) {
       pos.dailyLossesCount++;
       pos.dailyProfitLoss += ratio;
-      pos.stoppedCooldownUntil = timestamp + 10 * 60 * 1000; // 10 min cooldown on loss
+      pos.stoppedCooldownUntil = timestamp + 25 * 60 * 1000; // 25 min cooldown on loss
+
+      // Quarantine failed trap level for 45 minutes to prevent immediate double-dip
+      if (pos.activeSignal.reasoning?.includes("MEAN REVERSION") || pos.activeSignal.reasoning?.includes("Trap")) {
+        const trapType = pos.activeSignal.type === "CALL_BUY" ? "LOW" : "HIGH";
+        const level = pos.entrySpot || entry;
+        this.failedTrapLevels.push({
+          level,
+          type: trapType,
+          expiredAt: timestamp + 45 * 60 * 1000
+        });
+        console.log(`[Risk Engine] [${tier}] Quarantining failed Trap Reversal level ${level.toFixed(1)} (${trapType}) for 45 minutes.`);
+      }
+
       console.log(`[Risk Engine] [${tier}] Loss exit (${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
     } else {
       // Profitable exit (including Trailing Stop Profit Lock & Take-Profit targets)
