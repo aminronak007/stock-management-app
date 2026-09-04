@@ -806,55 +806,16 @@ export class AdvisoryManager {
     const closedCandles = this.indexCandles.length > 1 ? this.indexCandles.slice(0, -1) : [];
     const lastClosedCandle = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1] : undefined;
 
-    // -------------------------------------------------------------
-    // STRATEGY 1: TRAP REVERSAL / MEAN REVERSION (Priority 1: Fading Range Boundaries)
-    // -------------------------------------------------------------
-    const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
-    const isTestingDayLow = this.dayLow <= this.orbLow + 2;
-
-    const candleRange = lastClosedCandle ? Math.max(4, lastClosedCandle.high - lastClosedCandle.low) : 10;
-    const upperWick = lastClosedCandle ? (lastClosedCandle.high - Math.max(lastClosedCandle.open, lastClosedCandle.close)) : 0;
-    const lowerWick = lastClosedCandle ? (Math.min(lastClosedCandle.open, lastClosedCandle.close) - lastClosedCandle.low) : 0;
-
-    // Genuine Rejection Wick: Lower/Upper shadow must be at least 35% of total candle range and larger than opposite wick
-    const hasUpperWickRejection = lastClosedCandle && upperWick >= 0.35 * candleRange && upperWick > lowerWick;
-    const hasLowerWickRejection = lastClosedCandle && lowerWick >= 0.35 * candleRange && lowerWick > upperWick;
-
-    // Anti-Whipsaw Filter: Check if this specific level recently failed a Trap Reversal
-    const isDayHighQuarantined = this.failedTrapLevels.some(
-      f => f.type === "HIGH" && Math.abs(f.level - this.dayHigh) <= 12 && f.expiredAt > timestamp
-    );
-    const isDayLowQuarantined = this.failedTrapLevels.some(
-      f => f.type === "LOW" && Math.abs(f.level - this.dayLow) <= 12 && f.expiredAt > timestamp
-    );
-
-    if (isTestingDayHigh && !isDayHighQuarantined && (lastClosedCandle?.high || spot) >= this.orbHigh - 3 && hasUpperWickRejection && spot > this.currentVwap + 6) {
-      candidate = "PUT_BUY";
-      setupType = "TRAP_REVERSAL";
-      reasoning = `[MEAN REVERSION] Bull Trap at Day High (${this.dayHigh.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
-    } else if (isTestingDayLow && !isDayLowQuarantined && (lastClosedCandle?.low || spot) <= this.orbLow + 3 && hasLowerWickRejection && spot < this.currentVwap - 6) {
-      candidate = "CALL_BUY";
-      setupType = "TRAP_REVERSAL";
-      reasoning = `[MEAN REVERSION] Bear Trap at Day Low (${this.dayLow.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
-    }
+    // Determine Intraday Trend Direction
+    // If market is trending (e.g. below VWAP with bearish EMAs or above VWAP with bullish EMAs),
+    // we PRIORITIZE TREND-FOLLOWING BREAKOUTS & PULLBACKS and block counter-trend knife catching!
+    const isIntradayBearTrend = !isAboveVwap && (isTrendBearish || spot < this.currentVwap - 10);
+    const isIntradayBullTrend = isAboveVwap && (isTrendBullish || spot > this.currentVwap + 10);
 
     // -------------------------------------------------------------
-    // STRATEGY 2: VWAP & 9/21 EMA PULLBACK (Priority 2: Trend Continuation)
+    // TIER 1 PRIORITY: TREND BREAKOUTS & BREAKDOWNS (High-Yield Momentum)
     // -------------------------------------------------------------
-    else if (spot > this.orbHigh && isAboveVwap && Math.abs(spot - this.currentVwap) <= 15 && (isTrendBullish || spot > this.orbHigh + 10)) {
-      candidate = "CALL_BUY";
-      setupType = "VWAP_PULLBACK";
-      reasoning = `[VWAP PULLBACK] Bullish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation bounce.`;
-    } else if (spot < this.orbLow && !isAboveVwap && Math.abs(spot - this.currentVwap) <= 15 && (isTrendBearish || spot < this.orbLow - 10)) {
-      candidate = "PUT_BUY";
-      setupType = "VWAP_PULLBACK";
-      reasoning = `[VWAP PULLBACK] Bearish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation rejection.`;
-    }
-
-    // -------------------------------------------------------------
-    // STRATEGY 3: ORB BREAKOUT / BREAKDOWN (Priority 3: Range Break)
-    // -------------------------------------------------------------
-    else if (spot > this.orbHigh + buffer && isAboveVwap) {
+    if (spot > this.orbHigh + buffer && isAboveVwap) {
       candidate = "CALL_BUY";
       setupType = "ORB_BREAKOUT";
       reasoning = `Bullish ORB breakout above ${this.orbHigh.toFixed(2)} with session VWAP alignment.`;
@@ -862,6 +823,53 @@ export class AdvisoryManager {
       candidate = "PUT_BUY";
       setupType = "ORB_BREAKOUT";
       reasoning = `Bearish ORB breakdown below ${this.orbLow.toFixed(2)} with session VWAP alignment.`;
+    }
+
+    // -------------------------------------------------------------
+    // TIER 2 PRIORITY: VWAP & 9/21 EMA PULLBACK (Trend Continuation)
+    // -------------------------------------------------------------
+    else if (spot > this.orbHigh && isAboveVwap && Math.abs(spot - this.currentVwap) <= 18 && (isTrendBullish || spot > this.orbHigh + 8)) {
+      candidate = "CALL_BUY";
+      setupType = "VWAP_PULLBACK";
+      reasoning = `[VWAP PULLBACK] Bullish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation bounce.`;
+    } else if (spot < this.orbLow && !isAboveVwap && Math.abs(spot - this.currentVwap) <= 18 && (isTrendBearish || spot < this.orbLow - 8)) {
+      candidate = "PUT_BUY";
+      setupType = "VWAP_PULLBACK";
+      reasoning = `[VWAP PULLBACK] Bearish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation rejection.`;
+    }
+
+    // -------------------------------------------------------------
+    // TIER 3 PRIORITY: TRAP REVERSAL / MEAN REVERSION (Fading Range Boundaries ONLY when NOT in a strong trend)
+    // -------------------------------------------------------------
+    else if (!isIntradayBearTrend && !isIntradayBullTrend) {
+      const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
+      const isTestingDayLow = this.dayLow <= this.orbLow + 2;
+
+      const candleRange = lastClosedCandle ? Math.max(4, lastClosedCandle.high - lastClosedCandle.low) : 10;
+      const upperWick = lastClosedCandle ? (lastClosedCandle.high - Math.max(lastClosedCandle.open, lastClosedCandle.close)) : 0;
+      const lowerWick = lastClosedCandle ? (Math.min(lastClosedCandle.open, lastClosedCandle.close) - lastClosedCandle.low) : 0;
+
+      // Genuine Rejection Wick: Lower/Upper shadow must be at least 35% of total candle range and larger than opposite wick
+      const hasUpperWickRejection = lastClosedCandle && upperWick >= 0.35 * candleRange && upperWick > lowerWick;
+      const hasLowerWickRejection = lastClosedCandle && lowerWick >= 0.35 * candleRange && lowerWick > upperWick;
+
+      // Anti-Whipsaw Filter: Check if this specific level recently failed a Trap Reversal
+      const isDayHighQuarantined = this.failedTrapLevels.some(
+        f => f.type === "HIGH" && Math.abs(f.level - this.dayHigh) <= 12 && f.expiredAt > timestamp
+      );
+      const isDayLowQuarantined = this.failedTrapLevels.some(
+        f => f.type === "LOW" && Math.abs(f.level - this.dayLow) <= 12 && f.expiredAt > timestamp
+      );
+
+      if (isTestingDayHigh && !isDayHighQuarantined && (lastClosedCandle?.high || spot) >= this.orbHigh - 3 && hasUpperWickRejection && spot > this.currentVwap + 6) {
+        candidate = "PUT_BUY";
+        setupType = "TRAP_REVERSAL";
+        reasoning = `[MEAN REVERSION] Bull Trap at Day High (${this.dayHigh.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
+      } else if (isTestingDayLow && !isDayLowQuarantined && (lastClosedCandle?.low || spot) <= this.orbLow + 3 && hasLowerWickRejection && spot < this.currentVwap - 6) {
+        candidate = "CALL_BUY";
+        setupType = "TRAP_REVERSAL";
+        reasoning = `[MEAN REVERSION] Bear Trap at Day Low (${this.dayLow.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
+      }
     }
 
     if (!candidate) {
@@ -1062,18 +1070,19 @@ export class AdvisoryManager {
       const rsiList = Indicators.calculateRSI(closePrices, 14);
       const marketRsi = rsiList.length > 0 ? rsiList[rsiList.length - 1] : 50;
 
-      // Realistic Risk & Scalp Geometry:
-      let scaledStopLoss = Math.max(6.0, Math.min(14.0, 1.2 * atrValue * delta));
-      let scaledTarget1 = parseFloat((scaledStopLoss * 1.25 * targetMultiplier).toFixed(2));
-      let scaledTarget2 = parseFloat((scaledStopLoss * 2.50 * targetMultiplier).toFixed(2));
+      // Highly Profitable Trend Scalp & Target Geometry:
+      let scaledStopLoss = Math.max(7.0, Math.min(12.0, 1.0 * atrValue * delta));
+      // Trend Breakouts & Pullbacks aim for high-yielding targets (+1.50R T1, +3.00R T2)
+      let scaledTarget1 = parseFloat((scaledStopLoss * 1.50 * targetMultiplier).toFixed(2));
+      let scaledTarget2 = parseFloat((scaledStopLoss * 3.00 * targetMultiplier).toFixed(2));
 
-      // Mean Reversion Scalps target Session VWAP Golden Pocket (0.65x VWAP distance for 95%+ fill probability)
+      // Mean Reversion Scalps (fading range boundaries only in non-trending markets)
       if (setupType === "TRAP_REVERSAL") {
         const vwapDist = Math.abs(spot - this.currentVwap);
-        const vwapTargetPts = Math.max(6.0, Math.min(18.0, vwapDist * delta));
-        scaledStopLoss = Math.max(5.0, Math.min(8.5, 0.85 * atrValue * delta));
-        scaledTarget1 = parseFloat((Math.max(6.0, Math.min(10.5, vwapTargetPts * 0.65)) * targetMultiplier).toFixed(2));
-        scaledTarget2 = parseFloat((Math.max(10.0, Math.min(20.0, vwapTargetPts * 1.15)) * targetMultiplier).toFixed(2));
+        const vwapTargetPts = Math.max(8.0, Math.min(22.0, vwapDist * delta));
+        scaledStopLoss = Math.max(5.0, Math.min(8.0, 0.80 * atrValue * delta));
+        scaledTarget1 = parseFloat((Math.max(8.0, Math.min(14.0, vwapTargetPts * 0.70)) * targetMultiplier).toFixed(2));
+        scaledTarget2 = parseFloat((Math.max(14.0, Math.min(25.0, vwapTargetPts * 1.20)) * targetMultiplier).toFixed(2));
       }
 
       const stopLossPrice = parseFloat(Math.max(0.50, entryPrice - scaledStopLoss).toFixed(2));
