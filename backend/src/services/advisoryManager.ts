@@ -828,78 +828,82 @@ export class AdvisoryManager {
     const isIntradayBearTrend = !isAboveVwap && (isTrendBearish || spot < this.currentVwap - 10);
     const isIntradayBullTrend = isAboveVwap && (isTrendBullish || spot > this.currentVwap + 10);
 
-    // -------------------------------------------------------------
-    // TIER 1 PRIORITY: TREND BREAKOUTS & OPENING GAP / DRIVE MOMENTUM (High-Yield Momentum)
-    // -------------------------------------------------------------
+    // =============================================================
+    // STRATEGY ROUTING ENGINE: PULLBACK-FIRST INSTITUTIONAL ARCHITECTURE
+    // =============================================================
     const isOpeningDriveWindow = istH === 9 && istM >= 16 && istM < 30;
     const dynamicGapThreshold = Math.max(20.0, this.dailyAtr * 0.25);
     const hasDynamicOpeningGap = Math.abs(this.openingGapPoints) >= dynamicGapThreshold;
-    const currentSetupType: StrategySetup = isOpeningDriveWindow ? "OPENING_DRIVE" : "ORB_BREAKOUT";
-
-    // Avoid buying breakouts directly trapped inside Central Pivot Range (CPR)
-    const isCallCprTrapped = this.cpr && (spot >= this.cpr.bottomRange - 5 && spot <= this.cpr.topRange + 5);
-    const isPutCprTrapped = this.cpr && (spot >= this.cpr.bottomRange - 5 && spot <= this.cpr.topRange + 5);
-
-    if (spot > this.orbHigh + buffer && isAboveVwap && !isCallCprTrapped) {
-      candidate = "CALL_BUY";
-      setupType = currentSetupType;
-      const gapPrefix = hasDynamicOpeningGap && this.openingGapPoints > 0 ? ` (+${this.openingGapPoints.toFixed(1)} pt Dynamic Gap Continuation)` : "";
-      reasoning = isOpeningDriveWindow
-        ? `🔥 [OPENING DRIVE MOMENTUM] High-velocity Bullish Impulse above ${this.orbHigh.toFixed(2)}${gapPrefix} with VWAP & Heavyweight alignment.`
-        : `Bullish ORB breakout above ${this.orbHigh.toFixed(2)} with session VWAP alignment.`;
-    } else if (spot < this.orbLow - buffer && !isAboveVwap && !isPutCprTrapped) {
-      candidate = "PUT_BUY";
-      setupType = currentSetupType;
-      const gapPrefix = hasDynamicOpeningGap && this.openingGapPoints < 0 ? ` (${this.openingGapPoints.toFixed(1)} pt Dynamic Gap Continuation)` : "";
-      reasoning = isOpeningDriveWindow
-        ? `🔥 [OPENING DRIVE MOMENTUM] High-velocity Bearish Impulse below ${this.orbLow.toFixed(2)}${gapPrefix} with VWAP & Heavyweight alignment.`
-        : `Bearish ORB breakdown below ${this.orbLow.toFixed(2)} with session VWAP alignment.`;
-    }
 
     // -------------------------------------------------------------
-    // TIER 2 PRIORITY: VWAP & 9/21 EMA PULLBACK (Trend Continuation)
+    // PRIORITY 1: 09:15-09:30 AM OPENING DRIVE & GAP IMPULSE (First 15 mins only)
     // -------------------------------------------------------------
-    else if (spot > this.orbHigh && isAboveVwap && Math.abs(spot - this.currentVwap) <= 18 && (isTrendBullish || spot > this.orbHigh + 8)) {
-      candidate = "CALL_BUY";
-      setupType = "VWAP_PULLBACK";
-      reasoning = `[VWAP PULLBACK] Bullish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation bounce.`;
-    } else if (spot < this.orbLow && !isAboveVwap && Math.abs(spot - this.currentVwap) <= 18 && (isTrendBearish || spot < this.orbLow - 8)) {
-      candidate = "PUT_BUY";
-      setupType = "VWAP_PULLBACK";
-      reasoning = `[VWAP PULLBACK] Bearish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation rejection.`;
-    }
+    if (isOpeningDriveWindow) {
+      const isCallCprTrapped = this.cpr && (spot >= this.cpr.bottomRange - 5 && spot <= this.cpr.topRange + 5);
+      const isPutCprTrapped = this.cpr && (spot >= this.cpr.bottomRange - 5 && spot <= this.cpr.topRange + 5);
 
-    // -------------------------------------------------------------
-    // TIER 3 PRIORITY: TRAP REVERSAL / MEAN REVERSION (Fading Range Boundaries ONLY when NOT in a strong trend)
-    // -------------------------------------------------------------
-    else if (!isIntradayBearTrend && !isIntradayBullTrend) {
-      const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
-      const isTestingDayLow = this.dayLow <= this.orbLow + 2;
-
-      const candleRange = lastClosedCandle ? Math.max(4, lastClosedCandle.high - lastClosedCandle.low) : 10;
-      const upperWick = lastClosedCandle ? (lastClosedCandle.high - Math.max(lastClosedCandle.open, lastClosedCandle.close)) : 0;
-      const lowerWick = lastClosedCandle ? (Math.min(lastClosedCandle.open, lastClosedCandle.close) - lastClosedCandle.low) : 0;
-
-      // Genuine Rejection Wick: Lower/Upper shadow must be at least 35% of total candle range and larger than opposite wick
-      const hasUpperWickRejection = lastClosedCandle && upperWick >= 0.35 * candleRange && upperWick > lowerWick;
-      const hasLowerWickRejection = lastClosedCandle && lowerWick >= 0.35 * candleRange && lowerWick > upperWick;
-
-      // Anti-Whipsaw Filter: Check if this specific level recently failed a Trap Reversal
-      const isDayHighQuarantined = this.failedTrapLevels.some(
-        f => f.type === "HIGH" && Math.abs(f.level - this.dayHigh) <= 12 && f.expiredAt > timestamp
-      );
-      const isDayLowQuarantined = this.failedTrapLevels.some(
-        f => f.type === "LOW" && Math.abs(f.level - this.dayLow) <= 12 && f.expiredAt > timestamp
-      );
-
-      if (isTestingDayHigh && !isDayHighQuarantined && (lastClosedCandle?.high || spot) >= this.orbHigh - 3 && hasUpperWickRejection && spot > this.currentVwap + 6) {
-        candidate = "PUT_BUY";
-        setupType = "TRAP_REVERSAL";
-        reasoning = `[MEAN REVERSION] Bull Trap at Day High (${this.dayHigh.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
-      } else if (isTestingDayLow && !isDayLowQuarantined && (lastClosedCandle?.low || spot) <= this.orbLow + 3 && hasLowerWickRejection && spot < this.currentVwap - 6) {
+      if (spot > this.orbHigh + buffer && isAboveVwap && !isCallCprTrapped) {
         candidate = "CALL_BUY";
-        setupType = "TRAP_REVERSAL";
-        reasoning = `[MEAN REVERSION] Bear Trap at Day Low (${this.dayLow.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
+        setupType = "OPENING_DRIVE";
+        const gapPrefix = hasDynamicOpeningGap && this.openingGapPoints > 0 ? ` (+${this.openingGapPoints.toFixed(1)} pt Dynamic Gap Continuation)` : "";
+        reasoning = `🔥 [OPENING DRIVE MOMENTUM] High-velocity Bullish Impulse above ${this.orbHigh.toFixed(2)}${gapPrefix} with VWAP & Heavyweight alignment.`;
+      } else if (spot < this.orbLow - buffer && !isAboveVwap && !isPutCprTrapped) {
+        candidate = "PUT_BUY";
+        setupType = "OPENING_DRIVE";
+        const gapPrefix = hasDynamicOpeningGap && this.openingGapPoints < 0 ? ` (${this.openingGapPoints.toFixed(1)} pt Dynamic Gap Continuation)` : "";
+        reasoning = `🔥 [OPENING DRIVE MOMENTUM] High-velocity Bearish Impulse below ${this.orbLow.toFixed(2)}${gapPrefix} with VWAP & Heavyweight alignment.`;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // PRIORITY 2: POST-9:30 AM VWAP & 9/21 EMA PULLBACK (Institutional High-Win Trend Retracement)
+    // -------------------------------------------------------------
+    else {
+      // Pullback zone: Spot must be within 25 points of session VWAP or near 9/21 EMA
+      const isNearVwapPullbackZone = Math.abs(spot - this.currentVwap) <= 25;
+
+      // Bullish Pullback: Uptrend + Retracement to VWAP/EMA
+      if (isAboveVwap && (isTrendBullish || spot > this.currentVwap + 5) && isNearVwapPullbackZone) {
+        candidate = "CALL_BUY";
+        setupType = "VWAP_PULLBACK";
+        reasoning = `🎯 [VWAP PULLBACK] Institutional Bull Trend Retracement: Healthy pullback to Session VWAP (${this.currentVwap.toFixed(1)}) with continuation bounce.`;
+      }
+      // Bearish Pullback: Downtrend + Retracement to VWAP/EMA
+      else if (!isAboveVwap && (isTrendBearish || spot < this.currentVwap - 5) && isNearVwapPullbackZone) {
+        candidate = "PUT_BUY";
+        setupType = "VWAP_PULLBACK";
+        reasoning = `🎯 [VWAP PULLBACK] Institutional Bear Trend Retracement: Healthy pullback to Session VWAP (${this.currentVwap.toFixed(1)}) with continuation rejection.`;
+      }
+      // Sideways Market Boundary Reversal (Fading Range Boundaries only when NOT in a strong trend)
+      else if (!isIntradayBearTrend && !isIntradayBullTrend) {
+        const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
+        const isTestingDayLow = this.dayLow <= this.orbLow + 2;
+
+        const candleRange = lastClosedCandle ? Math.max(4, lastClosedCandle.high - lastClosedCandle.low) : 10;
+        const upperWick = lastClosedCandle ? (lastClosedCandle.high - Math.max(lastClosedCandle.open, lastClosedCandle.close)) : 0;
+        const lowerWick = lastClosedCandle ? (Math.min(lastClosedCandle.open, lastClosedCandle.close) - lastClosedCandle.low) : 0;
+
+        // Genuine Rejection Wick: Lower/Upper shadow must be at least 35% of total candle range and larger than opposite wick
+        const hasUpperWickRejection = lastClosedCandle && upperWick >= 0.35 * candleRange && upperWick > lowerWick;
+        const hasLowerWickRejection = lastClosedCandle && lowerWick >= 0.35 * candleRange && lowerWick > upperWick;
+
+        // Anti-Whipsaw Filter: Check if this specific level recently failed a Trap Reversal
+        const isDayHighQuarantined = this.failedTrapLevels.some(
+          f => f.type === "HIGH" && Math.abs(f.level - this.dayHigh) <= 12 && f.expiredAt > timestamp
+        );
+        const isDayLowQuarantined = this.failedTrapLevels.some(
+          f => f.type === "LOW" && Math.abs(f.level - this.dayLow) <= 12 && f.expiredAt > timestamp
+        );
+
+        if (isTestingDayHigh && !isDayHighQuarantined && (lastClosedCandle?.high || spot) >= this.orbHigh - 3 && hasUpperWickRejection && spot > this.currentVwap + 6) {
+          candidate = "PUT_BUY";
+          setupType = "TRAP_REVERSAL";
+          reasoning = `[MEAN REVERSION] Bull Trap at Day High (${this.dayHigh.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
+        } else if (isTestingDayLow && !isDayLowQuarantined && (lastClosedCandle?.low || spot) <= this.orbLow + 3 && hasLowerWickRejection && spot < this.currentVwap - 6) {
+          candidate = "CALL_BUY";
+          setupType = "TRAP_REVERSAL";
+          reasoning = `[MEAN REVERSION] Bear Trap at Day Low (${this.dayLow.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
+        }
       }
     }
 
