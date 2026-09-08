@@ -23,8 +23,69 @@ export interface AIAuditResult {
 }
 
 export class GeminiRiskOfficer {
-  private static readonly MODEL_NAME = "models/gemini-3.6-flash";
-  private static readonly TIMEOUT_MS = 4500;
+  private static readonly PRIMARY_MODEL = process.env.GEMINI_MODEL || "models/gemini-2.5-flash";
+  private static readonly FALLBACK_MODEL = "models/gemini-1.5-flash";
+  private static rateLimitCooldownUntil: number = 0;
+
+  /**
+   * Local Deterministic Risk Engine:
+   * Mathematically audits candidate setup using exact institutional risk rules
+   * when Gemini API is rate-limited, timed out, or offline.
+   */
+  public static evaluateLocalDeterministicRules(input: AIAuditInput, fallbackReason: string): AIAuditResult {
+    // Rule 1: Minimum Institutional Confluence Score
+    if (input.confluenceScore < 82) {
+      return {
+        approved: false,
+        aiConfidence: 30,
+        verdict: "BLOCKED",
+        trapDetected: true,
+        reasoning: `[Local Risk Engine] Confluence score (${input.confluenceScore}/100) is below high-conviction threshold (82). Blocked to protect capital.`
+      };
+    }
+
+    // Rule 2: Severe Chop & ADX Gate
+    if (input.adx > 0 && input.adx < 15 && input.regime === "RANGE") {
+      return {
+        approved: false,
+        aiConfidence: 35,
+        verdict: "BLOCKED",
+        trapDetected: true,
+        reasoning: `[Local Risk Engine] Low ADX (${input.adx.toFixed(1)}) in sideways consolidation. Blocked to prevent Theta decay.`
+      };
+    }
+
+    // Rule 3: Global Macro Divergence
+    if (input.giftNifty) {
+      if (input.candidateType === "CALL_BUY" && input.giftNifty.delta < -40) {
+        return {
+          approved: false,
+          aiConfidence: 40,
+          verdict: "BLOCKED",
+          trapDetected: true,
+          reasoning: `[Local Risk Engine] GIFT Nifty heavily dumping (${input.giftNifty.delta.toFixed(1)} pts). CALL buying blocked on global macro divergence.`
+        };
+      }
+      if (input.candidateType === "PUT_BUY" && input.giftNifty.delta > 40) {
+        return {
+          approved: false,
+          aiConfidence: 40,
+          verdict: "BLOCKED",
+          trapDetected: true,
+          reasoning: `[Local Risk Engine] GIFT Nifty heavily surging (+${input.giftNifty.delta.toFixed(1)} pts). PUT buying blocked on global macro divergence.`
+        };
+      }
+    }
+
+    // If passed all institutional mathematical filters:
+    return {
+      approved: true,
+      aiConfidence: 85,
+      verdict: "APPROVED",
+      trapDetected: false,
+      reasoning: `[Local Risk Engine] Verified high-conviction setup (Score: ${input.confluenceScore}/100, ADX: ${input.adx.toFixed(1)}). (${fallbackReason})`
+    };
+  }
 
   /**
    * Evaluates a candidate option buying signal through Gemini AI.
@@ -32,15 +93,16 @@ export class GeminiRiskOfficer {
    */
   public static async validateTradeSetup(input: AIAuditInput): Promise<AIAuditResult> {
     const apiKey = process.env.GEMINI_API_KEY;
+    const now = Date.now();
+
+    // If currently in rate-limit cooldown, seamlessly use Local Deterministic Risk Engine
+    if (now < this.rateLimitCooldownUntil) {
+      const remainingSecs = Math.round((this.rateLimitCooldownUntil - now) / 1000);
+      return this.evaluateLocalDeterministicRules(input, `Gemini API rate-limit cooldown active for ${remainingSecs}s`);
+    }
+
     if (!apiKey) {
-      console.warn("[GeminiRiskOfficer] GEMINI_API_KEY missing. Bypassing AI gate.");
-      return {
-        approved: true,
-        aiConfidence: 50,
-        verdict: "APPROVED",
-        trapDetected: false,
-        reasoning: "AI API Key missing, passed on mathematical quantitative score."
-      };
+      return this.evaluateLocalDeterministicRules(input, "GEMINI_API_KEY missing");
     }
 
     const giftNiftyText = input.giftNifty
@@ -67,7 +129,7 @@ STRICT VETO RULES:
 2. If CALL_BUY and Bank Nifty or ICICI Bank is Red/diverging negatively, VETO (reason: Index divergence bull trap).
 3. If PUT_BUY and Bank Nifty or Reliance is Green/rallying, VETO (reason: Heavyweight divergence bear trap).
 4. If CALL_BUY and GIFT Nifty is heavily dumping (Delta < -40 pts), or PUT_BUY and GIFT Nifty is strongly surging (Delta > +40 pts), VETO (reason: Global macro divergence).
-5. If between 11:00 AM - 1:15 PM IST, VETO (reason: Midday volume drop & theta decay).
+5. If between 11:45 AM - 1:15 PM IST, VETO (reason: Midday volume drop & theta decay).
 
 Respond ONLY with a valid JSON object matching this exact schema (no markdown, no backticks):
 {
@@ -80,7 +142,8 @@ Respond ONLY with a valid JSON object matching this exact schema (no markdown, n
 `.trim();
 
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/${this.MODEL_NAME}:generateContent?key=${apiKey}`;
+      const model = this.PRIMARY_MODEL;
+      const url = `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent?key=${apiKey}`;
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -91,19 +154,18 @@ Respond ONLY with a valid JSON object matching this exact schema (no markdown, n
             topP: 0.8
           }
         }),
-        signal: AbortSignal.timeout(8000)
+        signal: AbortSignal.timeout(6000)
       });
 
       if (!res.ok) {
-        const errText = await res.text();
-        console.warn(`[GeminiRiskOfficer] API returned ${res.status}: ${errText}. Bypassing AI.`);
-        return {
-          approved: true,
-          aiConfidence: 50,
-          verdict: "APPROVED",
-          trapDetected: false,
-          reasoning: "AI validation timed out or unavailable, passed on quantitative score."
-        };
+        if (res.status === 429) {
+          // Set 60-second cooldown so we don't spam the API
+          this.rateLimitCooldownUntil = Date.now() + 60 * 1000;
+          console.warn("[GeminiRiskOfficer] Gemini 429 Quota reached. Activating 60s cooldown and engaging Local Deterministic Risk Engine.");
+        } else {
+          console.warn(`[GeminiRiskOfficer] API returned ${res.status}. Falling back to Local Deterministic Risk Engine.`);
+        }
+        return this.evaluateLocalDeterministicRules(input, `Gemini API returned ${res.status}`);
       }
 
       const data = await res.json();
@@ -120,14 +182,8 @@ Respond ONLY with a valid JSON object matching this exact schema (no markdown, n
         reasoning: parsed.reasoning || (parsed.approved ? "AI verified institutional momentum." : "AI detected high risk of chop/fakeout.")
       };
     } catch (e: any) {
-      console.warn(`[GeminiRiskOfficer] Validation request failed: ${e.message}. Bypassing AI.`);
-      return {
-        approved: true,
-        aiConfidence: 50,
-        verdict: "APPROVED",
-        trapDetected: false,
-        reasoning: "AI validation bypass: executed on quantitative formula score."
-      };
+      console.warn(`[GeminiRiskOfficer] Validation request failed: ${e.message}. Engaging Local Deterministic Risk Engine.`);
+      return this.evaluateLocalDeterministicRules(input, `AI network timeout: ${e.message}`);
     }
   }
 }
