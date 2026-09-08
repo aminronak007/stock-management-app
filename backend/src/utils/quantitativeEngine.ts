@@ -14,7 +14,8 @@ export type MarketRegime =
 export type StrategySetup = 
   | "ORB_BREAKOUT"
   | "TRAP_REVERSAL"
-  | "VWAP_PULLBACK";
+  | "VWAP_PULLBACK"
+  | "OPENING_DRIVE";
 
 export interface ConfluenceFactors {
   marketStructure: { score: number; max: number; factors: string[] };
@@ -648,7 +649,15 @@ export class QuantitativeEngine {
       explanation.push("⚠ RANGE REGIME PENALTY (-10 points): Breaking out of sideways consolidation.");
     }
 
-    if (isFalseBreakout && setupType === "ORB_BREAKOUT") {
+    // OPENING DRIVE MOMENTUM BOOST (09:18 - 09:30 AM IST)
+    if (setupType === "OPENING_DRIVE") {
+      if (weightedBreadthRatio >= 0.60) {
+        totalScore = Math.min(100, totalScore + 10);
+        explanation.push("🚀 OPENING DRIVE MOMENTUM (+10 points): High-velocity 9:18 AM Opening Bell Impulse supported by Heavyweights!");
+      }
+    }
+
+    if (isFalseBreakout && (setupType === "ORB_BREAKOUT" || setupType === "OPENING_DRIVE")) {
       totalScore = 0;
       explanation.push("✕ FALSE BREAKOUT DETECTED: Breakout signal score reset to zero.");
     }

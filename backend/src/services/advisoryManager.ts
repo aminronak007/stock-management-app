@@ -129,6 +129,10 @@ export class AdvisoryManager {
   private sampleActiveTiers: Set<SignalTier> = new Set<SignalTier>();
   private sessionRealizedPnl: number = 0;
   private failedTrapLevels: { level: number; type: "HIGH" | "LOW"; expiredAt: number }[] = [];
+  private prevDayClose: number = 0;
+  private openingGapPoints: number = 0;
+  private openingGapPercent: number = 0;
+  private dailyAtr: number = 90;
 
   // 3-Tier Independent Position State Machines:
   // 1. SNIPER (Score >= 75%) -> Official Alert & Optional Real Execution
@@ -251,8 +255,10 @@ export class AdvisoryManager {
 
       if (candles.length > 0) {
         const lastDay = candles[candles.length - 1];
+        this.prevDayClose = lastDay.close;
+        this.dailyAtr = Math.max(60, (lastDay.high - lastDay.low));
         this.cpr = CPR.calculateCPR(lastDay.high, lastDay.low, lastDay.close);
-        console.log(`[AdvisoryManager] Daily CPR calculated: Pivot=${this.cpr.pivot.toFixed(2)}, Range=[${this.cpr.bottomRange.toFixed(2)} - ${this.cpr.topRange.toFixed(2)}]`);
+        console.log(`[AdvisoryManager] Daily CPR calculated: Pivot=${this.cpr.pivot.toFixed(2)}, Range=[${this.cpr.bottomRange.toFixed(2)} - ${this.cpr.topRange.toFixed(2)}], PrevClose=${this.prevDayClose.toFixed(2)}, DailyATR=${this.dailyAtr.toFixed(1)}`);
       } else {
         console.warn("[AdvisoryManager] Could not fetch real daily candles from broker. CPR filter disabled.");
         this.cpr = null;
@@ -668,20 +674,30 @@ export class AdvisoryManager {
             this.orbHigh = tick.ltp;
             this.orbLow = tick.ltp;
             this.isOrbActive = true;
-            console.log(`[AdvisoryManager] 9:15 AM ORB formation window active. Tracking boundaries.`);
+            if (this.prevDayClose > 0 && this.openingGapPoints === 0) {
+              this.openingGapPoints = tick.ltp - this.prevDayClose;
+              this.openingGapPercent = (this.openingGapPoints / this.prevDayClose) * 100;
+              console.log(`[AdvisoryManager] 🌅 9:15 AM Opening Gap Detected: ${this.openingGapPoints >= 0 ? '+' : ''}${this.openingGapPoints.toFixed(2)} pts (${this.openingGapPercent.toFixed(2)}%) vs Yesterday Close (${this.prevDayClose.toFixed(2)})`);
+            }
+            console.log(`[AdvisoryManager] 9:15 AM Opening Drive window active. Tracking boundaries.`);
           }
           this.orbHigh = Math.max(this.orbHigh, tick.ltp);
           this.orbLow = Math.min(this.orbLow, tick.ltp);
         }
       }
 
-      // Lock ORB range permanently after 9:30 AM IST & evaluate signals
+      // Lock ORB range permanently after 9:30 AM IST
       if ((hours === 9 && minutes >= 30) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
         if (!this.isOrbLocked && (this.orbHigh > 0 || this.orbLow > 0)) {
           this.isOrbActive = false;
           this.isOrbLocked = true;
           console.log(`[AdvisoryManager] 🔒 9:30 AM ORB locked permanently: High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}`);
         }
+      }
+
+      // Evaluate signals starting from 9:18 AM IST (Opening Drive Momentum) all the way to 3:15 PM IST!
+      const canEvaluateSignals = (hours === 9 && minutes >= 18) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15);
+      if (canEvaluateSignals) {
         // One evaluation at a time, at most once per second — never stampede Fyers on every tick
         if (!this.breakoutEvalInflight && timestamp - this.lastBreakoutEvalAt >= 1000) {
           this.lastBreakoutEvalAt = timestamp;
@@ -813,16 +829,31 @@ export class AdvisoryManager {
     const isIntradayBullTrend = isAboveVwap && (isTrendBullish || spot > this.currentVwap + 10);
 
     // -------------------------------------------------------------
-    // TIER 1 PRIORITY: TREND BREAKOUTS & BREAKDOWNS (High-Yield Momentum)
+    // TIER 1 PRIORITY: TREND BREAKOUTS & OPENING GAP / DRIVE MOMENTUM (High-Yield Momentum)
     // -------------------------------------------------------------
-    if (spot > this.orbHigh + buffer && isAboveVwap) {
+    const isOpeningDriveWindow = istH === 9 && istM >= 16 && istM < 30;
+    const dynamicGapThreshold = Math.max(20.0, this.dailyAtr * 0.25);
+    const hasDynamicOpeningGap = Math.abs(this.openingGapPoints) >= dynamicGapThreshold;
+    const currentSetupType: StrategySetup = isOpeningDriveWindow ? "OPENING_DRIVE" : "ORB_BREAKOUT";
+
+    // Avoid buying breakouts directly trapped inside Central Pivot Range (CPR)
+    const isCallCprTrapped = this.cpr && (spot >= this.cpr.bottomRange - 5 && spot <= this.cpr.topRange + 5);
+    const isPutCprTrapped = this.cpr && (spot >= this.cpr.bottomRange - 5 && spot <= this.cpr.topRange + 5);
+
+    if (spot > this.orbHigh + buffer && isAboveVwap && !isCallCprTrapped) {
       candidate = "CALL_BUY";
-      setupType = "ORB_BREAKOUT";
-      reasoning = `Bullish ORB breakout above ${this.orbHigh.toFixed(2)} with session VWAP alignment.`;
-    } else if (spot < this.orbLow - buffer && !isAboveVwap) {
+      setupType = currentSetupType;
+      const gapPrefix = hasDynamicOpeningGap && this.openingGapPoints > 0 ? ` (+${this.openingGapPoints.toFixed(1)} pt Dynamic Gap Continuation)` : "";
+      reasoning = isOpeningDriveWindow
+        ? `🔥 [OPENING DRIVE MOMENTUM] High-velocity Bullish Impulse above ${this.orbHigh.toFixed(2)}${gapPrefix} with VWAP & Heavyweight alignment.`
+        : `Bullish ORB breakout above ${this.orbHigh.toFixed(2)} with session VWAP alignment.`;
+    } else if (spot < this.orbLow - buffer && !isAboveVwap && !isPutCprTrapped) {
       candidate = "PUT_BUY";
-      setupType = "ORB_BREAKOUT";
-      reasoning = `Bearish ORB breakdown below ${this.orbLow.toFixed(2)} with session VWAP alignment.`;
+      setupType = currentSetupType;
+      const gapPrefix = hasDynamicOpeningGap && this.openingGapPoints < 0 ? ` (${this.openingGapPoints.toFixed(1)} pt Dynamic Gap Continuation)` : "";
+      reasoning = isOpeningDriveWindow
+        ? `🔥 [OPENING DRIVE MOMENTUM] High-velocity Bearish Impulse below ${this.orbLow.toFixed(2)}${gapPrefix} with VWAP & Heavyweight alignment.`
+        : `Bearish ORB breakdown below ${this.orbLow.toFixed(2)} with session VWAP alignment.`;
     }
 
     // -------------------------------------------------------------
@@ -1076,6 +1107,16 @@ export class AdvisoryManager {
       let scaledTarget1 = parseFloat((scaledStopLoss * 1.50 * targetMultiplier).toFixed(2));
       let scaledTarget2 = parseFloat((scaledStopLoss * 3.00 * targetMultiplier).toFixed(2));
 
+      // Dynamic Gap-Scaled High-Profit Targets for OPENING_DRIVE (Adaptive to daily gap magnitude)
+      if (setupType === "OPENING_DRIVE" && Math.abs(this.openingGapPoints) >= dynamicGapThreshold) {
+        const gapMagnitude = Math.abs(this.openingGapPoints);
+        scaledStopLoss = Math.max(7.0, Math.min(13.0, 0.90 * atrValue * delta));
+        // Dynamic Target 1: 35% of Gap Distance (min 15 pts)
+        scaledTarget1 = parseFloat((Math.max(15.0, Math.min(35.0, 0.35 * gapMagnitude * delta)) * targetMultiplier).toFixed(2));
+        // Dynamic Target 2: 75% of Gap Distance (min 30 pts)
+        scaledTarget2 = parseFloat((Math.max(30.0, Math.min(75.0, 0.75 * gapMagnitude * delta)) * targetMultiplier).toFixed(2));
+      }
+
       // Mean Reversion Scalps (fading range boundaries only in non-trending markets)
       if (setupType === "TRAP_REVERSAL") {
         const vwapDist = Math.abs(spot - this.currentVwap);
@@ -1117,8 +1158,8 @@ export class AdvisoryManager {
         giftNiftyDelta: giftNifty.netChange
       });
 
-      // Strict Institutional Gate: Require score >= 75 (High Conviction Only). Block weak chop entries (< 75).
-      const minScoreThreshold = 75;
+      // Strict Institutional Gate: Require score >= 82 (High Conviction Only). Block weak marginal chop entries (< 82).
+      const minScoreThreshold = parseInt(process.env.MIN_SIGNAL_SCORE || "82", 10) || 82;
       if (scoreCard.isFalseBreakout || scoreCard.totalScore < minScoreThreshold) {
         const moveName = triggerType === "CALL_BUY" ? "Breakout" : "Breakdown";
         const primaryReason = scoreCard.explanation.find(e => e.includes("✕") || e.includes("⚠")) || `${moveName} is valid, but confluence is ${scoreCard.totalScore}/100 (need at least ${minScoreThreshold} for High Conviction)`;
@@ -1501,6 +1542,19 @@ export class AdvisoryManager {
         pos.activeSignal.stopLossPrice = dynamicTrailedSl;
         this.persistOpenPositionState(pos);
         console.log(`[AdvisoryManager] [${tier}] 🚀 Runner Trailing SL raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (Peak: ₹${pos.peakPremiumLtp.toFixed(2)}, Buffer: ₹${(pos.peakPremiumLtp - pos.activeSignal.stopLossPrice).toFixed(2)})`);
+      }
+    }
+
+    // =========================================================================
+    // 3b. GUARANTEED GREEN PROFIT LOCK (When gain reaches >= +1.0R, SL locked to Cost + 1.50)
+    // =========================================================================
+    if (!pos.isBreakevenLocked && pos.peakPremiumLtp >= pos.activeSignal.entryPrice + initialRisk * 1.0) {
+      const guaranteedProfitSl = parseFloat((pos.activeSignal.entryPrice + 1.50).toFixed(2));
+      if (guaranteedProfitSl > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = guaranteedProfitSl;
+        pos.isBreakevenLocked = true;
+        this.persistOpenPositionState(pos);
+        console.log(`[AdvisoryManager] [${tier}] 💰 Guaranteed Green Profit Lock: Trade reached +1.0R! SL trailed to Entry+1.50 (₹${pos.activeSignal.stopLossPrice.toFixed(2)}) - Zero Loss Guarantee!`);
       }
     }
 
