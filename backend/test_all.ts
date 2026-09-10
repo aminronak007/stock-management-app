@@ -153,6 +153,7 @@ async function runUnitTests() {
   const testTradeId = DatabaseService.logPaperTrade({
     type: "CALL_BUY",
     tier: "EXPLORATORY",
+    symbol: "NSE:NIFTY26AUG24150CE",
     strike: "24150",
     qty: 50,
     price: 80.00,

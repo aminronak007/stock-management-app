@@ -380,6 +380,86 @@ export class AdvisoryManager {
   }
 
   /**
+   * Self-Healing Engine: If restarted after 9:30 AM or if initial broker connection
+   * was unauthenticated, dynamically fetches historical candles, hydrates ORB boundaries,
+   * and calculates session VWAP on demand so trading is NEVER blocked.
+   */
+  public async ensureHistoricalDataAndOrb(spot: number = 0): Promise<boolean> {
+    if (this.orbHigh > 0 && this.orbLow > 0 && this.indexCandles.length >= 10) {
+      return true;
+    }
+
+    try {
+      const today = new Date();
+      const prevDate = new Date(today);
+      prevDate.setDate(prevDate.getDate() - 5);
+
+      const todayStr = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).format(today);
+
+      const prevDateStr = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).format(prevDate);
+
+      // 1. Fetch 5-minute historical candles
+      const historical5m = await this.broker.getHistoricalCandles(
+        "NSE:NIFTY50-INDEX",
+        "5",
+        prevDateStr,
+        todayStr
+      );
+
+      if (historical5m && historical5m.length > 0) {
+        this.indexCandles = historical5m;
+        this.hydrateOrbFromHistory();
+        this.refreshSessionVwap();
+        console.log(`[AdvisoryManager] 🔄 Self-healing complete: Loaded ${this.indexCandles.length} candles. ORB High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}, VWAP=${this.currentVwap.toFixed(2)}`);
+      }
+
+      // 2. Fetch daily candle for CPR & Daily ATR if missing
+      if (!this.cpr || this.prevDayClose === 0) {
+        const dailyCandles = await this.broker.getHistoricalCandles(
+          "NSE:NIFTY50-INDEX",
+          "D",
+          prevDateStr,
+          todayStr
+        );
+        if (dailyCandles && dailyCandles.length > 0) {
+          const lastDay = dailyCandles[dailyCandles.length - 1];
+          this.prevDayClose = lastDay.close;
+          this.dailyAtr = Math.max(60, lastDay.high - lastDay.low);
+          this.cpr = CPR.calculateCPR(lastDay.high, lastDay.low, lastDay.close);
+          console.log(`[AdvisoryManager] 🔄 Self-healing CPR calculated: Pivot=${this.cpr.pivot.toFixed(2)}, Range=[${this.cpr.bottomRange.toFixed(2)} - ${this.cpr.topRange.toFixed(2)}], PrevClose=${this.prevDayClose.toFixed(2)}`);
+        }
+      }
+    } catch (err) {
+      console.warn("[AdvisoryManager] Could not fetch historical candles for self-healing:", err);
+    }
+
+    // Dynamic Fallback: If ORB still uncaptured (e.g. historical candles API unavailable),
+    // calculate synthetic ORB from session high/low or spot price so VWAP Pullback is NEVER blocked!
+    if (this.orbHigh <= 0 || this.orbLow <= 0) {
+      const effectiveSpot = spot > 0 ? spot : (this.indexSpotPrice > 0 ? this.indexSpotPrice : 23500);
+      const sessionHigh = this.dayHigh > 0 ? this.dayHigh : effectiveSpot + 25;
+      const sessionLow = this.dayLow < Infinity ? this.dayLow : effectiveSpot - 25;
+      this.orbHigh = sessionHigh;
+      this.orbLow = sessionLow;
+      this.isOrbActive = false;
+      this.isOrbLocked = true;
+      console.log(`[AdvisoryManager] 🛡️ Fallback ORB Activated: High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)} (LOCKED)`);
+    }
+
+    return true;
+  }
+
+  /**
    * Today's NSE cash session bars only (9:15 AM IST onward). Session VWAP must not include prior days.
    */
   private getTodaySessionCandles(now: number = Date.now()): Candle[] {
@@ -798,9 +878,9 @@ export class AdvisoryManager {
       return;
     }
 
-    // Without a captured ORB, do not evaluate (and do not hit the option-chain API)
-    if (this.orbHigh <= 0 || this.orbLow <= 0) {
-      return;
+    // Self-healing check: Ensure ORB & history are loaded even if backend started late (e.g. 10:00 AM)
+    if (this.orbHigh <= 0 || this.orbLow <= 0 || this.indexCandles.length < 5) {
+      await this.ensureHistoricalDataAndOrb(spot);
     }
 
     const isAboveVwap = spot > this.currentVwap;
@@ -1892,7 +1972,10 @@ export class AdvisoryManager {
         ? `Open ${openBuyTier} trade is still managed through lunch (stop-loss, targets, theta).`
         : `Active ${openBuyTier} signal is live. Targets are on the signal card.`;
     } else if (!hasOrb) {
-      waitingReason = "Opening range is not captured yet. ORB is built from 9:15–9:30 AM IST.";
+      if (totalMinutes >= 570) {
+        this.ensureHistoricalDataAndOrb(spot).catch(() => {});
+      }
+      waitingReason = "Opening range is not captured yet. Hydrating historical session range from broker...";
     } else if (sessionPhase === "PRE_OPEN") {
       waitingReason = "Session has not opened. Signals start after the 9:15–9:30 AM ORB window.";
     } else if (sessionPhase === "ORB") {
