@@ -98,6 +98,18 @@ export class AdvisoryManager {
     "NSE:AXISBANK-EQ": 0,
     "NSE:KOTAKBANK-EQ": 0
   };
+  private heavyweightNetChange: { [symbol: string]: number } = {
+    "NSE:NIFTYBANK-INDEX": 0,
+    "NSE:FINNIFTY-INDEX": 0,
+    "NSE:RELIANCE-EQ": 0,
+    "NSE:HDFCBANK-EQ": 0,
+    "NSE:ICICIBANK-EQ": 0,
+    "NSE:INFY-EQ": 0,
+    "NSE:TCS-EQ": 0,
+    "NSE:LT-EQ": 0,
+    "NSE:AXISBANK-EQ": 0,
+    "NSE:KOTAKBANK-EQ": 0
+  };
   private heavyweightVolumes: { [symbol: string]: { cumVol: number; cumPv: number } } = {};
   private latestGiftNifty: GiftNiftyData | null = null;
 
@@ -803,6 +815,11 @@ export class AdvisoryManager {
     // 3. Track Heavyweights & calculate continuous intraday cumulative VWAP
     if (tick.symbol in this.heavyweightLtp && tick.ltp > 0) {
       this.heavyweightLtp[tick.symbol] = tick.ltp;
+      if (typeof tick.netChangePercent === "number" && !isNaN(tick.netChangePercent)) {
+        this.heavyweightNetChange[tick.symbol] = tick.netChangePercent;
+      } else if (typeof tick.netChange === "number" && tick.prevClose && tick.prevClose > 0) {
+        this.heavyweightNetChange[tick.symbol] = parseFloat(((tick.netChange / tick.prevClose) * 100).toFixed(2));
+      }
       const vol = tick.volume || 100;
       const prev = this.heavyweightVolumes[tick.symbol] || { cumVol: 0, cumPv: 0 };
       const newVol = prev.cumVol + vol;
@@ -1233,6 +1250,7 @@ export class AdvisoryManager {
         candles5m: this.indexCandles,
         heavyweightsLtp: this.heavyweightLtp,
         heavyweightsVwap: this.heavyweightVwap,
+        heavyweightsNetChange: this.heavyweightNetChange,
         optionPremiumRsi: marketRsi,
         maxCallOiStrike,
         maxPutOiStrike,

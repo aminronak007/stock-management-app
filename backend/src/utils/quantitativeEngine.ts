@@ -168,6 +168,7 @@ export class QuantitativeEngine {
     candles5m: { close: number; high: number; low: number; volume: number; open?: number }[];
     heavyweightsLtp: { [symbol: string]: number };
     heavyweightsVwap: { [symbol: string]: number };
+    heavyweightsNetChange?: { [symbol: string]: number };
     optionPremiumRsi: number;
     maxCallOiStrike?: number;
     maxPutOiStrike?: number;
@@ -191,6 +192,7 @@ export class QuantitativeEngine {
       candles5m,
       heavyweightsLtp,
       heavyweightsVwap,
+      heavyweightsNetChange,
       optionPremiumRsi,
       maxCallOiStrike,
       maxPutOiStrike,
@@ -507,6 +509,25 @@ export class QuantitativeEngine {
     // BANK NIFTY & HEAVYWEIGHT INSTITUTIONAL CONSENSUS GATES:
     const bnfLtp = heavyweightsLtp["NSE:NIFTYBANK-INDEX"] || 0;
     const bnfVwap = heavyweightsVwap["NSE:NIFTYBANK-INDEX"] || 0;
+    const bnfNetChange = heavyweightsNetChange ? (heavyweightsNetChange["NSE:NIFTYBANK-INDEX"] || 0) : 0;
+    const hdfcNetChange = heavyweightsNetChange ? (heavyweightsNetChange["NSE:HDFCBANK-EQ"] || 0) : 0;
+    const relNetChange = heavyweightsNetChange ? (heavyweightsNetChange["NSE:RELIANCE-EQ"] || 0) : 0;
+
+    // Hard Multi-Index & Heavyweight Percentage Divergence Gate:
+    // If Bank Nifty is in the green (+0.10%) or HDFC Bank is green (+0.15%), PUT buying on Nifty is a guaranteed trap!
+    if (triggerType === "PUT_BUY" && (bnfNetChange > 0.10 || (hdfcNetChange > 0.15 && bnfNetChange >= 0))) {
+      totalScore = 0;
+      isFalseBreakout = true;
+      explanation.push(`✕ BANKING DIVERGENCE VETO: Bank Nifty (${bnfNetChange > 0 ? "+" : ""}${bnfNetChange.toFixed(2)}%) or HDFC Bank (${hdfcNetChange > 0 ? "+" : ""}${hdfcNetChange.toFixed(2)}%) are bullish. PUT trade strictly vetoed.`);
+    }
+
+    // If Bank Nifty is in the red (-0.10%) or Reliance is red (-0.20%), CALL buying on Nifty is a guaranteed trap!
+    if (triggerType === "CALL_BUY" && (bnfNetChange < -0.10 || (relNetChange < -0.20 && bnfNetChange <= 0))) {
+      totalScore = 0;
+      isFalseBreakout = true;
+      explanation.push(`✕ SECTOR DIVERGENCE VETO: Bank Nifty (${bnfNetChange.toFixed(2)}%) or Reliance (${relNetChange.toFixed(2)}%) are bearish. CALL trade strictly vetoed.`);
+    }
+
     const isBankNiftyDiverging = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap * 0.999) ||
                                  (triggerType === "PUT_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp > bnfVwap * 1.001);
 
