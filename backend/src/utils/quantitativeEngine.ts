@@ -526,12 +526,35 @@ export class QuantitativeEngine {
     const relVwap = heavyweightsVwap["NSE:RELIANCE-EQ"] || 0;
     const hdfcLtp = heavyweightsLtp["NSE:HDFCBANK-EQ"] || 0;
     const hdfcVwap = heavyweightsVwap["NSE:HDFCBANK-EQ"] || 0;
-    const areTopTwoOpposing = (triggerType === "CALL_BUY" && relLtp > 0 && relLtp < relVwap && hdfcLtp > 0 && hdfcLtp < hdfcVwap) ||
-                              (triggerType === "PUT_BUY" && relLtp > 0 && relLtp > relVwap && hdfcLtp > 0 && hdfcLtp > hdfcVwap);
-    if (areTopTwoOpposing && setupType !== "TRAP_REVERSAL") {
+    const iciciLtp = heavyweightsLtp["NSE:ICICIBANK-EQ"] || 0;
+    const iciciVwap = heavyweightsVwap["NSE:ICICIBANK-EQ"] || 0;
+
+    let opposingBig3Count = 0;
+    const opposingNames: string[] = [];
+
+    if (relLtp > 0 && relVwap > 0) {
+      if ((triggerType === "CALL_BUY" && relLtp < relVwap) || (triggerType === "PUT_BUY" && relLtp > relVwap)) {
+        opposingBig3Count++;
+        opposingNames.push("Reliance");
+      }
+    }
+    if (hdfcLtp > 0 && hdfcVwap > 0) {
+      if ((triggerType === "CALL_BUY" && hdfcLtp < hdfcVwap) || (triggerType === "PUT_BUY" && hdfcLtp > hdfcVwap)) {
+        opposingBig3Count++;
+        opposingNames.push("HDFC Bank");
+      }
+    }
+    if (iciciLtp > 0 && iciciVwap > 0) {
+      if ((triggerType === "CALL_BUY" && iciciLtp < iciciVwap) || (triggerType === "PUT_BUY" && iciciLtp > iciciVwap)) {
+        opposingBig3Count++;
+        opposingNames.push("ICICI Bank");
+      }
+    }
+
+    if (opposingBig3Count >= 2 && setupType !== "TRAP_REVERSAL") {
       totalScore = 0;
       isFalseBreakout = true;
-      explanation.push("✕ INSTITUTIONAL DIVERGENCE GATE: Both Reliance and HDFC Bank opposing breakout. 100% False Breakout Trap.");
+      explanation.push(`✕ BIG-3 INSTITUTIONAL DIVERGENCE GATE: ${opposingBig3Count}/3 Heavyweights (${opposingNames.join(", ")}) opposing setup. 100% False Breakout Trap.`);
     }
 
     // Tsunami Trend Gate: If Bank Nifty is plunging (>0.25% below VWAP) or surging (>0.25% above VWAP),
