@@ -506,26 +506,34 @@ export class QuantitativeEngine {
       explanation.push(`⚠ CHOPPY MARKET PENALTY (ADX=${currentAdx.toFixed(1)} < 18: -15 points applied)`);
     }
 
-    // BANK NIFTY & HEAVYWEIGHT INSTITUTIONAL CONSENSUS GATES:
+    // BANK NIFTY & HEAVYWEIGHT INTRADAY VWAP CONSENSUS GATES:
     const bnfLtp = heavyweightsLtp["NSE:NIFTYBANK-INDEX"] || 0;
     const bnfVwap = heavyweightsVwap["NSE:NIFTYBANK-INDEX"] || 0;
-    const bnfNetChange = heavyweightsNetChange ? (heavyweightsNetChange["NSE:NIFTYBANK-INDEX"] || 0) : 0;
-    const hdfcNetChange = heavyweightsNetChange ? (heavyweightsNetChange["NSE:HDFCBANK-EQ"] || 0) : 0;
-    const relNetChange = heavyweightsNetChange ? (heavyweightsNetChange["NSE:RELIANCE-EQ"] || 0) : 0;
+    const hdfcLtp = heavyweightsLtp["NSE:HDFCBANK-EQ"] || 0;
+    const hdfcVwap = heavyweightsVwap["NSE:HDFCBANK-EQ"] || 0;
+    const relLtp = heavyweightsLtp["NSE:RELIANCE-EQ"] || 0;
+    const relVwap = heavyweightsVwap["NSE:RELIANCE-EQ"] || 0;
+    const iciciLtp = heavyweightsLtp["NSE:ICICIBANK-EQ"] || 0;
+    const iciciVwap = heavyweightsVwap["NSE:ICICIBANK-EQ"] || 0;
 
-    // Hard Multi-Index & Heavyweight Percentage Divergence Gate:
-    // If Bank Nifty is in the green (+0.10%) or HDFC Bank is green (+0.15%), PUT buying on Nifty is a guaranteed trap!
-    if (triggerType === "PUT_BUY" && (bnfNetChange > 0.10 || (hdfcNetChange > 0.15 && bnfNetChange >= 0))) {
+    // True Intraday VWAP Deviation (% distance from intraday VWAP)
+    const bnfVwapDev = (bnfLtp > 0 && bnfVwap > 0) ? ((bnfLtp - bnfVwap) / bnfVwap) * 100 : 0;
+    const hdfcVwapDev = (hdfcLtp > 0 && hdfcVwap > 0) ? ((hdfcLtp - hdfcVwap) / hdfcVwap) * 100 : 0;
+    const relVwapDev = (relLtp > 0 && relVwap > 0) ? ((relLtp - relVwap) / relVwap) * 100 : 0;
+
+    // Hard Intraday Banking & Sector Divergence Vetoes:
+    // If Bank Nifty is trading bullishly above its VWAP (> +0.08%) or HDFC Bank is strongly above VWAP (> +0.12%), PUT buying on Nifty is a guaranteed trap!
+    if (triggerType === "PUT_BUY" && (bnfVwapDev > 0.08 || (hdfcVwapDev > 0.12 && bnfVwapDev >= 0))) {
       totalScore = 0;
       isFalseBreakout = true;
-      explanation.push(`✕ BANKING DIVERGENCE VETO: Bank Nifty (${bnfNetChange > 0 ? "+" : ""}${bnfNetChange.toFixed(2)}%) or HDFC Bank (${hdfcNetChange > 0 ? "+" : ""}${hdfcNetChange.toFixed(2)}%) are bullish. PUT trade strictly vetoed.`);
+      explanation.push(`✕ BANKING INTRADAY DIVERGENCE VETO: Bank Nifty (${bnfVwapDev > 0 ? "+" : ""}${bnfVwapDev.toFixed(2)}% vs VWAP) or HDFC Bank (${hdfcVwapDev > 0 ? "+" : ""}${hdfcVwapDev.toFixed(2)}% vs VWAP) are bullish above VWAP. PUT trade strictly vetoed.`);
     }
 
-    // If Bank Nifty is in the red (-0.10%) or Reliance is red (-0.20%), CALL buying on Nifty is a guaranteed trap!
-    if (triggerType === "CALL_BUY" && (bnfNetChange < -0.10 || (relNetChange < -0.20 && bnfNetChange <= 0))) {
+    // If Bank Nifty is trading bearishly below its VWAP (< -0.08%) or Reliance is strongly below VWAP (< -0.15%), CALL buying on Nifty is a guaranteed trap!
+    if (triggerType === "CALL_BUY" && (bnfVwapDev < -0.08 || (relVwapDev < -0.15 && bnfVwapDev <= 0))) {
       totalScore = 0;
       isFalseBreakout = true;
-      explanation.push(`✕ SECTOR DIVERGENCE VETO: Bank Nifty (${bnfNetChange.toFixed(2)}%) or Reliance (${relNetChange.toFixed(2)}%) are bearish. CALL trade strictly vetoed.`);
+      explanation.push(`✕ SECTOR INTRADAY DIVERGENCE VETO: Bank Nifty (${bnfVwapDev.toFixed(2)}% vs VWAP) or Reliance (${relVwapDev.toFixed(2)}% vs VWAP) are bearish below VWAP. CALL trade strictly vetoed.`);
     }
 
     const isBankNiftyDiverging = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap * 0.999) ||
@@ -539,16 +547,8 @@ export class QuantitativeEngine {
       isFalseBreakout = true;
       explanation.push("✕ BANK NIFTY MULTI-INDEX DIVERGENCE GATE: Bank Nifty strongly opposing Nifty breakout direction. False Breakout Trap!");
     } else if (isBankNiftyAligned) {
-      totalScore = Math.min(100, totalScore + 10);
-      explanation.push("🏛️ MULTI-INDEX CONSENSUS TAILWIND (+10 points): Bank Nifty & Nifty 50 perfectly aligned in trend direction.");
+      explanation.push("🏛️ MULTI-INDEX CONSENSUS TAILWIND: Bank Nifty & Nifty 50 perfectly aligned in trend direction.");
     }
-
-    const relLtp = heavyweightsLtp["NSE:RELIANCE-EQ"] || 0;
-    const relVwap = heavyweightsVwap["NSE:RELIANCE-EQ"] || 0;
-    const hdfcLtp = heavyweightsLtp["NSE:HDFCBANK-EQ"] || 0;
-    const hdfcVwap = heavyweightsVwap["NSE:HDFCBANK-EQ"] || 0;
-    const iciciLtp = heavyweightsLtp["NSE:ICICIBANK-EQ"] || 0;
-    const iciciVwap = heavyweightsVwap["NSE:ICICIBANK-EQ"] || 0;
 
     let opposingBig3Count = 0;
     const opposingNames: string[] = [];
@@ -590,7 +590,7 @@ export class QuantitativeEngine {
       }
     }
 
-    // 3b. Institutional Heavyweight Weighted Breadth Calculation (>65% Index Weight)
+    // Heavyweight Weighted Breadth Gate
     const stockWeights: { [symbol: string]: number } = {
       "NSE:HDFCBANK-EQ": 13.5,
       "NSE:RELIANCE-EQ": 10.0,
@@ -599,8 +599,7 @@ export class QuantitativeEngine {
       "NSE:TCS-EQ": 4.0,
       "NSE:LT-EQ": 4.0,
       "NSE:AXISBANK-EQ": 3.5,
-      "NSE:KOTAKBANK-EQ": 3.0,
-      "NSE:NIFTYBANK-INDEX": 35.0
+      "NSE:KOTAKBANK-EQ": 3.0
     };
 
     let totalActiveWeight = 0;
@@ -619,91 +618,68 @@ export class QuantitativeEngine {
     const weightedBreadthRatio = totalActiveWeight > 0 ? (alignedWeight / totalActiveWeight) : 0.5;
 
     if (weightedBreadthRatio >= 0.70) {
-      totalScore = Math.min(100, totalScore + 15);
-      explanation.push(`🏛️ INSTITUTIONAL WEIGHTED BREADTH TAILWIND (+15 points): ${(weightedBreadthRatio * 100).toFixed(0)}% of Nifty heavyweight mass strongly aligned with trend!`);
+      explanation.push(`🏛️ INSTITUTIONAL WEIGHTED BREADTH TAILWIND: ${(weightedBreadthRatio * 100).toFixed(0)}% of Nifty heavyweight mass strongly aligned with trend!`);
     } else if (weightedBreadthRatio < 0.30 && totalActiveWeight >= 40 && setupType !== "TRAP_REVERSAL") {
       totalScore = 0;
       isFalseBreakout = true;
       explanation.push(`✕ INSTITUTIONAL BREADTH GATE: Only ${(weightedBreadthRatio * 100).toFixed(0)}% of heavyweight mass supports the move. 100% False Breakout Trap.`);
     }
 
-    // 4. India VIX Vega Surge Momentum Booster
+    // Phase 5.3: India VIX Intraday Trend Gate
     if (deltaVixPercent !== undefined) {
-      if (triggerType === "PUT_BUY" && deltaVixPercent > 2.0) {
-        totalScore = Math.min(100, totalScore + 10);
-        explanation.push(`⚡ INDIA VIX VEGA SURGE (+10 points): Volatility expanding (+${deltaVixPercent.toFixed(1)}%). Vega supercharges Put premium acceleration!`);
-      } else if (triggerType === "CALL_BUY" && deltaVixPercent <= 0 && vix >= 10 && vix <= 16) {
-        totalScore = Math.min(100, totalScore + 5);
-        explanation.push(`📈 ORDERLY BULL TREND (+5 points): Spot rising with calm VIX (${vix.toFixed(1)}). Institutional accumulation pattern.`);
+      if (deltaVixPercent > 3.0 && triggerType === "CALL_BUY") {
+        totalScore = 0;
+        isFalseBreakout = true;
+        explanation.push(`✕ VIX SURGE GATE: India VIX surging (+${deltaVixPercent.toFixed(1)}%). Fear expanding, CALL buy vetoed.`);
+      } else if (deltaVixPercent < -3.0 && triggerType === "PUT_BUY") {
+        totalScore = 0;
+        isFalseBreakout = true;
+        explanation.push(`✕ VIX COLLAPSE GATE: India VIX crushing (${deltaVixPercent.toFixed(1)}%). Vega decay risk, PUT buy vetoed.`);
+      } else if (deltaVixPercent > 5.0) {
+        totalScore = 0;
+        isFalseBreakout = true;
+        explanation.push(`✕ EXTREME VOLATILITY SPIKE: India VIX jumped +${deltaVixPercent.toFixed(1)}%. All entries blocked.`);
       }
     }
 
-    // Global Macro Factor: GIFT Nifty (NSE IFSC) Leading Indicator
+    // Phase 5.2: Futures & Global Macro Lead / Discount Gate
     if (giftNiftyDelta !== undefined) {
-      if (triggerType === "CALL_BUY") {
-        if (giftNiftyDelta > 20) {
-          totalScore = Math.min(100, totalScore + 5);
-          explanation.push(`🌍 GLOBAL MACRO TAILWIND (+5 points): GIFT Nifty bullish lead (+${giftNiftyDelta.toFixed(1)} pts)`);
-        } else if (giftNiftyDelta < -35) {
-          totalScore = 0;
-          isFalseBreakout = true;
-          explanation.push(`✕ GLOBAL MACRO DIVERGENCE: GIFT Nifty dumping (-${Math.abs(giftNiftyDelta).toFixed(1)} pts) into domestic CALL breakout. High risk bull trap.`);
-        }
-      } else if (triggerType === "PUT_BUY") {
-        if (giftNiftyDelta < -20) {
-          totalScore = Math.min(100, totalScore + 5);
-          explanation.push(`🌍 GLOBAL MACRO TAILWIND (+5 points): GIFT Nifty bearish breakdown lead (${giftNiftyDelta.toFixed(1)} pts)`);
-        } else if (giftNiftyDelta > 35) {
-          totalScore = 0;
-          isFalseBreakout = true;
-          explanation.push(`✕ GLOBAL MACRO DIVERGENCE: GIFT Nifty surging (+${giftNiftyDelta.toFixed(1)} pts) against domestic PUT breakdown. High risk bear trap.`);
-        }
+      if (triggerType === "CALL_BUY" && giftNiftyDelta < -25) {
+        totalScore = 0;
+        isFalseBreakout = true;
+        explanation.push(`✕ GLOBAL/FUTURES DISCOUNT VETO: Futures/GIFT Nifty dumping (-${Math.abs(giftNiftyDelta).toFixed(1)} pts) into domestic CALL breakout. High risk bull trap.`);
+      } else if (triggerType === "PUT_BUY" && giftNiftyDelta > 25) {
+        totalScore = 0;
+        isFalseBreakout = true;
+        explanation.push(`✕ GLOBAL/FUTURES PREMIUM VETO: Futures/GIFT Nifty surging (+${giftNiftyDelta.toFixed(1)} pts) against domestic PUT breakdown. High risk bear trap.`);
       }
     }
 
-    // Bollinger Band Squeeze & Volatility Expansion Boost
-    const closesList = candles5m.map(c => c.close);
-    const bb = Indicators.calculateBollingerBands(closesList, 20, 2.0);
-    if (bb && bb.bandwidth < 2.2 && currentVolume >= 1.2 * avgVolume5 && avgVolume5 > 0) {
-      totalScore = Math.min(100, totalScore + 10);
-      explanation.push(`💥 VOLATILITY SQUEEZE EXPANSION (+10 points): Squeeze Bandwidth (${bb.bandwidth}%) breaking out with volume explosion!`);
-    }
-
-    // ADAPTIVE RANGE BREAKOUT GATE:
-    // When the market has been consolidating (regime === "RANGE"), an ORB Breakout is valid
-    // if backed by institutional volume expansion (currentVolume >= 1.1 * avgVolume5) or strong Heavyweight breadth (>= 60%).
-    // If volume is dry/weak (< 1.1x avg) and breadth is weak in a RANGE, then it is a low-liquidity fakeout and blocked.
-    const isVolumeSupportedBreakout = currentVolume >= 1.1 * avgVolume5 && avgVolume5 > 0;
-    const isBreadthSupported = weightedBreadthRatio >= 0.60;
-
-    if (regime === "RANGE" && setupType === "ORB_BREAKOUT" && !isVolumeSupportedBreakout && !isBreadthSupported) {
-      totalScore = 0;
-      explanation.push("✕ LOW-VOLUME RANGE DRIFT GATE: Breakout in consolidation lacks institutional volume expansion (< 1.1x avg) and heavyweight support. Blocked to prevent Theta decay.");
-    }
-
-    // Severe Chop Gate: Only block if ADX < 14 AND volume is NOT expanded
-    if (currentAdx < 14 && setupType === "ORB_BREAKOUT" && !isVolumeSupportedBreakout) {
-      totalScore = 0;
-      explanation.push(`✕ SEVERE CHOP DETECTED (ADX=${currentAdx.toFixed(1)} < 14 without volume): Breakout signal score reset to zero.`);
-    }
-
-    // RANGE Regime Penalty: Apply mild -10 point penalty if breaking out of RANGE, but allow high-conviction volume breakouts to execute!
-    if (regime === "RANGE" && setupType !== "TRAP_REVERSAL") {
-      totalScore = Math.max(0, totalScore - 10);
-      explanation.push("⚠ RANGE REGIME PENALTY (-10 points): Breaking out of sideways consolidation.");
-    }
-
-    // OPENING DRIVE MOMENTUM BOOST (09:18 - 09:30 AM IST)
-    if (setupType === "OPENING_DRIVE") {
-      if (weightedBreadthRatio >= 0.60) {
-        totalScore = Math.min(100, totalScore + 10);
-        explanation.push("🚀 OPENING DRIVE MOMENTUM (+10 points): High-velocity 9:18 AM Opening Bell Impulse supported by Heavyweights!");
+    // Phase 4.2: Strict Regime-Weighted Penalties
+    if (regime === "TREND_UP") {
+      if (triggerType === "PUT_BUY" && setupType !== "TRAP_REVERSAL") {
+        totalScore = Math.max(0, totalScore - 20);
+        explanation.push("⚠ COUNTER-REGIME PENALTY (-20 points): PUT buy attempted in confirmed TREND_UP regime.");
       }
+    } else if (regime === "TREND_DOWN") {
+      if (triggerType === "CALL_BUY" && setupType !== "TRAP_REVERSAL") {
+        totalScore = Math.max(0, totalScore - 20);
+        explanation.push("⚠ COUNTER-REGIME PENALTY (-20 points): CALL buy attempted in confirmed TREND_DOWN regime.");
+      }
+    } else if (regime === "RANGE" && setupType !== "TRAP_REVERSAL") {
+      totalScore = Math.max(0, totalScore - 15);
+      explanation.push("⚠ RANGE REGIME PENALTY (-15 points): Consolidating market regime penalty.");
     }
 
-    if (isFalseBreakout && (setupType === "ORB_BREAKOUT" || setupType === "OPENING_DRIVE")) {
+    // Severe Chop Gate
+    if (currentAdx < 14 && setupType !== "TRAP_REVERSAL") {
       totalScore = 0;
-      explanation.push("✕ FALSE BREAKOUT DETECTED: Breakout signal score reset to zero.");
+      explanation.push(`✕ SEVERE CHOP DETECTED (ADX=${currentAdx.toFixed(1)} < 14): Signal score reset to zero.`);
+    }
+
+    if (isFalseBreakout) {
+      totalScore = 0;
+      explanation.push("✕ FALSE BREAKOUT DETECTED: Signal score reset to zero.");
     }
 
     // Quality labeling
