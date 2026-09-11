@@ -14,8 +14,7 @@ export type MarketRegime =
 export type StrategySetup = 
   | "ORB_BREAKOUT"
   | "TRAP_REVERSAL"
-  | "VWAP_PULLBACK"
-  | "OPENING_DRIVE";
+  | "VWAP_PULLBACK";
 
 export interface ConfluenceFactors {
   marketStructure: { score: number; max: number; factors: string[] };
@@ -176,6 +175,7 @@ export class QuantitativeEngine {
     deltaPutOi?: number;
     deltaVixPercent?: number;
     giftNiftyDelta?: number;
+    timestamp?: number;
   }): SignalScoreCard {
     const {
       spot,
@@ -183,7 +183,7 @@ export class QuantitativeEngine {
       orbHigh,
       orbLow,
       triggerType,
-      setupType = "ORB_BREAKOUT",
+      setupType = "VWAP_PULLBACK",
       cpr,
       pcr,
       vix,
@@ -199,7 +199,8 @@ export class QuantitativeEngine {
       deltaCallOi,
       deltaPutOi,
       deltaVixPercent,
-      giftNiftyDelta
+      giftNiftyDelta,
+      timestamp
     } = params;
 
     const explanation: string[] = [];
@@ -285,7 +286,7 @@ export class QuantitativeEngine {
 
     // 1. Market Structure (20 Points)
     if (setupType === "TRAP_REVERSAL") {
-      factors.marketStructure.score += 15;
+      factors.marketStructure.score += 8;
       factors.marketStructure.factors.push(triggerType === "PUT_BUY" 
         ? "Bull Trap confirmed: Spot rejected from Day High / ORB High towards VWAP"
         : "Bear Trap confirmed: Spot rejected from Day Low / ORB Low towards VWAP");
@@ -318,7 +319,7 @@ export class QuantitativeEngine {
 
     // 2. VWAP & Momentum (15 Points)
     if (setupType === "TRAP_REVERSAL") {
-      factors.vwapMomentum.score += 12;
+      factors.vwapMomentum.score += 6;
       factors.vwapMomentum.factors.push("Mean Reversion target: Session VWAP reversion path clear");
     } else {
       const isAboveVwap = spot > currentVwap;
@@ -410,7 +411,7 @@ export class QuantitativeEngine {
 
     // 6. Regime Alignment & Multi-Timeframe (15m) Trend Confirmation (10 Points)
     if (setupType === "TRAP_REVERSAL") {
-      factors.regimeAlignment.score += 10;
+      factors.regimeAlignment.score += 5;
       factors.regimeAlignment.factors.push("Mean Reversion strategy matches RANGE / Consolidation market regime");
     } else if (triggerType === "CALL_BUY" && regime === "TREND_UP") {
       factors.regimeAlignment.score += 10;
@@ -427,7 +428,7 @@ export class QuantitativeEngine {
 
     // 7. Option Momentum (10 Points)
     if (setupType === "TRAP_REVERSAL") {
-      factors.optionMomentum.score += 8;
+      factors.optionMomentum.score += 4;
       factors.optionMomentum.factors.push("Exhaustion momentum confirmed for mean reversion scalp");
     } else if (optionPremiumRsi > 52 && optionPremiumRsi < 78) {
       factors.optionMomentum.score += 6;
@@ -669,6 +670,28 @@ export class QuantitativeEngine {
     } else if (regime === "RANGE" && setupType !== "TRAP_REVERSAL") {
       totalScore = Math.max(0, totalScore - 15);
       explanation.push("⚠ RANGE REGIME PENALTY (-15 points): Consolidating market regime penalty.");
+    }
+
+    // Phase 2A & 4A: Hard Veto for VWAP_PULLBACK in RANGE or LOW_VOLATILITY
+    if (setupType === "VWAP_PULLBACK" && (regime === "RANGE" || regime === "LOW_VOLATILITY")) {
+      totalScore = 0;
+      isFalseBreakout = true;
+      explanation.push("✕ RANGE REGIME VETO: VWAP Pullback trend setups are strictly prohibited during RANGE / Low Volatility chop.");
+    }
+
+    // Bug H: Late-Session Theta Decay Penalty (after 14:00 IST)
+    const evalTimestamp = timestamp || Date.now();
+    const istTimeStr = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date(evalTimestamp));
+    const [istHourStr] = istTimeStr.split(":");
+    const istHour = parseInt(istHourStr, 10);
+    if (istHour >= 14) {
+      totalScore = Math.max(0, totalScore - 10);
+      explanation.push("⚠ LATE-SESSION PENALTY (-10 points): Trading after 2:00 PM IST faces rapid Theta acceleration.");
     }
 
     // Severe Chop Gate

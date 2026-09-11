@@ -136,15 +136,22 @@ export class Indicators {
     if (candles.length === 0) return 0;
     let cumulativeTypicalVolume = 0;
     let cumulativeVolume = 0;
+    let fallbackTypicalSum = 0;
 
     for (const c of candles) {
       const typicalPrice = (c.high + c.low + c.close) / 3;
-      const vol = (c.volume && c.volume > 0) ? c.volume : 1;
-      cumulativeTypicalVolume += typicalPrice * vol;
-      cumulativeVolume += vol;
+      fallbackTypicalSum += typicalPrice;
+      const vol = (c.volume && c.volume > 0) ? c.volume : 0;
+      if (vol > 0) {
+        cumulativeTypicalVolume += typicalPrice * vol;
+        cumulativeVolume += vol;
+      }
     }
 
-    return cumulativeVolume > 0 ? (cumulativeTypicalVolume / cumulativeVolume) : (candles[candles.length - 1].close || 0);
+    if (cumulativeVolume > 0) {
+      return cumulativeTypicalVolume / cumulativeVolume;
+    }
+    return fallbackTypicalSum / candles.length;
   }
 
   /**
@@ -265,4 +272,102 @@ export class Indicators {
       bandwidth: parseFloat(bandwidth.toFixed(2))
     };
   }
+
+  /**
+   * Calculates SuperTrend indicator (period, multiplier)
+   */
+  public static calculateSuperTrend(
+    highs: number[],
+    lows: number[],
+    closes: number[],
+    period: number = 10,
+    multiplier: number = 3
+  ): SuperTrendResult {
+    const len = closes.length;
+    if (len === 0) return { superTrend: [], direction: [] };
+    const atr = this.calculateATR(highs, lows, closes, period);
+    const superTrend: number[] = new Array(len).fill(0);
+    const direction: ("BULLISH" | "BEARISH")[] = new Array(len).fill("BULLISH");
+
+    const upperBand: number[] = new Array(len).fill(0);
+    const lowerBand: number[] = new Array(len).fill(0);
+
+    for (let i = 0; i < len; i++) {
+      const hl2 = (highs[i] + lows[i]) / 2;
+      const currentAtr = atr[i] || 10;
+      const basicUpper = hl2 + multiplier * currentAtr;
+      const basicLower = hl2 - multiplier * currentAtr;
+
+      if (i === 0) {
+        upperBand[i] = basicUpper;
+        lowerBand[i] = basicLower;
+        direction[i] = closes[i] >= basicLower ? "BULLISH" : "BEARISH";
+        superTrend[i] = direction[i] === "BULLISH" ? lowerBand[i] : upperBand[i];
+      } else {
+        lowerBand[i] = (basicLower > lowerBand[i - 1] || closes[i - 1] < lowerBand[i - 1]) ? basicLower : lowerBand[i - 1];
+        upperBand[i] = (basicUpper < upperBand[i - 1] || closes[i - 1] > upperBand[i - 1]) ? basicUpper : upperBand[i - 1];
+
+        if (direction[i - 1] === "BULLISH") {
+          direction[i] = closes[i] < lowerBand[i] ? "BEARISH" : "BULLISH";
+        } else {
+          direction[i] = closes[i] > upperBand[i] ? "BULLISH" : "BEARISH";
+        }
+        superTrend[i] = direction[i] === "BULLISH" ? lowerBand[i] : upperBand[i];
+      }
+    }
+
+    return { superTrend, direction };
+  }
+
+  /**
+   * Calculates Moving Average Convergence Divergence (MACD) with 1-to-1 index alignment
+   */
+  public static calculateMACD(
+    closes: number[],
+    fastPeriod: number = 12,
+    slowPeriod: number = 26,
+    signalPeriod: number = 9
+  ): MACDResult {
+    const len = closes.length;
+    if (len === 0) return { macd: [], signal: [], histogram: [] };
+
+    const calcAlignedEMA = (values: number[], period: number): number[] => {
+      const out: number[] = new Array(values.length).fill(0);
+      if (values.length === 0) return out;
+      const k = 2 / (period + 1);
+      out[0] = values[0];
+      for (let i = 1; i < values.length; i++) {
+        out[i] = values[i] * k + out[i - 1] * (1 - k);
+      }
+      return out;
+    };
+
+    const fastEma = calcAlignedEMA(closes, fastPeriod);
+    const slowEma = calcAlignedEMA(closes, slowPeriod);
+    const macd: number[] = new Array(len);
+
+    for (let i = 0; i < len; i++) {
+      macd[i] = parseFloat((fastEma[i] - slowEma[i]).toFixed(4));
+    }
+
+    const signal = calcAlignedEMA(macd, signalPeriod);
+    const histogram: number[] = new Array(len);
+    for (let i = 0; i < len; i++) {
+      histogram[i] = parseFloat((macd[i] - signal[i]).toFixed(4));
+    }
+
+    return { macd, signal, histogram };
+  }
 }
+
+export interface SuperTrendResult {
+  superTrend: number[];
+  direction: ("BULLISH" | "BEARISH")[];
+}
+
+export interface MACDResult {
+  macd: number[];
+  signal: number[];
+  histogram: number[];
+}
+

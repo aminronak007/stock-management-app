@@ -42,6 +42,7 @@ export class ExcelLogger {
       entrySpot?: number;
       parentTradeId?: number;
       entryPrice?: number;
+      initialStopLoss?: number;
     } = {}
   ): Promise<number> {
     const tier = additionalData.tier || "SNIPER";
@@ -96,7 +97,8 @@ export class ExcelLogger {
         entrySpot: additionalData.entrySpot,
         peakPremium: price,
         parentTradeId: additionalData.parentTradeId,
-        entryPrice: additionalData.entryPrice
+        entryPrice: additionalData.entryPrice,
+        initialStopLoss: additionalData.initialStopLoss || additionalData.sl
       });
       console.log(`[TradeLogger] Trade saved to SQLite Database.`);
     } catch (e: any) {
