@@ -955,6 +955,17 @@ async function main() {
           if (q.prevClose && q.prevClose > 0) {
             dynamicPrevCloseMap[sym] = q.prevClose;
           }
+          advisory.processTick({
+            symbol: sym,
+            ltp: q.ltp,
+            netChange: q.netChange,
+            netChangePercent: q.netChangePercent,
+            prevClose: q.prevClose,
+            volume: (q as any).volume || 100,
+            bidPrice: q.bidPrice || q.ltp,
+            askPrice: q.askPrice || q.ltp,
+            timestamp: q.timestamp || Date.now()
+          }).catch(() => {});
           console.log(`[Broker] Loaded initial quote for ${sym}: ₹${q.ltp}, Change: ${q.netChange} (${q.netChangePercent}%)`);
           broadcast({
             type: "TICK",

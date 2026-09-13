@@ -3,7 +3,7 @@ import { Indicators } from "../utils/indicators";
 import { Greeks } from "../utils/greeks";
 import { CPR, CPRValues } from "../utils/cpr";
 import { ExcelLogger } from "../utils/excelLogger";
-import { QuantitativeEngine, StrategySetup } from "../utils/quantitativeEngine";
+import { QuantitativeEngine, StrategySetup, SignalScoreCard } from "../utils/quantitativeEngine";
 import { DatabaseService, SignalTier } from "../utils/database";
 import { TelegramService } from "./telegramService";
 import {
@@ -50,9 +50,29 @@ export interface ActivePositionInfo {
   openTradeId?: number | null;
 }
 
+export interface PendingLimitEntry {
+  type: "CALL_BUY" | "PUT_BUY";
+  setupType: StrategySetup;
+  strike: number;
+  limitSpot: number;
+  optionLtpAtSignal: number;
+  reasoning: string;
+  expiresAt: number;
+  scoreCard: SignalScoreCard;
+  delta: number;
+  scaledStopLoss: number;
+  scaledTarget1: number;
+  scaledTarget2: number;
+}
+
 interface TierPositionState {
   activeSignal: AdvisorySignal | null;
   entrySpot: number;
+  entryDelta?: number;
+  originalInitialRisk?: number;
+  lastLossDirection?: "CALL_BUY" | "PUT_BUY";
+  directionalCooldownUntil?: number;
+  pendingEntry?: PendingLimitEntry | null;
   liveOptionLtp?: number | null;
   peakPremiumLtp: number;
   isBreakevenLocked: boolean;
@@ -98,13 +118,23 @@ export class AdvisoryManager {
     "NSE:AXISBANK-EQ": 0,
     "NSE:KOTAKBANK-EQ": 0
   };
+  private heavyweightNetChange: { [symbol: string]: number } = {
+    "NSE:NIFTYBANK-INDEX": 0,
+    "NSE:FINNIFTY-INDEX": 0,
+    "NSE:RELIANCE-EQ": 0,
+    "NSE:HDFCBANK-EQ": 0,
+    "NSE:ICICIBANK-EQ": 0,
+    "NSE:INFY-EQ": 0,
+    "NSE:TCS-EQ": 0,
+    "NSE:LT-EQ": 0,
+    "NSE:AXISBANK-EQ": 0,
+    "NSE:KOTAKBANK-EQ": 0
+  };
   private heavyweightVolumes: { [symbol: string]: { cumVol: number; cumPv: number } } = {};
   private latestGiftNifty: GiftNiftyData | null = null;
 
   // Nifty price candles for calculations
   private indexCandles: Candle[] = [];
-  private current3MinVolume: number = 0;
-  private prev3MinVolumeMA: number = 0;
   private currentVwap: number = 0;
 
   // ORB parameters
@@ -128,6 +158,11 @@ export class AdvisoryManager {
   };
   private sampleActiveTiers: Set<SignalTier> = new Set<SignalTier>();
   private sessionRealizedPnl: number = 0;
+  private failedTrapLevels: { level: number; type: "HIGH" | "LOW"; expiredAt: number }[] = [];
+  private prevDayClose: number = 0;
+  private openingGapPoints: number = 0;
+  private openingGapPercent: number = 0;
+  private dailyAtr: number = 90;
 
   // 3-Tier Independent Position State Machines:
   // 1. SNIPER (Score >= 75%) -> Official Alert & Optional Real Execution
@@ -195,18 +230,19 @@ export class AdvisoryManager {
 
   // Risk parameters
   private dailyLossLimit: number = -2.0; // max -2R daily drawdown
-  private dailyMaxTrades: number = 5; // max 5 trades per tier per day to prevent fee accumulation and churn
+  private dailyMaxTrades: number = 1; // max 1 trade per day (Strict Quality-First Discipline)
+  private maxDailyRupeeLoss: number = 800; // max ₹800 daily drawdown hard stop
 
   public getDailyMaxTrades(): number {
     const envVal = process.env.DAILY_MAX_TRADES;
-    let maxTrades = envVal !== undefined ? parseInt(envVal, 10) : 5;
-    if (isNaN(maxTrades)) maxTrades = 5;
+    let maxTrades = envVal !== undefined ? parseInt(envVal, 10) : 1;
+    if (isNaN(maxTrades)) maxTrades = 1;
     try {
       const db = DatabaseService.initialize();
       const row = db.prepare("SELECT value FROM settings WHERE key = 'DAILY_MAX_TRADES'").get() as { value: string } | undefined;
       if (row) {
         const parsed = parseInt(row.value, 10);
-        if (!isNaN(parsed)) maxTrades = parsed;
+        if (!isNaN(parsed)) maxTrades = Math.min(1, parsed);
       }
     } catch (e) {}
     return maxTrades;
@@ -250,8 +286,10 @@ export class AdvisoryManager {
 
       if (candles.length > 0) {
         const lastDay = candles[candles.length - 1];
+        this.prevDayClose = lastDay.close;
+        this.dailyAtr = Math.max(60, (lastDay.high - lastDay.low));
         this.cpr = CPR.calculateCPR(lastDay.high, lastDay.low, lastDay.close);
-        console.log(`[AdvisoryManager] Daily CPR calculated: Pivot=${this.cpr.pivot.toFixed(2)}, Range=[${this.cpr.bottomRange.toFixed(2)} - ${this.cpr.topRange.toFixed(2)}]`);
+        console.log(`[AdvisoryManager] Daily CPR calculated: Pivot=${this.cpr.pivot.toFixed(2)}, Range=[${this.cpr.bottomRange.toFixed(2)} - ${this.cpr.topRange.toFixed(2)}], PrevClose=${this.prevDayClose.toFixed(2)}, DailyATR=${this.dailyAtr.toFixed(1)}`);
       } else {
         console.warn("[AdvisoryManager] Could not fetch real daily candles from broker. CPR filter disabled.");
         this.cpr = null;
@@ -370,6 +408,86 @@ export class AdvisoryManager {
     console.log(
       `[AdvisoryManager] 🔒 ORB hydrated from history (${orbCandles.length} bars): High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)} (LOCKED)`
     );
+  }
+
+  /**
+   * Self-Healing Engine: If restarted after 9:30 AM or if initial broker connection
+   * was unauthenticated, dynamically fetches historical candles, hydrates ORB boundaries,
+   * and calculates session VWAP on demand so trading is NEVER blocked.
+   */
+  public async ensureHistoricalDataAndOrb(spot: number = 0): Promise<boolean> {
+    if (this.orbHigh > 0 && this.orbLow > 0 && this.indexCandles.length >= 10) {
+      return true;
+    }
+
+    try {
+      const today = new Date();
+      const prevDate = new Date(today);
+      prevDate.setDate(prevDate.getDate() - 5);
+
+      const todayStr = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).format(today);
+
+      const prevDateStr = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).format(prevDate);
+
+      // 1. Fetch 5-minute historical candles
+      const historical5m = await this.broker.getHistoricalCandles(
+        "NSE:NIFTY50-INDEX",
+        "5",
+        prevDateStr,
+        todayStr
+      );
+
+      if (historical5m && historical5m.length > 0) {
+        this.indexCandles = historical5m;
+        this.hydrateOrbFromHistory();
+        this.refreshSessionVwap();
+        console.log(`[AdvisoryManager] 🔄 Self-healing complete: Loaded ${this.indexCandles.length} candles. ORB High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}, VWAP=${this.currentVwap.toFixed(2)}`);
+      }
+
+      // 2. Fetch daily candle for CPR & Daily ATR if missing
+      if (!this.cpr || this.prevDayClose === 0) {
+        const dailyCandles = await this.broker.getHistoricalCandles(
+          "NSE:NIFTY50-INDEX",
+          "D",
+          prevDateStr,
+          todayStr
+        );
+        if (dailyCandles && dailyCandles.length > 0) {
+          const lastDay = dailyCandles[dailyCandles.length - 1];
+          this.prevDayClose = lastDay.close;
+          this.dailyAtr = Math.max(60, lastDay.high - lastDay.low);
+          this.cpr = CPR.calculateCPR(lastDay.high, lastDay.low, lastDay.close);
+          console.log(`[AdvisoryManager] 🔄 Self-healing CPR calculated: Pivot=${this.cpr.pivot.toFixed(2)}, Range=[${this.cpr.bottomRange.toFixed(2)} - ${this.cpr.topRange.toFixed(2)}], PrevClose=${this.prevDayClose.toFixed(2)}`);
+        }
+      }
+    } catch (err) {
+      console.warn("[AdvisoryManager] Could not fetch historical candles for self-healing:", err);
+    }
+
+    // Dynamic Fallback: If ORB still uncaptured (e.g. historical candles API unavailable),
+    // calculate synthetic ORB from session high/low or spot price so VWAP Pullback is NEVER blocked!
+    if (this.orbHigh <= 0 || this.orbLow <= 0) {
+      const effectiveSpot = spot > 0 ? spot : (this.indexSpotPrice > 0 ? this.indexSpotPrice : 23500);
+      const sessionHigh = this.dayHigh > 0 ? this.dayHigh : effectiveSpot + 25;
+      const sessionLow = this.dayLow < Infinity ? this.dayLow : effectiveSpot - 25;
+      this.orbHigh = sessionHigh;
+      this.orbLow = sessionLow;
+      this.isOrbActive = false;
+      this.isOrbLocked = true;
+      console.log(`[AdvisoryManager] 🛡️ Fallback ORB Activated: High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)} (LOCKED)`);
+    }
+
+    return true;
   }
 
   /**
@@ -667,20 +785,65 @@ export class AdvisoryManager {
             this.orbHigh = tick.ltp;
             this.orbLow = tick.ltp;
             this.isOrbActive = true;
-            console.log(`[AdvisoryManager] 9:15 AM ORB formation window active. Tracking boundaries.`);
+            if (this.prevDayClose > 0 && this.openingGapPoints === 0) {
+              this.openingGapPoints = tick.ltp - this.prevDayClose;
+              this.openingGapPercent = (this.openingGapPoints / this.prevDayClose) * 100;
+              console.log(`[AdvisoryManager] 🌅 9:15 AM Opening Gap Detected: ${this.openingGapPoints >= 0 ? '+' : ''}${this.openingGapPoints.toFixed(2)} pts (${this.openingGapPercent.toFixed(2)}%) vs Yesterday Close (${this.prevDayClose.toFixed(2)})`);
+            }
+            console.log(`[AdvisoryManager] 9:15 AM Opening Drive window active. Tracking boundaries.`);
           }
           this.orbHigh = Math.max(this.orbHigh, tick.ltp);
           this.orbLow = Math.min(this.orbLow, tick.ltp);
         }
       }
 
-      // Lock ORB range permanently after 9:30 AM IST & evaluate signals
+      // Lock ORB range permanently after 9:30 AM IST
       if ((hours === 9 && minutes >= 30) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15)) {
         if (!this.isOrbLocked && (this.orbHigh > 0 || this.orbLow > 0)) {
           this.isOrbActive = false;
           this.isOrbLocked = true;
           console.log(`[AdvisoryManager] 🔒 9:30 AM ORB locked permanently: High=${this.orbHigh.toFixed(2)}, Low=${this.orbLow.toFixed(2)}`);
         }
+      }
+
+      // Phase 1A: Process any pending limit pullback entry
+      const sniperPos = this.tierPositions.SNIPER;
+      if (sniperPos.pendingEntry) {
+        if (timestamp > sniperPos.pendingEntry.expiresAt) {
+          console.log(`[AdvisoryManager] [SNIPER] ⏳ Pending limit entry expired without 30% pullback retracement. Cancelled.`);
+          sniperPos.pendingEntry = null;
+        } else {
+          const isFilled = sniperPos.pendingEntry.type === "CALL_BUY"
+            ? tick.ltp <= sniperPos.pendingEntry.limitSpot
+            : tick.ltp >= sniperPos.pendingEntry.limitSpot;
+          if (isFilled) {
+            const p = sniperPos.pendingEntry;
+            sniperPos.pendingEntry = null;
+            console.log(`[AdvisoryManager] [SNIPER] 🎯 Limit order filled on pullback! Executing ${p.type} entry at spot ${tick.ltp.toFixed(1)} (limit target was ${p.limitSpot.toFixed(1)}).`);
+            this.executePositionEntry(
+              "SNIPER",
+              tick.ltp,
+              p.type,
+              p.setupType,
+              p.strike,
+              p.optionLtpAtSignal,
+              p.delta,
+              p.scaledStopLoss,
+              p.scaledTarget1,
+              p.scaledTarget2,
+              p.scoreCard,
+              `${p.reasoning} [Filled at 30% Retracement: ${tick.ltp.toFixed(1)}]`,
+              timestamp
+            ).catch(err => {
+              console.error("[AdvisoryManager] Error executing filled pending entry:", err);
+            });
+          }
+        }
+      }
+
+      // Phase 2B: Evaluate signals starting from 10:00 AM IST to 3:15 PM IST!
+      const canEvaluateSignals = (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15);
+      if (canEvaluateSignals) {
         // One evaluation at a time, at most once per second — never stampede Fyers on every tick
         if (!this.breakoutEvalInflight && timestamp - this.lastBreakoutEvalAt >= 1000) {
           this.lastBreakoutEvalAt = timestamp;
@@ -703,17 +866,22 @@ export class AdvisoryManager {
       }
     }
 
-    // 3. Track Heavyweights & calculate continuous intraday cumulative VWAP
+    // 3. Track Heavyweights & calculate continuous intraday cumulative VWAP (Bug D fix: volume > 0)
     if (tick.symbol in this.heavyweightLtp && tick.ltp > 0) {
       this.heavyweightLtp[tick.symbol] = tick.ltp;
-      const vol = tick.volume || 100;
-      const prev = this.heavyweightVolumes[tick.symbol] || { cumVol: 0, cumPv: 0 };
-      const newVol = prev.cumVol + vol;
-      const newPv = prev.cumPv + tick.ltp * vol;
-      this.heavyweightVolumes[tick.symbol] = { cumVol: newVol, cumPv: newPv };
-      if (newVol > 0) {
+      if (typeof tick.netChangePercent === "number" && !isNaN(tick.netChangePercent)) {
+        this.heavyweightNetChange[tick.symbol] = tick.netChangePercent;
+      } else if (typeof tick.netChange === "number" && tick.prevClose && tick.prevClose > 0) {
+        this.heavyweightNetChange[tick.symbol] = parseFloat(((tick.netChange / tick.prevClose) * 100).toFixed(2));
+      }
+      const vol = (tick.volume && tick.volume > 0) ? tick.volume : 0;
+      if (vol > 0) {
+        const prev = this.heavyweightVolumes[tick.symbol] || { cumVol: 0, cumPv: 0 };
+        const newVol = prev.cumVol + vol;
+        const newPv = prev.cumPv + tick.ltp * vol;
+        this.heavyweightVolumes[tick.symbol] = { cumVol: newVol, cumPv: newPv };
         this.heavyweightVwap[tick.symbol] = parseFloat((newPv / newVol).toFixed(2));
-      } else {
+      } else if (!this.heavyweightVwap[tick.symbol] || this.heavyweightVwap[tick.symbol] === 0) {
         this.heavyweightVwap[tick.symbol] = tick.ltp;
       }
     }
@@ -756,12 +924,25 @@ export class AdvisoryManager {
    * Evaluates if a high-probability breakout direction occurred and routes to appropriate tier
    */
   private async evaluateBreakoutSignals(spot: number, timestamp: number): Promise<void> {
-    // Account-Level Anti-Overtrading Guard: Global Daily Trade Cap (5 trades) & 2-Loss Circuit Breaker
+    // Account-Level Anti-Overtrading Guard: Global Daily Trade Cap (2 trades) & 2-Loss Circuit Breaker
     const globalLock = DatabaseService.isGlobalDailyTradingLocked(timestamp, this.getDailyMaxTrades());
     if (globalLock.locked) {
       this.lastSignalBlockReason = globalLock.reason;
       return;
     }
+
+    // Capital Preservation Hard Stop: Cap maximum daily loss at ₹800
+    try {
+      const db = DatabaseService.initialize();
+      const dateParts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata" }).format(new Date(timestamp)).split("/");
+      const formattedDate = `${dateParts[0]}-${dateParts[1]}-${dateParts[2]}`;
+      const daySummary = db.prepare("SELECT SUM(net_pnl) as total_pnl FROM paper_trades WHERE datetime LIKE ? AND net_pnl IS NOT NULL").get(`%${formattedDate}%`) as { total_pnl: number | null } | undefined;
+      const todayPnl = daySummary?.total_pnl || 0;
+      if (todayPnl <= -this.maxDailyRupeeLoss) {
+        this.lastSignalBlockReason = `Daily loss limit reached (Today's Net PnL: ₹${todayPnl.toFixed(2)}, hard cap: -₹${this.maxDailyRupeeLoss}). Trading halted to preserve capital.`;
+        return;
+      }
+    } catch {}
 
     // Track whether current bar is inside midday lunch hour (11:00 AM to 1:30 PM IST)
     const istStr = new Intl.DateTimeFormat("en-GB", {
@@ -781,13 +962,12 @@ export class AdvisoryManager {
       return;
     }
 
-    // Without a captured ORB, do not evaluate (and do not hit the option-chain API)
-    if (this.orbHigh <= 0 || this.orbLow <= 0) {
-      return;
+    // Self-healing check: Ensure ORB & history are loaded even if backend started late (e.g. 10:00 AM)
+    if (this.orbHigh <= 0 || this.orbLow <= 0 || this.indexCandles.length < 5) {
+      await this.ensureHistoricalDataAndOrb(spot);
     }
 
     const isAboveVwap = spot > this.currentVwap;
-    const buffer = orbConfirmationBuffer(spot);
     const closePrices = this.indexCandles.map(c => c.close);
     const { trendBullish: isTrendBullish, trendBearish: isTrendBearish } = getIntradayEmaTrend(closePrices, spot);
 
@@ -799,61 +979,113 @@ export class AdvisoryManager {
     }
 
     let candidate: "CALL_BUY" | "PUT_BUY" | null = null;
-    let setupType: StrategySetup = "ORB_BREAKOUT";
+    let setupType: StrategySetup = "VWAP_PULLBACK";
     let reasoning = "";
 
     const closedCandles = this.indexCandles.length > 1 ? this.indexCandles.slice(0, -1) : [];
     const lastClosedCandle = closedCandles.length > 0 ? closedCandles[closedCandles.length - 1] : undefined;
 
-    // -------------------------------------------------------------
-    // STRATEGY 1: TRAP REVERSAL / MEAN REVERSION (Priority 1: Fading Range Boundaries)
-    // -------------------------------------------------------------
-    const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
-    const isTestingDayLow = this.dayLow <= this.orbLow + 2;
+    // Determine Intraday Trend Direction
+    // If market is trending (e.g. below VWAP with bearish EMAs or above VWAP with bullish EMAs),
+    // we PRIORITIZE TREND-FOLLOWING BREAKOUTS & PULLBACKS and block counter-trend knife catching!
+    const isIntradayBearTrend = !isAboveVwap && (isTrendBearish || spot < this.currentVwap - 10);
+    const isIntradayBullTrend = isAboveVwap && (isTrendBullish || spot > this.currentVwap + 10);
 
-    const hasUpperWickRejection = lastClosedCandle && (
-      (lastClosedCandle.high - Math.max(lastClosedCandle.open, lastClosedCandle.close)) >= 0.25 * Math.max(3, lastClosedCandle.high - lastClosedCandle.low) ||
-      lastClosedCandle.close < lastClosedCandle.open
-    );
-    const hasLowerWickRejection = lastClosedCandle && (
-      (Math.min(lastClosedCandle.open, lastClosedCandle.close) - lastClosedCandle.low) >= 0.25 * Math.max(3, lastClosedCandle.high - lastClosedCandle.low) ||
-      lastClosedCandle.close > lastClosedCandle.open
-    );
-
-    if (isTestingDayHigh && (lastClosedCandle?.high || spot) >= this.orbHigh - 3 && hasUpperWickRejection && spot > this.currentVwap + 6) {
-      candidate = "PUT_BUY";
-      setupType = "TRAP_REVERSAL";
-      reasoning = `[MEAN REVERSION] Bull Trap at Day High (${this.dayHigh.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
-    } else if (isTestingDayLow && (lastClosedCandle?.low || spot) <= this.orbLow + 3 && hasLowerWickRejection && spot < this.currentVwap - 6) {
-      candidate = "CALL_BUY";
-      setupType = "TRAP_REVERSAL";
-      reasoning = `[MEAN REVERSION] Bear Trap at Day Low (${this.dayLow.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
+    // =============================================================
+    // STRATEGY ROUTING ENGINE: INSTITUTIONAL PULLBACK-FIRST ARCHITECTURE
+    // =============================================================
+    // 1. Phase 2B: Never trade before 10:00 AM IST: Let the morning structure fully form and eliminate 9:15-10:00 AM chop!
+    if (istTotalMinutes < 600) {
+      this.lastSignalBlockReason = "Building market structure (09:15-10:00 AM). High-conviction institutional setups activate after 10:00 AM IST.";
+      return;
     }
 
-    // -------------------------------------------------------------
-    // STRATEGY 2: VWAP & 9/21 EMA PULLBACK (Priority 2: Trend Continuation)
-    // -------------------------------------------------------------
-    else if (spot > this.orbHigh && isAboveVwap && Math.abs(spot - this.currentVwap) <= 15 && (isTrendBullish || spot > this.orbHigh + 10)) {
-      candidate = "CALL_BUY";
-      setupType = "VWAP_PULLBACK";
-      reasoning = `[VWAP PULLBACK] Bullish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation bounce.`;
-    } else if (spot < this.orbLow && !isAboveVwap && Math.abs(spot - this.currentVwap) <= 15 && (isTrendBearish || spot < this.orbLow - 10)) {
-      candidate = "PUT_BUY";
-      setupType = "VWAP_PULLBACK";
-      reasoning = `[VWAP PULLBACK] Bearish Trend Pullback: Retracement to session VWAP (${this.currentVwap.toFixed(1)}) with continuation rejection.`;
+    // Technical Indicators (ATR, SuperTrend, MACD)
+    const highsList = this.indexCandles.map(c => c.high);
+    const lowsList = this.indexCandles.map(c => c.low);
+    const atrList = Indicators.calculateATR(highsList, lowsList, closePrices, 14);
+    const atrValue = atrList.length > 0 ? atrList[atrList.length - 1] : 12;
+
+    const stResult = Indicators.calculateSuperTrend(highsList, lowsList, closePrices, 10, 3);
+    const currentStDirection = stResult.direction.length > 0 ? stResult.direction[stResult.direction.length - 1] : undefined;
+
+    const macdResult = Indicators.calculateMACD(closePrices, 12, 26, 9);
+    const curHist = macdResult.histogram.length > 0 ? macdResult.histogram[macdResult.histogram.length - 1] : 0;
+    const prevHist = macdResult.histogram.length > 1 ? macdResult.histogram[macdResult.histogram.length - 2] : 0;
+    const isMacdBullish = curHist > 0 || curHist > prevHist;
+    const isMacdBearish = curHist < 0 || curHist < prevHist;
+
+    // 2. Compute 15-minute VWAP Slope to ensure trend momentum
+    const todayCandles = this.getTodaySessionCandles(timestamp);
+    let isVwapSlopeBullish = true;
+    let isVwapSlopeBearish = true;
+    if (todayCandles.length >= 4) {
+      const vwap15mAgo = Indicators.calculateVWAP(todayCandles.slice(0, -3));
+      const slope = this.currentVwap - vwap15mAgo;
+      isVwapSlopeBullish = slope >= -0.5; // rising or flat
+      isVwapSlopeBearish = slope <= 0.5;  // falling or flat
     }
 
+    // 3. Phase 2C: Completed 5-Minute Candle Bounce Confirmation with Volume Expansion
+    const avgVol5 = closedCandles.slice(-5).reduce((s, c) => s + (c.volume || 0), 0) / Math.max(1, Math.min(5, closedCandles.length));
+    const isCandleVolumeConfirmed = avgVol5 > 0 ? ((lastClosedCandle?.volume || 0) >= avgVol5 * 1.15) : true;
+
+    // For CALL: last closed candle must be GREEN (close > open) and spot holding above its low!
+    const isCallBounceConfirmed = !!(lastClosedCandle && (lastClosedCandle.close > lastClosedCandle.open) && (spot >= lastClosedCandle.low) && isCandleVolumeConfirmed);
+    // For PUT: last closed candle must be RED (close < open) and spot holding below its high!
+    const isPutRejectionConfirmed = !!(lastClosedCandle && (lastClosedCandle.close < lastClosedCandle.open) && (spot <= lastClosedCandle.high) && isCandleVolumeConfirmed);
+
+    // Bug E: Pullback zone tightened to <= 12 points of session VWAP (genuine institutional proximity)
+    const isNearVwapPullbackZone = Math.abs(spot - this.currentVwap) <= 12;
+
+    // Phase 2A: Classify regime to block VWAP Pullback in RANGE / LOW_VOLATILITY
+    const currentRegime = QuantitativeEngine.classifyRegime(spot, this.cpr, this.indiaVixValue, this.indexCandles, atrValue);
+    const isRangeOrConsolidation = currentRegime === "RANGE" || currentRegime === "LOW_VOLATILITY";
+
     // -------------------------------------------------------------
-    // STRATEGY 3: ORB BREAKOUT / BREAKDOWN (Priority 3: Range Break)
+    // SETUP 1: VWAP PULLBACK (Institutional High-Win Trend Retracement)
     // -------------------------------------------------------------
-    else if (spot > this.orbHigh + buffer && isAboveVwap) {
+    if (!isRangeOrConsolidation && isAboveVwap && (isTrendBullish || spot > this.currentVwap + 2) && isNearVwapPullbackZone && isCallBounceConfirmed && isVwapSlopeBullish && currentStDirection === "BULLISH" && isMacdBullish) {
       candidate = "CALL_BUY";
-      setupType = "ORB_BREAKOUT";
-      reasoning = `Bullish ORB breakout above ${this.orbHigh.toFixed(2)} with session VWAP alignment.`;
-    } else if (spot < this.orbLow - buffer && !isAboveVwap) {
+      setupType = "VWAP_PULLBACK";
+      reasoning = `🎯 [VWAP PULLBACK] Institutional Bull Trend Retracement: Confirmed green bounce candle at Session VWAP (${this.currentVwap.toFixed(1)}) with SuperTrend Bullish and MACD momentum.`;
+    } else if (!isRangeOrConsolidation && !isAboveVwap && (isTrendBearish || spot < this.currentVwap - 2) && isNearVwapPullbackZone && isPutRejectionConfirmed && isVwapSlopeBearish && currentStDirection === "BEARISH" && isMacdBearish) {
       candidate = "PUT_BUY";
-      setupType = "ORB_BREAKOUT";
-      reasoning = `Bearish ORB breakdown below ${this.orbLow.toFixed(2)} with session VWAP alignment.`;
+      setupType = "VWAP_PULLBACK";
+      reasoning = `🎯 [VWAP PULLBACK] Institutional Bear Trend Retracement: Confirmed red rejection candle at Session VWAP (${this.currentVwap.toFixed(1)}) with SuperTrend Bearish and MACD momentum.`;
+    }
+    // -------------------------------------------------------------
+    // SETUP 2: TRAP REVERSAL (Fading Extreme False Breakouts with Rejection Wicks)
+    // -------------------------------------------------------------
+    else if (!isIntradayBearTrend && !isIntradayBullTrend) {
+      const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
+      const isTestingDayLow = this.dayLow <= this.orbLow + 2;
+
+      const candleRange = lastClosedCandle ? Math.max(4, lastClosedCandle.high - lastClosedCandle.low) : 10;
+      const upperWick = lastClosedCandle ? (lastClosedCandle.high - Math.max(lastClosedCandle.open, lastClosedCandle.close)) : 0;
+      const lowerWick = lastClosedCandle ? (Math.min(lastClosedCandle.open, lastClosedCandle.close) - lastClosedCandle.low) : 0;
+
+      // Genuine Rejection Wick: Lower/Upper shadow must be at least 40% of total candle range and larger than opposite wick
+      const hasUpperWickRejection = lastClosedCandle && upperWick >= 0.40 * candleRange && upperWick > lowerWick;
+      const hasLowerWickRejection = lastClosedCandle && lowerWick >= 0.40 * candleRange && lowerWick > upperWick;
+
+      // Anti-Whipsaw Filter: Check if this specific level recently failed a Trap Reversal
+      const isDayHighQuarantined = this.failedTrapLevels.some(
+        f => f.type === "HIGH" && Math.abs(f.level - this.dayHigh) <= 12 && f.expiredAt > timestamp
+      );
+      const isDayLowQuarantined = this.failedTrapLevels.some(
+        f => f.type === "LOW" && Math.abs(f.level - this.dayLow) <= 12 && f.expiredAt > timestamp
+      );
+
+      if (isTestingDayHigh && !isDayHighQuarantined && (lastClosedCandle?.high || spot) >= this.orbHigh - 3 && hasUpperWickRejection && spot > this.currentVwap + 6) {
+        candidate = "PUT_BUY";
+        setupType = "TRAP_REVERSAL";
+        reasoning = `[MEAN REVERSION] Bull Trap at Day High (${this.dayHigh.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
+      } else if (isTestingDayLow && !isDayLowQuarantined && (lastClosedCandle?.low || spot) <= this.orbLow + 3 && hasLowerWickRejection && spot < this.currentVwap - 6) {
+        candidate = "CALL_BUY";
+        setupType = "TRAP_REVERSAL";
+        reasoning = `[MEAN REVERSION] Bear Trap at Day Low (${this.dayLow.toFixed(1)}): Rejection wick confirmed. Scalp back to VWAP (${this.currentVwap.toFixed(1)}).`;
+      }
     }
 
     if (!candidate) {
@@ -861,23 +1093,13 @@ export class AdvisoryManager {
       return;
     }
 
-    // Breakout Candle Confirmation / Anti-Trap Filter (for ORB_BREAKOUT only)
-    if (setupType === "ORB_BREAKOUT") {
-      // Completed candles exclude the active forming bar at index -1
-      const closedCandles = this.indexCandles.length > 1 ? this.indexCandles.slice(0, -1) : [];
-      if (closedCandles.length < 3) {
-        this.lastSignalBlockReason = "Waiting for initial post-9:30 AM 5-minute candle to close before confirming breakout.";
-        return;
-      }
-      const recentClosed = closedCandles.slice(-2);
-      const hasClosedBreakoutCandle = recentClosed.some(c => 
-        candidate === "CALL_BUY" ? c.close > this.orbHigh : c.close < this.orbLow
-      );
-
-      if (!hasClosedBreakoutCandle) {
-        this.lastSignalBlockReason = `Waiting for 5m candle close confirmation beyond ${candidate === "CALL_BUY" ? this.orbHigh.toFixed(2) : this.orbLow.toFixed(2)} to filter out wick traps.`;
-        return;
-      }
+    // Phase 3B: Directional Cooldown after loss (45 min lock on same direction)
+    const sniperState = this.tierPositions.SNIPER;
+    if (candidate === sniperState.lastLossDirection && timestamp < (sniperState.directionalCooldownUntil || 0)) {
+      const remainingMins = Math.ceil(((sniperState.directionalCooldownUntil || 0) - timestamp) / 60000);
+      this.lastSignalBlockReason = `Directional cooldown active: same-direction ${candidate} re-entry blocked for ${remainingMins}m after loss.`;
+      console.log(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
+      return;
     }
 
     // Reset anti-churn watermark level if price has retraced back inside ORB range
@@ -1045,27 +1267,25 @@ export class AdvisoryManager {
       } catch (e) {}
 
       const entryPrice = optionLeg?.ltp && optionLeg.ltp > 0 ? optionLeg.ltp : optionLtp;
-      const highsList = this.indexCandles.map(c => c.high);
-      const lowsList = this.indexCandles.map(c => c.low);
-      const atrList = Indicators.calculateATR(highsList, lowsList, closePrices, 14);
-      const atrValue = atrList.length > 0 ? atrList[atrList.length - 1] : 12; 
       
       // Calculate true dynamic RSI from market prices
       const rsiList = Indicators.calculateRSI(closePrices, 14);
       const marketRsi = rsiList.length > 0 ? rsiList[rsiList.length - 1] : 50;
 
-      // Realistic Risk & Scalp Geometry:
-      let scaledStopLoss = Math.max(6.0, Math.min(14.0, 1.2 * atrValue * delta));
-      let scaledTarget1 = parseFloat((scaledStopLoss * 1.25 * targetMultiplier).toFixed(2));
-      let scaledTarget2 = parseFloat((scaledStopLoss * 2.50 * targetMultiplier).toFixed(2));
+      // Highly Profitable Trend Scalp & Target Geometry:
+      // Widen initial Stop Loss to 15-18 pts (1.2 * ATR * delta) to prevent premature noise shakeouts
+      let scaledStopLoss = Math.max(15.0, Math.min(18.0, 1.2 * atrValue * delta));
+      // Asymmetric Profit Targets: +2.0R Target 1, +3.5R Target 2
+      let scaledTarget1 = parseFloat((scaledStopLoss * 2.00 * targetMultiplier).toFixed(2));
+      let scaledTarget2 = parseFloat((scaledStopLoss * 3.50 * targetMultiplier).toFixed(2));
 
-      // Mean Reversion Scalps target Session VWAP Golden Pocket (0.65x VWAP distance for 95%+ fill probability)
+      // Mean Reversion Scalps (fading range boundaries only in non-trending markets)
       if (setupType === "TRAP_REVERSAL") {
         const vwapDist = Math.abs(spot - this.currentVwap);
-        const vwapTargetPts = Math.max(6.0, Math.min(18.0, vwapDist * delta));
-        scaledStopLoss = Math.max(5.0, Math.min(8.5, 0.85 * atrValue * delta));
-        scaledTarget1 = parseFloat((Math.max(6.0, Math.min(10.5, vwapTargetPts * 0.65)) * targetMultiplier).toFixed(2));
-        scaledTarget2 = parseFloat((Math.max(10.0, Math.min(20.0, vwapTargetPts * 1.15)) * targetMultiplier).toFixed(2));
+        const vwapTargetPts = Math.max(12.0, Math.min(25.0, vwapDist * delta));
+        scaledStopLoss = Math.max(10.0, Math.min(14.0, 0.90 * atrValue * delta));
+        scaledTarget1 = parseFloat((Math.max(12.0, vwapTargetPts * 0.75) * targetMultiplier).toFixed(2));
+        scaledTarget2 = parseFloat((Math.max(20.0, vwapTargetPts * 1.50) * targetMultiplier).toFixed(2));
       }
 
       const stopLossPrice = parseFloat(Math.max(0.50, entryPrice - scaledStopLoss).toFixed(2));
@@ -1091,17 +1311,19 @@ export class AdvisoryManager {
         candles5m: this.indexCandles,
         heavyweightsLtp: this.heavyweightLtp,
         heavyweightsVwap: this.heavyweightVwap,
+        heavyweightsNetChange: this.heavyweightNetChange,
         optionPremiumRsi: marketRsi,
         maxCallOiStrike,
         maxPutOiStrike,
         deltaCallOi,
         deltaPutOi,
         deltaVixPercent,
-        giftNiftyDelta: giftNifty.netChange
+        giftNiftyDelta: giftNifty.netChange,
+        timestamp
       });
 
-      // Strict Institutional Gate: Require score >= 75 (High Conviction Only). Block weak chop entries (< 75).
-      const minScoreThreshold = 75;
+      // Strict Institutional Gate: Require score >= 88 (High Conviction Only). Block weak marginal chop entries (< 88).
+      const minScoreThreshold = parseInt(process.env.MIN_SIGNAL_SCORE || "88", 10) || 88;
       if (scoreCard.isFalseBreakout || scoreCard.totalScore < minScoreThreshold) {
         const moveName = triggerType === "CALL_BUY" ? "Breakout" : "Breakdown";
         const primaryReason = scoreCard.explanation.find(e => e.includes("✕") || e.includes("⚠")) || `${moveName} is valid, but confluence is ${scoreCard.totalScore}/100 (need at least ${minScoreThreshold} for High Conviction)`;
@@ -1123,7 +1345,7 @@ export class AdvisoryManager {
       }
 
       // 🤖 Autonomous Institutional AI Pre-Trade Audit (Gemini 3.6 Flash - 100% Free AI Gatekeeper)
-      const currentAdx = Indicators.calculateCandleADX(this.indexCandles.slice(-25), 14);
+      const currentAdx = Indicators.calculateCandleADX(this.indexCandles.slice(-35), 14);
       const aiAudit = await GeminiRiskOfficer.validateTradeSetup({
         candidateType: triggerType,
         setupType,
@@ -1152,32 +1374,8 @@ export class AdvisoryManager {
       }
       console.log(`[AdvisoryManager] 🤖 [GEMINI AI APPROVED]: ${aiAudit.reasoning} (AI Confidence: ${aiAudit.aiConfidence}%)`);
 
-      const envScore = process.env.MIN_SIGNAL_SCORE;
-      let minSignalScore = envScore !== undefined ? parseInt(envScore, 10) : 75;
-      if (isNaN(minSignalScore)) minSignalScore = 75;
-
-      try {
-        const db = DatabaseService.initialize();
-        const row = db.prepare("SELECT value FROM settings WHERE key = 'MIN_SIGNAL_SCORE'").get() as { value: string } | undefined;
-        if (row) {
-          const parsed = parseInt(row.value, 10);
-          if (!isNaN(parsed)) minSignalScore = parsed;
-        }
-      } catch (e) {}
-
-      // Classify into 3-Tier Multi-Track Strategy:
-      // Tier 1: SNIPER (>= 75% or MIN_SIGNAL_SCORE) -> Official Signals & UI Audio Alerts
-      // Tier 2: BALANCED (60% - 74%) -> Moderate Paper Trading in background
-      // Tier 3: EXPLORATORY (45% - 59%) -> Aggressive Paper Trading in background (only if verified)
-      let tier: SignalTier = "EXPLORATORY";
-      if (scoreCard.totalScore >= minSignalScore) {
-        tier = "SNIPER";
-      } else if (scoreCard.totalScore >= 60) {
-        tier = "BALANCED";
-      } else {
-        tier = "EXPLORATORY";
-      }
-
+      // High-Conviction Single-Tier Discipline: All approved setups execute on SNIPER tier
+      const tier: SignalTier = "SNIPER";
       const targetPos = this.tierPositions[tier];
 
       // Cross-Tier Single-Position & Correlation Lock:
@@ -1185,13 +1383,13 @@ export class AdvisoryManager {
       const allTiersList: SignalTier[] = ["SNIPER", "BALANCED", "EXPLORATORY"];
       const hasAnyActiveTier = allTiersList.some(t => this.tierPositions[t].activeSignal !== null);
       if (hasAnyActiveTier || DatabaseService.hasAnyOpenBuyTrade()) {
-        this.lastSignalBlockReason = "An active position is already open. Cross-tier duplicate entries are locked to protect capital.";
+        this.lastSignalBlockReason = "An active position is already open. Duplicate entries are locked to protect capital.";
         return;
       }
 
       // Check if this specific tier already has an active position or reached daily limits
       if (targetPos.activeSignal || DatabaseService.tierHasOpenBuy(tier)) {
-        this.lastSignalBlockReason = `A ${tier} position is already open. New entries on this tier are paused.`;
+        this.lastSignalBlockReason = `A ${tier} position is already open. New entries are paused.`;
         return;
       }
       const maxTrades = this.getDailyMaxTrades();
@@ -1225,133 +1423,184 @@ export class AdvisoryManager {
         return;
       }
 
-      const formattedReasoning = `[${tier} TIER] ${reasoning} Score: ${scoreCard.totalScore}/100. [Greeks Delta: ${delta.toFixed(2)}, SL=${scaledStopLoss.toFixed(1)}, T1=+${scaledTarget1.toFixed(1)}, T2=+${scaledTarget2.toFixed(1)}]`;
+      // Phase 1A: 30% Retracement Limit Entry Logic
+      // Instead of buying at the top of the candle, wait for 30% retracement of the confirmation candle
+      const candleRange = Math.max(4, (lastClosedCandle?.high || spot) - (lastClosedCandle?.low || spot));
+      const limitRetracement = 0.30 * candleRange;
+      const limitSpot = triggerType === "CALL_BUY"
+        ? parseFloat(((lastClosedCandle?.close || spot) - limitRetracement).toFixed(2))
+        : parseFloat(((lastClosedCandle?.close || spot) + limitRetracement).toFixed(2));
 
-      const signalObj: AdvisorySignal = {
-        type: triggerType,
-        tier,
-        strikePrice: selectedStrike,
-        entryPrice: parseFloat(entryPrice.toFixed(2)),
-        stopLossPrice: parseFloat(stopLossPrice.toFixed(2)),
-        targetPrice1: parseFloat(targetPrice1.toFixed(2)),
-        targetPrice2: parseFloat(targetPrice2.toFixed(2)),
-        reasoning: formattedReasoning,
-        timestamp,
-        scoreCard,
-        regime: scoreCard.regime
-      };
+      const isAlreadyRetraced = triggerType === "CALL_BUY"
+        ? spot <= limitSpot
+        : spot >= limitSpot;
 
-      const optionSymbol = atmChain 
-        ? (triggerType === "CALL_BUY" ? atmChain.call.symbol : atmChain.put.symbol)
-        : this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
-
-      // Kelly-Criterion Dynamic Capital Compounding Ladder:
-      // Baseline Qty: 50 Qty (2 Lots)
-      // For every +₹5,000 in cumulative net profit, scale +1 Lot (25 Qty) up to max 150 Qty (6 Lots)
-      const baseQty = parseInt(process.env.ORDER_QTY || "50", 10) || 50;
-      let compoundedQty = baseQty;
-      try {
-        const cumulativeProfit = DatabaseService.getCumulativeNetProfit();
-        if (cumulativeProfit >= 5000) {
-          const extraLots = Math.min(4, Math.floor(cumulativeProfit / 5000));
-          compoundedQty = baseQty + extraLots * 25;
-          console.log(`[AdvisoryManager] 📈 [CAPITAL COMPOUNDING LADDER] Cumulative Net Profit: ₹${cumulativeProfit.toFixed(2)}. Compounding Base Sizing to ${compoundedQty} Qty (${compoundedQty / 25} Lots).`);
-        }
-      } catch {}
-
-      let logQty = compoundedQty;
-      // Dynamic High-Conviction Institutional Sizing:
-      // SUPER-SNIPER setup: 75–150 Qty (3–6 Lots) when Score >= 88 with volume expansion
-      const volumeExpanded = isClosedBarVolumeExpanded(this.indexCandles.map(c => c.volume));
-      if (scoreCard.totalScore >= 88 && volumeExpanded) {
-        logQty = Math.min(150, Math.max(75, Math.round(compoundedQty * 1.5 / 25) * 25));
-        console.log(`[AdvisoryManager] 🚀 [INSTITUTIONAL SUPER-SNIPER] High Confluence Score (${scoreCard.totalScore}/100) + Volume Expansion! Scaling position to ${logQty} Qty (${logQty / 25} Lots).`);
-      }
-
-      const openTradeId = await ExcelLogger.logTransaction(
-        triggerType,
-        optionSymbol,
-        selectedStrike,
-        logQty,
-        entryPrice,
-        formattedReasoning,
-        {
-          tier,
-          sl: stopLossPrice,
-          t1: targetPrice1,
-          t2: targetPrice2,
-          marketRegime: scoreCard.regime,
-          confluenceScore: scoreCard.totalScore,
-          entrySpot: spot
-        }
-      );
-      if (!openTradeId) {
-        this.lastSignalBlockReason = `Could not persist the ${tier} BUY to SQLite. Entry aborted.`;
-        console.error(`[AdvisoryManager] [${tier}] Refusing to hold an in-memory-only position.`);
+      if (!isAlreadyRetraced) {
+        targetPos.pendingEntry = {
+          type: triggerType,
+          setupType,
+          strike: selectedStrike,
+          limitSpot,
+          optionLtpAtSignal: entryPrice,
+          reasoning,
+          expiresAt: timestamp + 10 * 60 * 1000,
+          scoreCard,
+          delta,
+          scaledStopLoss,
+          scaledTarget1,
+          scaledTarget2
+        };
+        this.lastSignalBlockReason = `🎯 Staged 30% Pullback Limit Entry: Waiting for spot to retrace to ${limitSpot.toFixed(1)} (current spot: ${spot.toFixed(1)}). Expiry: 10m.`;
+        console.log(`[AdvisoryManager] [${tier}] ${this.lastSignalBlockReason}`);
         return;
       }
 
-      targetPos.activeSignal = signalObj;
-      targetPos.entrySpot = spot;
-      targetPos.peakPremiumLtp = entryPrice;
-      targetPos.isBreakevenLocked = false;
-      targetPos.isTarget1Locked = false;
-      targetPos.entryTime = timestamp;
-      targetPos.activeOptionSymbol = optionSymbol;
-      targetPos.liveOptionLtp = entryPrice;
-      targetPos.openTradeId = openTradeId;
-      this.lastTriggeredBreakoutLevel[triggerType] = spot;
-      this.isSignalGeneratedToday = true;
-      this.lastSignalBlockReason = "";
-
-      if (optionSymbol) {
-        console.log(`[AdvisoryManager] [${tier}] Subscribing live WebSocket to active option contract: ${optionSymbol}`);
-        this.broker.subscribeTicks([optionSymbol]);
-      }
-      
-      // Auto Execution placement only for SNIPER Tier
-      if (tier === "SNIPER" && process.env.AUTO_ORDER_EXECUTION === "true") {
-        console.log(`[AdvisoryManager] [SNIPER] AUTO-EXECUTION ACTIVE. Placing BUY option order: ${logQty}x ${optionSymbol}`);
-        this.broker.placeOptionOrder(optionSymbol, logQty, "BUY", "MARKET")
-          .then(orderId => {
-            targetPos.activeOrderId = orderId;
-            console.log(`[AdvisoryManager] AUTO BUY ORDER FILLED. Order ID: ${orderId}`);
-            if (targetPos.activeSignal) {
-              targetPos.activeSignal.reasoning += ` | Fyers Order Fill ID: ${orderId}`;
-              this.onSignalCallback(targetPos.activeSignal);
-            }
-          })
-          .catch(err => {
-            console.error(`[AdvisoryManager] AUTO ORDER EXECUTION FAILED:`, err.message);
-          });
-      }
-
-      // Log signal into SQLite database
-      DatabaseService.logSignal(
+      await this.executePositionEntry(
+        tier,
+        spot,
         triggerType,
+        setupType,
         selectedStrike,
         entryPrice,
-        stopLossPrice,
-        targetPrice1,
-        targetPrice2,
-        formattedReasoning,
-        tier
+        delta,
+        scaledStopLoss,
+        scaledTarget1,
+        scaledTarget2,
+        scoreCard,
+        reasoning,
+        timestamp
       );
+  }
 
-      // SNIPER: official alert + optional live routing. BALANCED: show on the advisory UI.
-      if (tier === "SNIPER" || tier === "BALANCED") {
-        this.onSignalCallback(signalObj);
-        if (tier === "SNIPER") {
-          TelegramService.sendSignalAlert(signalObj).catch(err => {
-            console.warn("[AdvisoryManager] Failed to send Telegram signal alert:", err?.message || err);
-          });
-          console.log(`[AdvisoryManager] 🎯 [SNIPER TIER] OFFICIAL TRADE SIGNAL: ${triggerType} @ Strike ${selectedStrike}. Confluence: ${scoreCard.totalScore}/100.`);
-        } else {
-          console.log(`[AdvisoryManager] 📊 [BALANCED TIER] Advisory signal published: ${triggerType} @ Strike ${selectedStrike}. Score: ${scoreCard.totalScore}/100.`);
-        }
-      } else {
-        console.log(`[AdvisoryManager] 📊 [${tier} TIER] Paper Trade initiated in background: ${triggerType} @ Strike ${selectedStrike}. Score: ${scoreCard.totalScore}/100.`);
+  /**
+   * Executes position entry either immediately or when pending retracement limit order fills
+   */
+  private async executePositionEntry(
+    tier: SignalTier,
+    spot: number,
+    triggerType: "CALL_BUY" | "PUT_BUY",
+    setupType: StrategySetup,
+    selectedStrike: number,
+    entryPrice: number,
+    delta: number,
+    scaledStopLoss: number,
+    scaledTarget1: number,
+    scaledTarget2: number,
+    scoreCard: SignalScoreCard,
+    reasoning: string,
+    timestamp: number
+  ): Promise<void> {
+    const targetPos = this.tierPositions[tier];
+    if (targetPos.activeSignal || DatabaseService.tierHasOpenBuy(tier)) {
+      return;
+    }
+
+    const stopLossPrice = parseFloat(Math.max(0.50, entryPrice - scaledStopLoss).toFixed(2));
+    const targetPrice1 = parseFloat((entryPrice + scaledTarget1).toFixed(2));
+    const targetPrice2 = parseFloat((entryPrice + scaledTarget2).toFixed(2));
+
+    const formattedReasoning = `[${tier} TIER] ${reasoning} Score: ${scoreCard.totalScore}/100. [Greeks Delta: ${delta.toFixed(2)}, SL=${scaledStopLoss.toFixed(1)}, T1=+${scaledTarget1.toFixed(1)}, T2=+${scaledTarget2.toFixed(1)}]`;
+
+    const signalObj: AdvisorySignal = {
+      type: triggerType,
+      tier,
+      strikePrice: selectedStrike,
+      entryPrice: parseFloat(entryPrice.toFixed(2)),
+      stopLossPrice: parseFloat(stopLossPrice.toFixed(2)),
+      targetPrice1: parseFloat(targetPrice1.toFixed(2)),
+      targetPrice2: parseFloat(targetPrice2.toFixed(2)),
+      reasoning: formattedReasoning,
+      timestamp,
+      scoreCard,
+      regime: scoreCard.regime
+    };
+
+    const optionSymbol = this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
+
+    // Phase 1B: Dynamic Risk-Per-Trade Sizing (Max ₹300 loss per trade)
+    const maxRiskPerTrade = parseInt(process.env.MAX_RISK_PER_TRADE || "300", 10) || 300;
+    const slWidthPoints = Math.max(5.0, scaledStopLoss);
+    const riskBasedLots = Math.floor(maxRiskPerTrade / slWidthPoints / 25);
+    // Clamp between 25 (1 lot) and 75 (3 lots)
+    const logQty = Math.max(25, Math.min(75, riskBasedLots * 25));
+
+    const openTradeId = await ExcelLogger.logTransaction(
+      triggerType,
+      optionSymbol,
+      selectedStrike,
+      logQty,
+      entryPrice,
+      formattedReasoning,
+      {
+        tier,
+        sl: stopLossPrice,
+        t1: targetPrice1,
+        t2: targetPrice2,
+        marketRegime: scoreCard.regime,
+        confluenceScore: scoreCard.totalScore,
+        entrySpot: spot,
+        initialStopLoss: stopLossPrice
       }
+    );
+    if (!openTradeId) {
+      this.lastSignalBlockReason = `Could not persist the ${tier} BUY to SQLite. Entry aborted.`;
+      console.error(`[AdvisoryManager] [${tier}] Refusing to hold an in-memory-only position.`);
+      return;
+    }
+
+    targetPos.activeSignal = signalObj;
+    targetPos.entrySpot = spot;
+    targetPos.entryDelta = delta;
+    targetPos.originalInitialRisk = scaledStopLoss;
+    targetPos.peakPremiumLtp = entryPrice;
+    targetPos.isBreakevenLocked = false;
+    targetPos.isTarget1Locked = false;
+    targetPos.entryTime = timestamp;
+    targetPos.activeOptionSymbol = optionSymbol;
+    targetPos.liveOptionLtp = entryPrice;
+    targetPos.openTradeId = openTradeId;
+    this.lastTriggeredBreakoutLevel[triggerType] = spot;
+    this.lastSignalBlockReason = "";
+
+    if (optionSymbol) {
+      console.log(`[AdvisoryManager] [${tier}] Subscribing live WebSocket to active option contract: ${optionSymbol}`);
+      this.broker.subscribeTicks([optionSymbol]);
+    }
+
+    // Auto Execution placement only for SNIPER Tier
+    if (tier === "SNIPER" && process.env.AUTO_ORDER_EXECUTION === "true") {
+      console.log(`[AdvisoryManager] [SNIPER] AUTO-EXECUTION ACTIVE. Placing BUY option order: ${logQty}x ${optionSymbol}`);
+      this.broker.placeOptionOrder(optionSymbol, logQty, "BUY", "MARKET")
+        .then(orderId => {
+          targetPos.activeOrderId = orderId;
+          console.log(`[AdvisoryManager] AUTO BUY ORDER FILLED. Order ID: ${orderId}`);
+          if (targetPos.activeSignal) {
+            targetPos.activeSignal.reasoning += ` | Fyers Order Fill ID: ${orderId}`;
+            this.onSignalCallback(targetPos.activeSignal);
+          }
+        })
+        .catch(err => {
+          console.error(`[AdvisoryManager] AUTO ORDER EXECUTION FAILED:`, err.message);
+        });
+    }
+
+    // Log signal into SQLite database
+    DatabaseService.logSignal(
+      triggerType,
+      selectedStrike,
+      entryPrice,
+      stopLossPrice,
+      targetPrice1,
+      targetPrice2,
+      formattedReasoning,
+      tier
+    );
+
+    this.onSignalCallback(signalObj);
+    TelegramService.sendSignalAlert(signalObj).catch(err => {
+      console.warn("[AdvisoryManager] Failed to send Telegram signal alert:", err?.message || err);
+    });
+    console.log(`[AdvisoryManager] 🎯 [SNIPER TIER] OFFICIAL TRADE SIGNAL: ${triggerType} @ Strike ${selectedStrike}. Confluence: ${scoreCard.totalScore}/100. Qty: ${logQty}`);
   }
 
   /**
@@ -1361,7 +1610,7 @@ export class AdvisoryManager {
     const pos = this.tierPositions[tier];
     if (!pos.activeSignal || !pos.activeSignal.entryPrice || !pos.activeSignal.stopLossPrice) return;
 
-    const deltaMultiplier = 0.50;
+    const deltaMultiplier = pos.entryDelta && pos.entryDelta > 0 ? pos.entryDelta : 0.65;
     const entrySpotVal = pos.entrySpot > 0 ? pos.entrySpot : spot;
     const spotMovementGain = pos.activeSignal.type === "CALL_BUY"
       ? (spot - entrySpotVal)
@@ -1389,22 +1638,21 @@ export class AdvisoryManager {
     const closePrices = this.indexCandles.map(c => c.close);
     const atrList = Indicators.calculateATR(highsList, lowsList, closePrices, 14);
     const atrValue = atrList.length > 0 ? atrList[atrList.length - 1] : 12;
-    const deltaEst = 0.55;
+    const deltaEst = pos.entryDelta && pos.entryDelta > 0 ? pos.entryDelta : 0.65;
     // Hard breathing cushion: Never let a trailing SL sit closer than 8.0 - 15.0 pts below peak
     const minBreathingRoom = Math.max(8.0, Math.min(15.0, 1.2 * atrValue * deltaEst));
 
     // =========================================================================
-    // 1. TARGET 1 HIT (+1.25R / +1.5R): MULTI-LOT 50% PARTIAL BOOKING + RUNNER ACTIVATION
+    // 1. TARGET 1 HIT (+2.0R): MULTI-LOT 50% PARTIAL BOOKING + RUNNER ACTIVATION
     // =========================================================================
     if (pos.activeSignal.targetPrice1 && currentPremiumLtp >= pos.activeSignal.targetPrice1 && !pos.isTarget1Locked) {
       pos.isTarget1Locked = true;
       pos.isBreakevenLocked = true;
 
-      // Move Runner SL to Cost / Breakeven + fee buffer (ensure buffer >= Entry Price)
-      const feeBuffer = 1.00;
-      const profitLockPrice = parseFloat((pos.activeSignal.entryPrice + feeBuffer).toFixed(2));
+      // Lock Trailing SL to Entry + 1.0R of profit (protect accumulated 1R gains)
+      const locked1RPrice = parseFloat((pos.activeSignal.entryPrice + initialRisk * 1.0).toFixed(2));
       const maxSafeSl = parseFloat((pos.peakPremiumLtp - minBreathingRoom).toFixed(2));
-      const newSl = Math.min(profitLockPrice, maxSafeSl > pos.activeSignal.entryPrice ? maxSafeSl : profitLockPrice);
+      const newSl = Math.max(locked1RPrice, maxSafeSl); // FIXED: Math.max to protect accumulated gains!
       
       if (newSl > pos.activeSignal.stopLossPrice) {
         pos.activeSignal.stopLossPrice = newSl;
@@ -1430,7 +1678,7 @@ export class AdvisoryManager {
               pos.activeSignal?.strikePrice || "",
               partialQty,
               currentPremiumLtp,
-              `[${tier} TIER] Target 1 (+1.25R) Hit! 50% partial profit booked (${partialQty} qty @ ₹${currentPremiumLtp.toFixed(2)}). Remaining ${remainingQty} qty runner active with SL locked at breakeven.`,
+              `[${tier} TIER] Target 1 (+2.0R) Hit! 50% partial profit booked (${partialQty} qty @ ₹${currentPremiumLtp.toFixed(2)}). Remaining ${remainingQty} qty runner active with SL locked at +1.0R.`,
               {
                 tier,
                 pnl: currentPremiumLtp - entryPx,
@@ -1455,7 +1703,7 @@ export class AdvisoryManager {
         const targetLockSignal: AdvisorySignal = {
           ...pos.activeSignal,
           type: "HOLD",
-          reasoning: `Target 1 (+1.25R) achieved at ₹${currentPremiumLtp.toFixed(2)}! 50% partial profit booked. Trailing stop locked at breakeven (₹${pos.activeSignal.stopLossPrice.toFixed(2)}) for remaining Trend Runner.`
+          reasoning: `Target 1 (+2.0R) achieved at ₹${currentPremiumLtp.toFixed(2)}! 50% partial profit booked. Trailing stop locked at +1.0R (₹${pos.activeSignal.stopLossPrice.toFixed(2)}) for remaining Trend Runner.`
         };
         this.onSignalCallback(targetLockSignal);
         TelegramService.sendSignalAlert(targetLockSignal).catch(() => {});
@@ -1463,10 +1711,10 @@ export class AdvisoryManager {
     }
 
     // =========================================================================
-    // 2. FULL TAKE-PROFIT TARGET 2 EXIT (+2.50R / Multi-Bagger Climax)
+    // 2. FULL TAKE-PROFIT TARGET 2 EXIT (+3.5R / Multi-Bagger Climax)
     // =========================================================================
     if (pos.activeSignal.targetPrice2 && currentPremiumLtp >= pos.activeSignal.targetPrice2) {
-      this.triggerTierExit(tier, "EXIT_PROFIT", "Target 2 achieved. Full profit booked.", timestamp, currentPremiumLtp);
+      this.triggerTierExit(tier, "EXIT_PROFIT", "Target 2 (+3.5R) achieved. Full profit booked.", timestamp, currentPremiumLtp);
       return;
     }
 
@@ -1476,25 +1724,49 @@ export class AdvisoryManager {
     if (pos.isTarget1Locked || pos.peakPremiumLtp > pos.activeSignal.entryPrice + initialRisk * 1.5) {
       const lockedGain = (pos.peakPremiumLtp - pos.activeSignal.entryPrice) * 0.50; // Lock 50% of peak expansion
       const rawTrailedSl = parseFloat((pos.activeSignal.entryPrice + lockedGain).toFixed(2));
-      // Enforce breathing cushion: Trailing SL must NEVER choke closer than minBreathingRoom below peak
       const maxSafeSl = parseFloat((pos.peakPremiumLtp - minBreathingRoom).toFixed(2));
-      const dynamicTrailedSl = Math.min(rawTrailedSl, maxSafeSl);
+      const dynamicTrailedSl = Math.max(rawTrailedSl, maxSafeSl);
 
       if (dynamicTrailedSl > pos.activeSignal.stopLossPrice && dynamicTrailedSl >= pos.activeSignal.entryPrice) {
         pos.activeSignal.stopLossPrice = dynamicTrailedSl;
         this.persistOpenPositionState(pos);
-        console.log(`[AdvisoryManager] [${tier}] 🚀 Runner Trailing SL raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (Peak: ₹${pos.peakPremiumLtp.toFixed(2)}, Buffer: ₹${(pos.peakPremiumLtp - pos.activeSignal.stopLossPrice).toFixed(2)})`);
+        console.log(`[AdvisoryManager] [${tier}] 🚀 Runner Trailing SL raised to ₹${pos.activeSignal.stopLossPrice.toFixed(2)} (Peak: ₹${pos.peakPremiumLtp.toFixed(2)})`);
+      }
+    }
+
+    // =========================================================================
+    // 3b. GUARANTEED GREEN PROFIT LOCK (When gain reaches >= +1.0R, SL locked to Cost + 0.5R)
+    // =========================================================================
+    if (!pos.isBreakevenLocked && pos.peakPremiumLtp >= pos.activeSignal.entryPrice + initialRisk * 1.0) {
+      const guaranteedProfitSl = parseFloat((pos.activeSignal.entryPrice + initialRisk * 0.50).toFixed(2));
+      if (guaranteedProfitSl > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = guaranteedProfitSl;
+        pos.isBreakevenLocked = true;
+        this.persistOpenPositionState(pos);
+        console.log(`[AdvisoryManager] [${tier}] 💰 Guaranteed Green Profit Lock: Trade reached +1.0R! SL trailed to Entry + 0.5R (₹${pos.activeSignal.stopLossPrice.toFixed(2)}) - Zero Loss Guarantee!`);
+      }
+    }
+
+    // =========================================================================
+    // 3c. +1.5R PROFIT ACCELERATION LOCK (Lock in +1.0R Profit)
+    // =========================================================================
+    if (pos.peakPremiumLtp >= pos.activeSignal.entryPrice + initialRisk * 1.5) {
+      const lock1R = parseFloat((pos.activeSignal.entryPrice + initialRisk * 1.0).toFixed(2));
+      if (lock1R > pos.activeSignal.stopLossPrice) {
+        pos.activeSignal.stopLossPrice = lock1R;
+        this.persistOpenPositionState(pos);
+        console.log(`[AdvisoryManager] [${tier}] 🔒 +1.5R Expansion: Stop Loss raised to lock +1.0R profit at ₹${pos.activeSignal.stopLossPrice.toFixed(2)}!`);
       }
     }
 
     // =========================================================================
     // 4. PRE-TARGET-1 RISK-HALVING SHIELD (When gain reaches >= 60% of T1 distance)
     // =========================================================================
-    const target1Distance = (pos.activeSignal.targetPrice1 || (pos.activeSignal.entryPrice + initialRisk * 1.25)) - pos.activeSignal.entryPrice;
+    const target1Distance = (pos.activeSignal.targetPrice1 || (pos.activeSignal.entryPrice + initialRisk * 1.5)) - pos.activeSignal.entryPrice;
     if (!pos.isTarget1Locked && target1Distance > 0 && currentPremiumLtp >= pos.activeSignal.entryPrice + target1Distance * 0.60) {
       const riskReducedSl = parseFloat((pos.activeSignal.entryPrice - Math.min(initialRisk * 0.45, 4.0)).toFixed(2));
       const maxSafeSl = parseFloat((pos.peakPremiumLtp - minBreathingRoom).toFixed(2));
-      const finalSl = Math.min(riskReducedSl, maxSafeSl);
+      const finalSl = Math.max(riskReducedSl, maxSafeSl); // FIXED: Math.max to prevent regressing SL
       if (finalSl > pos.activeSignal.stopLossPrice) {
         pos.activeSignal.stopLossPrice = finalSl;
         this.persistOpenPositionState(pos);
@@ -1521,37 +1793,17 @@ export class AdvisoryManager {
       }
     }
 
-    // =========================================================================
-    // 6. UNDERLYING STRUCTURAL SPOT INVALIDATION (Wider 10-point Structural Thresholds)
-    // =========================================================================
-    const isVwapPullbackOrBreakout = pos.activeSignal.reasoning?.includes("VWAP PULLBACK") || pos.activeSignal.reasoning?.includes("ORB");
-    if (isVwapPullbackOrBreakout) {
-      if (pos.activeSignal.type === "CALL_BUY" && spot < this.currentVwap - 10 && this.currentVwap > 0) {
-        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Session VWAP support (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
-        return;
-      } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.currentVwap + 10 && this.currentVwap > 0) {
-        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Session VWAP resistance (${this.currentVwap.toFixed(1)}). Structural invalidation exit.`, timestamp, currentPremiumLtp);
-        return;
-      }
-    } else if (pos.activeSignal.reasoning?.includes("MEAN REVERSION")) {
-      if (pos.activeSignal.type === "CALL_BUY" && spot < this.dayLow - 10) {
-        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke below Day Low (${this.dayLow.toFixed(1)}). Mean reversion invalidated.`, timestamp, currentPremiumLtp);
-        return;
-      } else if (pos.activeSignal.type === "PUT_BUY" && spot > this.dayHigh + 10) {
-        this.triggerTierExit(tier, "EXIT_STOP_LOSS", `Underlying Index broke above Day High (${this.dayHigh.toFixed(1)}). Mean reversion invalidated.`, timestamp, currentPremiumLtp);
-        return;
-      }
-    }
+    // Structural exits are managed directly by Option Stop Loss Price to prevent premature wick shakeouts
 
     // =========================================================================
-    // 7. THETA TIMEOUT EXIT (Consolidation without directional progress)
+    // 7. THETA TIMEOUT EXIT (Consolidation without directional progress - Bug G fix: premium %)
     // =========================================================================
     const thetaTimeoutMs = tier === "SNIPER" ? 25 * 60 * 1000
                          : tier === "BALANCED" ? 20 * 60 * 1000
                          : 18 * 60 * 1000;
-    if (elapsed > thetaTimeoutMs && pos.entrySpot > 0) {
-      const percentageChange = Math.abs(spotMovementGain / spot) * 100;
-      if (percentageChange < 0.15 && spotMovementGain <= 0) {
+    if (elapsed > thetaTimeoutMs && pos.activeSignal.entryPrice > 0) {
+      const premiumChangePercent = Math.abs(currentPremiumLtp - pos.activeSignal.entryPrice) / pos.activeSignal.entryPrice * 100;
+      if (premiumChangePercent < 2.0 && currentPremiumLtp <= pos.activeSignal.entryPrice) {
         const timeoutMins = Math.round(thetaTimeoutMs / 60000);
         this.triggerTierExit(tier, "THETA_EXIT", `Option premium decay warning. Sideways chop > ${timeoutMins} minutes without directional progress.`, timestamp, currentPremiumLtp);
         return;
@@ -1561,6 +1813,12 @@ export class AdvisoryManager {
     // =========================================================================
     // 8. HARD STOP LOSS CHECK (Only after target checks & breathing room have been evaluated)
     // =========================================================================
+    // Phase 1C: Entry Grace Period (First 2 minutes immune from noise shakeout unless catastrophic drop > 10%)
+    const gracePeriodMs = 2 * 60 * 1000;
+    if (elapsed < gracePeriodMs && currentPremiumLtp > pos.activeSignal.entryPrice * 0.90) {
+      return; // immune from noise shakeout in first 2 minutes
+    }
+
     if (currentPremiumLtp <= pos.activeSignal.stopLossPrice) {
       this.triggerTierExit(tier, "EXIT_STOP_LOSS", "Stop loss threshold crossed.", timestamp, currentPremiumLtp);
       return;
@@ -1572,19 +1830,38 @@ export class AdvisoryManager {
     if (!pos.activeSignal) return;
 
     pos.dailyTradesCount++;
+    pos.pendingEntry = null; // cancel any stale pending entry
     const optionSymbol = pos.activeOptionSymbol;
     let formattedReasoning = `[${tier} TIER] ${reasoning}`;
     const entry = pos.activeSignal.entryPrice || 0;
     const exit = exitPrice || entry;
     const pnl = entry > 0 ? (exit - entry) : 0;
 
-    const initialRisk = Math.max(1.0, entry - (pos.activeSignal.stopLossPrice || 0));
+    // Bug A fix: Use true originalInitialRisk rather than trailed stopLossPrice
+    const initialRisk = (pos.originalInitialRisk && pos.originalInitialRisk > 0)
+      ? pos.originalInitialRisk
+      : Math.max(1.0, entry - (pos.activeSignal.stopLossPrice || 0));
     const ratio = pnl / initialRisk;
 
     if (pnl < 0) {
       pos.dailyLossesCount++;
       pos.dailyProfitLoss += ratio;
-      pos.stoppedCooldownUntil = timestamp + 10 * 60 * 1000; // 10 min cooldown on loss
+      pos.stoppedCooldownUntil = timestamp + 25 * 60 * 1000; // 25 min cooldown on loss
+      pos.lastLossDirection = pos.activeSignal.type as "CALL_BUY" | "PUT_BUY";
+      pos.directionalCooldownUntil = timestamp + 45 * 60 * 1000; // Phase 3B: 45 min same-direction cooldown
+
+      // Quarantine failed trap level for 45 minutes to prevent immediate double-dip
+      if (pos.activeSignal.reasoning?.includes("MEAN REVERSION") || pos.activeSignal.reasoning?.includes("Trap")) {
+        const trapType = pos.activeSignal.type === "CALL_BUY" ? "LOW" : "HIGH";
+        const level = pos.entrySpot || entry;
+        this.failedTrapLevels.push({
+          level,
+          type: trapType,
+          expiredAt: timestamp + 45 * 60 * 1000
+        });
+        console.log(`[Risk Engine] [${tier}] Quarantining failed Trap Reversal level ${level.toFixed(1)} (${trapType}) for 45 minutes.`);
+      }
+
       console.log(`[Risk Engine] [${tier}] Loss exit (${ratio.toFixed(2)}R). Cooldown until ${new Date(pos.stoppedCooldownUntil).toLocaleTimeString()}. Daily P&L: ${pos.dailyProfitLoss.toFixed(2)}R.`);
     } else {
       // Profitable exit (including Trailing Stop Profit Lock & Take-Profit targets)
@@ -1804,7 +2081,10 @@ export class AdvisoryManager {
         ? `Open ${openBuyTier} trade is still managed through lunch (stop-loss, targets, theta).`
         : `Active ${openBuyTier} signal is live. Targets are on the signal card.`;
     } else if (!hasOrb) {
-      waitingReason = "Opening range is not captured yet. ORB is built from 9:15–9:30 AM IST.";
+      if (totalMinutes >= 570) {
+        this.ensureHistoricalDataAndOrb(spot).catch(() => {});
+      }
+      waitingReason = "Opening range is not captured yet. Hydrating historical session range from broker...";
     } else if (sessionPhase === "PRE_OPEN") {
       waitingReason = "Session has not opened. Signals start after the 9:15–9:30 AM ORB window.";
     } else if (sessionPhase === "ORB") {
