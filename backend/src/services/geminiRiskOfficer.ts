@@ -23,8 +23,8 @@ export interface AIAuditResult {
 }
 
 export class GeminiRiskOfficer {
-  private static readonly PRIMARY_MODEL = process.env.GEMINI_MODEL || "models/gemini-2.5-flash";
-  private static readonly FALLBACK_MODEL = "models/gemini-1.5-flash";
+  private static readonly PRIMARY_MODEL = process.env.GEMINI_MODEL || "models/gemini-3.6-flash";
+  private static readonly FALLBACK_MODEL = "models/gemini-flash-latest";
   private static rateLimitCooldownUntil: number = 0;
 
   /**
@@ -154,7 +154,7 @@ Respond ONLY with a valid JSON object matching this exact schema (no markdown, n
             topP: 0.8
           }
         }),
-        signal: AbortSignal.timeout(6000)
+        signal: AbortSignal.timeout(9000)
       });
 
       if (!res.ok) {

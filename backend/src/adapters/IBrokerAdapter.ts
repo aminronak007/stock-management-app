@@ -26,6 +26,8 @@ export interface OptionChainItem {
   call: {
     symbol: string;
     ltp: number;
+    bid?: number;
+    ask?: number;
     openInterest: number;
     changeOpenInterest: number;
     volume: number;
@@ -38,6 +40,8 @@ export interface OptionChainItem {
   put: {
     symbol: string;
     ltp: number;
+    bid?: number;
+    ask?: number;
     openInterest: number;
     changeOpenInterest: number;
     volume: number;

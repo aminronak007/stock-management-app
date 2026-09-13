@@ -96,6 +96,8 @@ export class KiteAdapter implements IBrokerAdapter {
         call: {
           symbol: `${underlying}${expiry}C${strike}`,
           ltp: parseFloat(callLtp.toFixed(2)),
+          bid: parseFloat((callLtp - 0.15).toFixed(2)),
+          ask: parseFloat((callLtp + 0.15).toFixed(2)),
           openInterest: callOi,
           changeOpenInterest: Math.floor((Math.random() - 0.3) * 500000),
           volume: Math.floor(Math.random() * 50000),
@@ -104,6 +106,8 @@ export class KiteAdapter implements IBrokerAdapter {
         put: {
           symbol: `${underlying}${expiry}P${strike}`,
           ltp: parseFloat(putLtp.toFixed(2)),
+          bid: parseFloat((putLtp - 0.15).toFixed(2)),
+          ask: parseFloat((putLtp + 0.15).toFixed(2)),
           openInterest: putOi,
           changeOpenInterest: Math.floor((Math.random() - 0.3) * 500000),
           volume: Math.floor(Math.random() * 50000),

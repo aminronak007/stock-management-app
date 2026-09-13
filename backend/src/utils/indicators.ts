@@ -358,6 +358,32 @@ export class Indicators {
 
     return { macd, signal, histogram };
   }
+
+  /**
+   * Aggregates 5-minute candles into 15-minute candles for multi-timeframe confirmation
+   */
+  public static aggregate5mTo15m(candles: Array<{ open: number; high: number; low: number; close: number; volume: number; timestamp?: number }>): Array<{ open: number; high: number; low: number; close: number; volume: number; timestamp?: number }> {
+    const candles15m: Array<{ open: number; high: number; low: number; close: number; volume: number; timestamp?: number }> = [];
+    if (!candles || candles.length === 0) return candles15m;
+
+    for (let i = 0; i < candles.length; i += 3) {
+      const group = candles.slice(i, i + 3);
+      if (group.length === 0) continue;
+      const open = group[0].open;
+      let high = group[0].high;
+      let low = group[0].low;
+      let volume = 0;
+      for (const c of group) {
+        if (c.high > high) high = c.high;
+        if (c.low < low) low = c.low;
+        volume += (c.volume || 0);
+      }
+      const close = group[group.length - 1].close;
+      const timestamp = group[0].timestamp;
+      candles15m.push({ open, high, low, close, volume, timestamp });
+    }
+    return candles15m;
+  }
 }
 
 export interface SuperTrendResult {

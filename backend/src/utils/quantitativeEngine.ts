@@ -63,10 +63,10 @@ export class QuantitativeEngine {
         const adxList = Indicators.calculateADX(highs, lows, closes, 14);
         const currentAdx = adxList.length > 0 ? adxList[adxList.length - 1] : 20;
 
-        if (emaDiff < 0.08 || currentAdx < 18) return "RANGE";
+        if (emaDiff < 0.15 || currentAdx < 22) return "RANGE";
 
-        if (spot > emaFast && emaFast > emaSlow && currentAdx >= 20) return "TREND_UP";
-        if (spot < emaFast && emaFast < emaSlow && currentAdx >= 20) return "TREND_DOWN";
+        if (spot > emaFast && emaFast > emaSlow && currentAdx >= 22) return "TREND_UP";
+        if (spot < emaFast && emaFast < emaSlow && currentAdx >= 22) return "TREND_DOWN";
       }
     }
 
@@ -314,7 +314,7 @@ export class QuantitativeEngine {
         factors.marketStructure.factors.push("Price clear of consolidation CPR range");
       }
     } else {
-      factors.marketStructure.score += 10;
+      factors.marketStructure.factors.push("CPR reference unavailable (0/10)");
     }
 
     // 2. VWAP & Momentum (15 Points)
@@ -365,8 +365,8 @@ export class QuantitativeEngine {
         explanation.push("Heavyweight stock VWAP alignment failed (< 50%). High probability fakeout trap.");
       }
     } else {
-      factors.heavyweights.score += 10;
-      factors.heavyweights.factors.push("Index-based momentum alignment active");
+      factors.heavyweights.score = 0;
+      factors.heavyweights.factors.push("Heavyweight stock alignment data unavailable (0/15)");
     }
 
     // 4. Options Market Structure / PCR & ΔOI (15 Points)
@@ -428,21 +428,34 @@ export class QuantitativeEngine {
 
     // 7. Option Momentum (10 Points)
     if (setupType === "TRAP_REVERSAL") {
-      factors.optionMomentum.score += 4;
-      factors.optionMomentum.factors.push("Exhaustion momentum confirmed for mean reversion scalp");
-    } else if (optionPremiumRsi > 52 && optionPremiumRsi < 78) {
+      if (optionPremiumRsi < 35 || optionPremiumRsi > 65) {
+        factors.optionMomentum.score += 8;
+        factors.optionMomentum.factors.push(`RSI exhaustion confirms mean reversion scalp (${optionPremiumRsi.toFixed(1)})`);
+      } else {
+        factors.optionMomentum.score += 4;
+        factors.optionMomentum.factors.push("Moderate RSI for mean reversion");
+      }
+    } else if (optionPremiumRsi >= 50 && optionPremiumRsi <= 68) {
+      factors.optionMomentum.score += 10;
+      factors.optionMomentum.factors.push(`RSI indicates optimal directional expansion zone (${optionPremiumRsi.toFixed(1)})`);
+    } else if (optionPremiumRsi > 45 && optionPremiumRsi <= 72) {
       factors.optionMomentum.score += 6;
-      factors.optionMomentum.factors.push(`Option premium RSI indicates breakout acceleration (${optionPremiumRsi.toFixed(1)})`);
+      factors.optionMomentum.factors.push(`RSI indicates acceptable trend momentum (${optionPremiumRsi.toFixed(1)})`);
     } else {
-      factors.optionMomentum.score += 3;
+      factors.optionMomentum.score += 2;
+      factors.optionMomentum.factors.push(`RSI indicates momentum weakness or extreme (${optionPremiumRsi.toFixed(1)})`);
     }
-    factors.optionMomentum.score += 4;
-    factors.optionMomentum.factors.push("Option spread bid/ask is liquid");
 
     // 8. Risk/Reward (5 Points)
-    if (riskReward >= 1.5) {
+    if (riskReward >= 2.5) {
       factors.riskReward.score += 5;
-      factors.riskReward.factors.push(`Risk reward ratio matches parameters (RR=${riskReward.toFixed(2)})`);
+      factors.riskReward.factors.push(`Risk reward ratio meets >= 2.5:1 institutional requirement (RR=${riskReward.toFixed(2)})`);
+    } else if (riskReward >= 2.0) {
+      factors.riskReward.score += 3;
+      factors.riskReward.factors.push(`Risk reward ratio acceptable (RR=${riskReward.toFixed(2)})`);
+    } else {
+      factors.riskReward.score += 0;
+      factors.riskReward.factors.push(`Risk reward ratio below 2.0:1 threshold (RR=${riskReward.toFixed(2)})`);
     }
 
     // Sum overall score
@@ -463,7 +476,7 @@ export class QuantitativeEngine {
     const adxList = Indicators.calculateADX(highs, lows, closes, 14);
     const currentAdx = adxList.length > 0 ? adxList[adxList.length - 1] : 20;
 
-    const isChoppyAdx = currentAdx < 18;
+    const isChoppyAdx = currentAdx < 22;
 
     // Apply strict institutional penalties (Exempt TRAP_REVERSAL from counter-trend penalty)
     if (isCounterTrend && setupType !== "TRAP_REVERSAL") {
@@ -502,9 +515,9 @@ export class QuantitativeEngine {
       explanation.push(`⚠ VEGA COLLAPSE WARNING (-10 points): India VIX dropped rapidly (${deltaVixPercent.toFixed(1)}%). Premium decay risk.`);
     }
 
-    if (isChoppyAdx && setupType === "ORB_BREAKOUT") {
-      totalScore = Math.max(0, totalScore - 15);
-      explanation.push(`⚠ CHOPPY MARKET PENALTY (ADX=${currentAdx.toFixed(1)} < 18: -15 points applied)`);
+    if (isChoppyAdx && (setupType === "ORB_BREAKOUT" || setupType === "VWAP_PULLBACK")) {
+      totalScore = Math.max(0, totalScore - 20);
+      explanation.push(`⚠ CHOPPY MARKET PENALTY (ADX=${currentAdx.toFixed(1)} < 22: -20 points applied)`);
     }
 
     // BANK NIFTY & HEAVYWEIGHT INTRADAY VWAP CONSENSUS GATES:
@@ -535,6 +548,31 @@ export class QuantitativeEngine {
       totalScore = 0;
       isFalseBreakout = true;
       explanation.push(`✕ SECTOR INTRADAY DIVERGENCE VETO: Bank Nifty (${bnfVwapDev.toFixed(2)}% vs VWAP) or Reliance (${relVwapDev.toFixed(2)}% vs VWAP) are bearish below VWAP. CALL trade strictly vetoed.`);
+    }
+
+    // IT Index & Multi-Sector Tug-of-War Vetoes:
+    const itLtp = heavyweightsLtp["NSE:NIFTYIT-INDEX"] || 0;
+    const itVwap = heavyweightsVwap["NSE:NIFTYIT-INDEX"] || 0;
+    const itVwapDev = (itLtp > 0 && itVwap > 0) ? ((itLtp - itVwap) / itVwap) * 100 : 0;
+
+    if (itLtp > 0 && itVwap > 0 && setupType !== "TRAP_REVERSAL") {
+      if (triggerType === "PUT_BUY" && itVwapDev > 0.15) {
+        totalScore = 0;
+        isFalseBreakout = true;
+        explanation.push(`✕ IT SECTOR INTRADAY DIVERGENCE VETO: Nifty IT (${itVwapDev > 0 ? "+" : ""}${itVwapDev.toFixed(2)}% vs VWAP) is strongly bullish above VWAP. PUT trade strictly vetoed.`);
+      } else if (triggerType === "CALL_BUY" && itVwapDev < -0.15) {
+        totalScore = 0;
+        isFalseBreakout = true;
+        explanation.push(`✕ IT SECTOR INTRADAY DIVERGENCE VETO: Nifty IT (${itVwapDev.toFixed(2)}% vs VWAP) is strongly bearish below VWAP. CALL trade strictly vetoed.`);
+      }
+
+      // Banking (33%) vs IT (15%) Severe Sector Divergence (Tug-of-War Conflict)
+      const isSectorTugOfWar = (bnfVwapDev > 0.10 && itVwapDev < -0.15) || (bnfVwapDev < -0.10 && itVwapDev > 0.15);
+      if (isSectorTugOfWar) {
+        totalScore = 0;
+        isFalseBreakout = true;
+        explanation.push(`✕ BANKING VS IT TUG-OF-WAR: Bank Nifty (${bnfVwapDev > 0 ? "+" : ""}${bnfVwapDev.toFixed(2)}%) and Nifty IT (${itVwapDev > 0 ? "+" : ""}${itVwapDev.toFixed(2)}%) are pulling in opposite directions. Multi-sector conflict cancels breakout.`);
+      }
     }
 
     const isBankNiftyDiverging = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap * 0.999) ||

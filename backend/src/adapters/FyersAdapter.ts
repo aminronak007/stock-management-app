@@ -212,9 +212,14 @@ export class FyersAdapter implements IBrokerAdapter {
     // Common mappings for indices
     const map: { [k: string]: string } = {
       "Nifty 50": "NSE:NIFTY50-INDEX",
+      "NIFTY50": "NSE:NIFTY50-INDEX",
+      "NIFTY": "NSE:NIFTY50-INDEX",
       "Nifty Bank": "NSE:NIFTYBANK-INDEX",
+      "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
       "India VIX": "NSE:INDIAVIX-INDEX",
+      "INDIAVIX": "NSE:INDIAVIX-INDEX",
       "Nifty Fin Service": "NSE:FINNIFTY-INDEX",
+      "FINNIFTY": "NSE:FINNIFTY-INDEX",
       "SENSEX": "BSE:SENSEX-INDEX"
     };
 
@@ -225,10 +230,18 @@ export class FyersAdapter implements IBrokerAdapter {
       return s;
     }
 
-    // Fallback: uppercase and remove spaces to attempt a generic conversion
     const normalized = s.replace(/\s+/g, "").toUpperCase();
-    // Common heuristic: NIFTY50 -> NSE:NIFTY50-INDEX
-    if (/NIFTY/.test(normalized) && !normalized.includes("NSE:")) return `NSE:${normalized}-INDEX`;
+    if (map[normalized]) return map[normalized];
+
+    // Options contracts: NIFTY2691724500CE / NIFTY2691724500PE
+    if (normalized.endsWith("CE") || normalized.endsWith("PE")) {
+      return `NSE:${normalized}`;
+    }
+
+    // Heavyweight equities (e.g., RELIANCE, HDFCBANK)
+    if (!normalized.includes("-") && !normalized.includes(":")) {
+      return `NSE:${normalized}-EQ`;
+    }
 
     return s;
   }
@@ -544,6 +557,8 @@ export class FyersAdapter implements IBrokerAdapter {
           call: {
             symbol: opt.callSymbol || "",
             ltp: Number(opt.callLtp || 0),
+            bid: Number(opt.callBid || (opt.callLtp ? opt.callLtp - 0.15 : 0)),
+            ask: Number(opt.callAsk || (opt.callLtp ? opt.callLtp + 0.15 : 0)),
             openInterest: Number(opt.callOi || 0),
             changeOpenInterest: Number(opt.callOiChange || 0),
             volume: Number(opt.callVolume || 0),
@@ -552,6 +567,8 @@ export class FyersAdapter implements IBrokerAdapter {
           put: {
             symbol: opt.putSymbol || "",
             ltp: Number(opt.putLtp || 0),
+            bid: Number(opt.putBid || (opt.putLtp ? opt.putLtp - 0.15 : 0)),
+            ask: Number(opt.putAsk || (opt.putLtp ? opt.putLtp + 0.15 : 0)),
             openInterest: Number(opt.putOi || 0),
             changeOpenInterest: Number(opt.putOiChange || 0),
             volume: Number(opt.putVolume || 0),
@@ -581,6 +598,8 @@ export class FyersAdapter implements IBrokerAdapter {
       const leg = optionType === "CE" ? entry.call : entry.put;
       leg.symbol = opt.symbol || leg.symbol;
       leg.ltp = Number(opt.ltp ?? opt.fp ?? 0);
+      leg.bid = Number(opt.bid ?? opt.b ?? opt.bid_price ?? (leg.ltp > 0 ? leg.ltp - 0.15 : 0));
+      leg.ask = Number(opt.ask ?? opt.a ?? opt.ask_price ?? (leg.ltp > 0 ? leg.ltp + 0.15 : 0));
       leg.openInterest = Number(opt.oi ?? opt.openInterest ?? 0);
       leg.changeOpenInterest = Number(opt.oich ?? opt.oiChange ?? opt.changeOpenInterest ?? 0);
       leg.volume = Number(opt.volume ?? 0);
@@ -646,6 +665,8 @@ export class FyersAdapter implements IBrokerAdapter {
         call: {
           symbol: `${underlying}${expiry}C${strike}`,
           ltp: parseFloat(callLtp.toFixed(2)),
+          bid: parseFloat((callLtp - 0.15).toFixed(2)),
+          ask: parseFloat((callLtp + 0.15).toFixed(2)),
           openInterest: Math.floor(Math.random() * 2000000),
           changeOpenInterest: Math.floor((Math.random() - 0.3) * 500000),
           volume: Math.floor(Math.random() * 50000),
@@ -654,6 +675,8 @@ export class FyersAdapter implements IBrokerAdapter {
         put: {
           symbol: `${underlying}${expiry}P${strike}`,
           ltp: parseFloat(putLtp.toFixed(2)),
+          bid: parseFloat((putLtp - 0.15).toFixed(2)),
+          ask: parseFloat((putLtp + 0.15).toFixed(2)),
           openInterest: Math.floor(Math.random() * 2000000),
           changeOpenInterest: Math.floor((Math.random() - 0.3) * 500000),
           volume: Math.floor(Math.random() * 50000),

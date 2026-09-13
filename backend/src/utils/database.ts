@@ -1220,4 +1220,81 @@ export class DatabaseService {
     const row = db.prepare("SELECT * FROM post_exit_analytics WHERE trade_id = ?").get(tradeId) as PostExitRecord | undefined;
     return row || null;
   }
+
+  /**
+   * Automated Self-Tuning Routine: Analyzes post-exit analytics & paper trade metrics
+   * to dynamically calibrate target multipliers, trailing cushion, and quality score gates.
+   */
+  public static getSelfTuningParameters(): {
+    targetMultiplier: number;
+    runnerTrailingRiskMultiplier: number;
+    minScoreAdjustment: number;
+    insights: string[];
+  } {
+    const db = this.initialize();
+    const insights: string[] = [];
+    let targetMultiplier = 1.0;
+    let runnerTrailingRiskMultiplier = 1.0;
+    let minScoreAdjustment = 0;
+
+    try {
+      // 1. Analyze recent post-exit analytics
+      const postExits = db.prepare(`
+        SELECT mfe_percent, exit_price, price_15m, price_30m, eod_price
+        FROM post_exit_analytics
+        WHERE mfe_percent IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 20
+      `).all() as Array<{ mfe_percent: number; exit_price: number; price_15m: number | null; price_30m: number | null; eod_price: number | null }>;
+
+      if (postExits.length >= 5) {
+        const avgMfe = postExits.reduce((acc, p) => acc + (p.mfe_percent || 0), 0) / postExits.length;
+        const leftMoneyCount = postExits.filter(p => (p.mfe_percent || 0) >= 10.0).length;
+        const leftMoneyRatio = leftMoneyCount / postExits.length;
+
+        if (leftMoneyRatio >= 0.40 || avgMfe >= 15.0) {
+          // Trades consistently ran higher after exit -> expand runner targets and trail room
+          targetMultiplier = 1.15;
+          runnerTrailingRiskMultiplier = 1.25;
+          insights.push(`Self-Tuning: ${(leftMoneyRatio * 100).toFixed(0)}% of exits left significant money on table (Avg MFE +${avgMfe.toFixed(1)}%). Runner trail loosened to 1.25R & Target multiplier expanded to 1.15x.`);
+        } else if (avgMfe <= 4.0) {
+          // Exits captured peak reversals accurately -> keep tight trailing
+          targetMultiplier = 1.0;
+          runnerTrailingRiskMultiplier = 1.0;
+          insights.push(`Self-Tuning: Exits are highly optimal (Avg MFE ${avgMfe.toFixed(1)}% <= 4%). Retaining standard target & trail configuration.`);
+        }
+      }
+
+      // 2. Analyze recent paper trade win rate (last 15 closed trades)
+      const recentTrades = db.prepare(`
+        SELECT net_pnl, pnl
+        FROM paper_trades
+        WHERE status = 'CLOSED' AND (type LIKE 'EXIT_%' OR type = 'SQUARE_OFF' OR type = 'THETA_EXIT')
+        ORDER BY id DESC
+        LIMIT 15
+      `).all() as Array<{ net_pnl: number | null; pnl: number | null }>;
+
+      if (recentTrades.length >= 6) {
+        const wins = recentTrades.filter(t => (t.net_pnl !== null ? t.net_pnl : (t.pnl || 0)) > 0).length;
+        const winRate = (wins / recentTrades.length) * 100;
+
+        if (winRate < 45) {
+          // Difficult regime or lower win rate -> require stricter entry score
+          minScoreAdjustment = 2; // e.g. raise from 88 to 90
+          insights.push(`Self-Tuning: Recent win rate is choppy (${winRate.toFixed(0)}% < 45%). Confluence threshold dynamically increased (+2 pts) to protect capital.`);
+        } else if (winRate >= 70) {
+          insights.push(`Self-Tuning: High consistency detected (${winRate.toFixed(0)}% win rate). Strategy operating at peak efficiency.`);
+        }
+      }
+    } catch (e: any) {
+      insights.push(`Self-Tuning fallback: ${e.message}`);
+    }
+
+    return {
+      targetMultiplier,
+      runnerTrailingRiskMultiplier,
+      minScoreAdjustment,
+      insights
+    };
+  }
 }
