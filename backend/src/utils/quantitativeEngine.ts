@@ -91,11 +91,14 @@ export class QuantitativeEngine {
     heavyweightsVwap: { [symbol: string]: number },
     currentVolume: number,
     avgVolume5: number,
-    latestCandle?: { close: number; open: number; high: number; low: number }
+    latestCandle?: { close: number; open: number; high: number; low: number },
+    setupType?: StrategySetup
   ): boolean {
-    // 1. Immediate rejection: breakout but price returned inside ORB
-    if (triggerType === "CALL_BUY" && spot <= orbHigh) return true;
-    if (triggerType === "PUT_BUY" && spot >= orbLow) return true;
+    // 1. Immediate rejection: breakout but price returned inside ORB (applies to ORB_BREAKOUT)
+    if (setupType === "ORB_BREAKOUT" || !setupType) {
+      if (triggerType === "CALL_BUY" && spot <= orbHigh) return true;
+      if (triggerType === "PUT_BUY" && spot >= orbLow) return true;
+    }
     
     // 2. Bank Nifty Index Synchronicity Check: If Bank Nifty strongly diverges from Nifty 50, flag false breakout
     const bankNiftyLtp = heavyweightsLtp["NSE:NIFTYBANK-INDEX"] || 0;
@@ -128,7 +131,7 @@ export class QuantitativeEngine {
     }
 
     // 3. Exhaustion Pin-Bar / Rejection Wick Check:
-    // If the latest closed candle spiked outside ORB but closed with a heavy opposing rejection wick (> 45% of candle range), it flags an exhaustion trap
+    // If the latest closed candle spiked outside ORB or VWAP but closed with a heavy opposing rejection wick (> 45% of candle range), it flags an exhaustion trap
     if (latestCandle) {
       const candleRange = latestCandle.high - latestCandle.low;
       if (candleRange > 3) {
@@ -206,13 +209,13 @@ export class QuantitativeEngine {
     const explanation: string[] = [];
     const regime = this.classifyRegime(spot, cpr, vix, candles5m, atr);
 
-    // Initial check: False Breakout (Only for ORB_BREAKOUT entries; TRAP_REVERSAL trades the trap itself)
+    // Initial check: False Breakout & Trap Defense (applies to all trend setups; TRAP_REVERSAL trades the trap itself)
     const currentCandle = candles5m[candles5m.length - 1];
     const prev5Volumes = candles5m.slice(-6, -1).map(c => c.volume);
     const avgVolume5 = prev5Volumes.length > 0 ? prev5Volumes.reduce((a, b) => a + b, 0) / prev5Volumes.length : 0;
     const currentVolume = currentCandle ? currentCandle.volume : 0;
 
-    let isFalseBreakout = setupType === "ORB_BREAKOUT" 
+    let isFalseBreakout = setupType !== "TRAP_REVERSAL" 
       ? this.detectFalseBreakout(
           spot,
           orbHigh,
@@ -222,7 +225,8 @@ export class QuantitativeEngine {
           heavyweightsVwap,
           currentVolume,
           avgVolume5,
-          currentCandle && currentCandle.open !== undefined ? (currentCandle as { close: number; open: number; high: number; low: number }) : undefined
+          currentCandle && currentCandle.open !== undefined ? (currentCandle as { close: number; open: number; high: number; low: number }) : undefined,
+          setupType
         )
       : false;
 

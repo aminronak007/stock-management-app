@@ -614,6 +614,32 @@ export class FyersAdapter implements IBrokerAdapter {
 
     const expiryRows = chainData.expiryData;
     if (Array.isArray(expiryRows) && expiryRows.length > 0) {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+
+      // Parse and sort all dates chronologically to find the earliest active expiry >= today
+      const parsedRows = expiryRows
+        .map((row: any) => {
+          const dateStr = String(row?.date || "");
+          let expDate: Date | null = null;
+          if (/^\d{2}-\d{2}-\d{4}$/.test(dateStr)) {
+            const [d, m, y] = dateStr.split("-").map(Number);
+            expDate = new Date(y, m - 1, d, 15, 30, 0);
+          } else if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+            expDate = new Date(`${dateStr}T15:30:00`);
+          } else if (!isNaN(Number(dateStr)) && Number(dateStr) > 0) {
+            expDate = new Date(Number(dateStr) * (Number(dateStr) < 1e11 ? 1000 : 1));
+          }
+          return { row, dateStr, expDate };
+        })
+        .filter(item => item.expDate && !isNaN(item.expDate.getTime()) && item.expDate.getTime() >= todayStart.getTime())
+        .sort((a, b) => (a.expDate!.getTime() - b.expDate!.getTime()));
+
+      if (parsedRows.length > 0) {
+        return parsedRows[0].dateStr;
+      }
+
+      // Safe fallback if date formats cannot be parsed
       const weekly = expiryRows.find((row: any) => row.expiry_flag === "W");
       if (weekly?.date) return weekly.date;
       if (expiryRows[0]?.date) return expiryRows[0].date;

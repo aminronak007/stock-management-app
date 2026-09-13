@@ -55,6 +55,7 @@ export interface PendingLimitEntry {
   setupType: StrategySetup;
   strike: number;
   limitSpot: number;
+  signalSpot?: number;
   optionLtpAtSignal: number;
   reasoning: string;
   expiresAt: number;
@@ -86,6 +87,7 @@ interface TierPositionState {
   dailyLossesCount: number;
   dailyProfitLoss: number;
   stoppedCooldownUntil: number;
+  isExitInFlight?: boolean;
 }
 
 export class AdvisoryManager {
@@ -883,20 +885,46 @@ export class AdvisoryManager {
               : tick.ltp >= p.limitSpot;
             if (isFilled) {
               sniperPos.pendingEntry = null;
-              console.log(`[AdvisoryManager] [SNIPER] 🎯 Limit order filled on pullback! Executing ${p.type} entry at spot ${tick.ltp.toFixed(1)} (limit target was ${p.limitSpot.toFixed(1)}).`);
+
+              // Phase 2B Accuracy: Calculate true retraced option price at fill moment
+              let fillOptionPrice = 0;
+              if (this.broker.getQuotes && p.optionSymbol) {
+                try {
+                  const quotes = await this.broker.getQuotes([p.optionSymbol]);
+                  if (quotes && quotes[p.optionSymbol]?.ltp > 0) {
+                    fillOptionPrice = quotes[p.optionSymbol].ltp;
+                  }
+                } catch {}
+              }
+
+              // Delta-adjusted pullback estimate if live quote is not immediately available
+              if (fillOptionPrice <= 0) {
+                const spotRetraced = Math.abs(tick.ltp - (p.signalSpot || p.limitSpot));
+                const priceDiscount = spotRetraced * p.delta;
+                fillOptionPrice = Math.max(0.5, p.optionLtpAtSignal - priceDiscount);
+              }
+              fillOptionPrice = parseFloat(fillOptionPrice.toFixed(2));
+
+              // Capital Defense Check at fill time: Prevent buying decayed/cheap contracts
+              if (fillOptionPrice < 45.0 || p.scaledStopLoss > fillOptionPrice * 0.45) {
+                console.warn(`[AdvisoryManager] [SNIPER] 🛡️ Retracement limit filled, but option price (₹${fillOptionPrice}) failed capital defense gate. Entry aborted.`);
+                return;
+              }
+
+              console.log(`[AdvisoryManager] [SNIPER] 🎯 Limit order filled on pullback! Executing ${p.type} entry at spot ${tick.ltp.toFixed(1)} (limit target was ${p.limitSpot.toFixed(1)}), option fill price: ₹${fillOptionPrice}.`);
               await this.executePositionEntry(
                 "SNIPER",
                 tick.ltp,
                 p.type,
                 p.setupType,
                 p.strike,
-                p.optionLtpAtSignal,
+                fillOptionPrice,
                 p.delta,
                 p.scaledStopLoss,
                 p.scaledTarget1,
                 p.scaledTarget2,
                 p.scoreCard,
-                `${p.reasoning} [Filled at 50% Retracement: ${tick.ltp.toFixed(1)}]`,
+                `${p.reasoning} [Filled at 50% Retracement: ${tick.ltp.toFixed(1)} @ ₹${fillOptionPrice.toFixed(2)}]`,
                 timestamp,
                 p.optionSymbol
               );
@@ -1102,10 +1130,22 @@ export class AdvisoryManager {
     const avgVol5 = closedCandles.slice(-5).reduce((s, c) => s + (c.volume || 0), 0) / Math.max(1, Math.min(5, closedCandles.length));
     const isCandleVolumeConfirmed = avgVol5 > 0 ? ((lastClosedCandle?.volume || 0) >= avgVol5 * 1.15) : true;
 
-    // For CALL: last closed candle must be GREEN (close > open) and spot holding above its low!
-    const isCallBounceConfirmed = !!(lastClosedCandle && (lastClosedCandle.close > lastClosedCandle.open) && (spot >= lastClosedCandle.low) && isCandleVolumeConfirmed);
-    // For PUT: last closed candle must be RED (close < open) and spot holding below its high!
-    const isPutRejectionConfirmed = !!(lastClosedCandle && (lastClosedCandle.close < lastClosedCandle.open) && (spot <= lastClosedCandle.high) && isCandleVolumeConfirmed);
+    // For CALL: last closed candle must have tested VWAP zone (<= 10 pts), closed GREEN (close > open), and spot holding above VWAP & its low!
+    const isCallBounceConfirmed = !!(
+      lastClosedCandle &&
+      (Math.abs(lastClosedCandle.low - this.currentVwap) <= 10 || Math.abs(Math.min(lastClosedCandle.open, lastClosedCandle.close) - this.currentVwap) <= 10) &&
+      (lastClosedCandle.close > lastClosedCandle.open) &&
+      (spot >= lastClosedCandle.low && spot > this.currentVwap) &&
+      isCandleVolumeConfirmed
+    );
+    // For PUT: last closed candle must have tested VWAP zone (<= 10 pts), closed RED (close < open), and spot holding below VWAP & its high!
+    const isPutRejectionConfirmed = !!(
+      lastClosedCandle &&
+      (Math.abs(lastClosedCandle.high - this.currentVwap) <= 10 || Math.abs(Math.max(lastClosedCandle.open, lastClosedCandle.close) - this.currentVwap) <= 10) &&
+      (lastClosedCandle.close < lastClosedCandle.open) &&
+      (spot <= lastClosedCandle.high && spot < this.currentVwap) &&
+      isCandleVolumeConfirmed
+    );
 
     // Phase 2A: 2-Candle Confirmation (Previous candle tested VWAP zone within 8 pts, and current closed candle confirms direction)
     const prevCandle = closedCandles.length > 1 ? closedCandles[closedCandles.length - 2] : undefined;
@@ -1609,6 +1649,7 @@ export class AdvisoryManager {
           setupType,
           strike: selectedStrike,
           limitSpot,
+          signalSpot: spot,
           optionLtpAtSignal: entryPrice,
           reasoning,
           expiresAt: timestamp + 15 * 60 * 1000, // Phase 2C: 15 minutes expiry (was 10)
@@ -2054,17 +2095,23 @@ export class AdvisoryManager {
     }
 
     // =========================================================================
-    // 8. HARD STOP LOSS CHECK: Absolute Risk Rule — ALWAYS strictly enforced
+    // 8. HARD STOP LOSS & TRAILING STOP PROFIT LOCK CHECK: Always strictly enforced
     // =========================================================================
     if (currentPremiumLtp <= pos.activeSignal.stopLossPrice) {
-      this.triggerTierExit(tier, "EXIT_STOP_LOSS", "Stop loss threshold crossed.", timestamp, currentPremiumLtp);
+      const isProfitableOrLocked = (pos.isTarget1Locked || pos.isBreakevenLocked || currentPremiumLtp >= pos.activeSignal.entryPrice);
+      const exitType: AdvisorySignal["type"] = isProfitableOrLocked ? "EXIT_PROFIT" : "EXIT_STOP_LOSS";
+      const exitReason = isProfitableOrLocked
+        ? `Trailing Stop Profit Lock triggered. Runner protected at ₹${currentPremiumLtp.toFixed(2)}.`
+        : "Hard stop loss threshold crossed.";
+      this.triggerTierExit(tier, exitType, exitReason, timestamp, currentPremiumLtp);
       return;
     }
   }
 
   private triggerTierExit(tier: SignalTier, type: AdvisorySignal["type"], reasoning: string, timestamp: number, exitPrice?: number): void {
     const pos = this.tierPositions[tier];
-    if (!pos.activeSignal) return;
+    if (!pos.activeSignal || pos.isExitInFlight) return;
+    pos.isExitInFlight = true;
 
     pos.dailyTradesCount++;
     pos.pendingEntry = null; // cancel any stale pending entry
@@ -2112,19 +2159,20 @@ export class AdvisoryManager {
 
     // Retrieve the actual entry qty from the open SQLite record (critical for dynamic lot sizing)
     let openTradeId: number | undefined = pos.openTradeId ?? undefined;
-    let qty = parseInt(process.env.ORDER_QTY || "50", 10) || 50; // fallback default
-    if (!openTradeId) {
+    let qty = parseInt(process.env.ORDER_QTY || "75", 10) || 75; // fallback default
+    if (openTradeId) {
+      try {
+        const db = DatabaseService.initialize();
+        const tradeRow = db.prepare("SELECT qty FROM paper_trades WHERE id = ?").get(openTradeId) as any;
+        if (tradeRow && tradeRow.qty > 0) {
+          qty = tradeRow.qty;
+        }
+      } catch {}
+    } else {
       const openBuys = DatabaseService.getOpenBuyTrades(tier);
       if (openBuys.length > 0) {
         openTradeId = openBuys[openBuys.length - 1].id;
         qty = openBuys[openBuys.length - 1].qty || qty;
-      }
-    } else {
-      // Read actual qty from the persisted BUY record (may be 2x for SUPER-SNIPER trades)
-      const openBuys = DatabaseService.getOpenBuyTrades(tier);
-      const matchingTrade = openBuys.find(t => t.id === openTradeId);
-      if (matchingTrade) {
-        qty = matchingTrade.qty || qty;
       }
     }
 
@@ -2164,14 +2212,24 @@ export class AdvisoryManager {
             }
           );
         } catch (err: any) {
-          console.error(`[AdvisoryManager] AUTO EXIT ORDER FAILED (Attempt ${attempt}/2):`, err?.message || err);
-          if (attempt < 2) {
-            // Retry once after 1000ms
-            setTimeout(() => { executeOrderWithRetry(attempt + 1); }, 1000);
+          console.error(`[AdvisoryManager] AUTO EXIT ORDER FAILED (Attempt ${attempt}/3):`, err?.message || err);
+          if (attempt < 3) {
+            // Exponential backoff: 1000ms for attempt 2, 2000ms for attempt 3
+            const backoffDelay = attempt * 1000;
+            setTimeout(() => { executeOrderWithRetry(attempt + 1); }, backoffDelay);
           } else {
-            // Both attempts failed: Dispatch emergency Telegram notification to alert trader immediately
-            const emergencyMsg = `🚨 <b>CRITICAL EXECUTION FAILURE</b>\n\n` +
-              `Auto-exit SELL order failed at broker for <b>${qty}x ${optionSymbol}</b>.\n` +
+            // All 3 attempts failed: Mark database state and dispatch urgent Telegram notification
+            if (openTradeId) {
+              try {
+                const db = DatabaseService.initialize();
+                db.prepare("UPDATE paper_trades SET status = 'EXIT_FAILED_BROKER', reasoning = reasoning || ' [CRITICAL: Broker auto SELL failed: ' || ? || ']' WHERE id = ?").run(err?.message || "SELL failed", openTradeId);
+              } catch (dbErr) {
+                console.error("[AdvisoryManager] Failed to update paper_trades on broker SELL failure:", dbErr);
+              }
+            }
+
+            const emergencyMsg = `🚨 <b>CRITICAL BROKER EXIT FAILURE</b>\n\n` +
+              `Auto-exit SELL order failed at broker after 3 attempts for <b>${qty}x ${optionSymbol}</b>.\n` +
               `<b>Exit Type:</b> ${type}\n` +
               `<b>Error:</b> ${err?.message || err}\n\n` +
               `⚠️ <b>ACTION REQUIRED:</b> Please MANUALLY square off this position immediately on your broker terminal to prevent unbounded losses!`;
@@ -2242,6 +2300,7 @@ export class AdvisoryManager {
     pos.isTarget1Locked = false;
     pos.peakPremiumLtp = 0;
     pos.entryTime = 0;
+    pos.isExitInFlight = false;
   }
 
   private persistOpenPositionState(pos: TierPositionState): void {
