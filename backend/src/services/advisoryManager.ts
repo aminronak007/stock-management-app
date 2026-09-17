@@ -1049,9 +1049,16 @@ export class AdvisoryManager {
       return;
     }
 
-    // CPR Filter Check: If price opened or is sitting inside CPR, trade with caution
-    if (this.cpr && CPR.isPriceInsideCPR(spot, this.cpr)) {
-      return;
+    // CPR Filter Check: Nuanced evaluation
+    // If CPR is abnormally wide (> 50 pts or > 0.35% of spot), CPR boundaries act as S/R levels rather than a total dead-zone.
+    // Inside CPR penalties are handled directly by QuantitativeEngine.calculateConfluenceScore.
+    const isCprExtremelyWide = !!(this.cpr && (this.cpr.topRange - this.cpr.bottomRange) > Math.min(50, spot * 0.0035));
+    if (this.cpr && !isCprExtremelyWide && CPR.isPriceInsideCPR(spot, this.cpr)) {
+      const cprMid = this.cpr.pivot;
+      if (Math.abs(spot - cprMid) < 8) {
+        this.lastSignalBlockReason = `Price sitting in narrow CPR consolidation zone [${this.cpr.bottomRange.toFixed(1)} - ${this.cpr.topRange.toFixed(1)}]. Waiting for breakout.`;
+        return;
+      }
     }
 
     // Self-healing check: Ensure ORB & history are loaded even if backend started late (e.g. 10:00 AM)
@@ -1070,13 +1077,6 @@ export class AdvisoryManager {
 
     // Phase 6B: ADX Trend Strength Calculation
     const currentAdx = Indicators.calculateCandleADX(this.indexCandles.slice(-35), 14);
-
-    // VWAP Pullback / Extension Filter for late session signals (> 10:00 AM IST)
-    const vwapDistance = Math.abs(spot - this.currentVwap);
-    if (istTotalMinutes >= 600 && vwapDistance > 60) {
-      this.lastSignalBlockReason = `Price is over-extended (${vwapDistance.toFixed(1)} pts from session VWAP). Waiting for VWAP pullback confirmation.`;
-      return;
-    }
 
     let candidate: "CALL_BUY" | "PUT_BUY" | null = null;
     let setupType: StrategySetup = "VWAP_PULLBACK";
@@ -1130,42 +1130,43 @@ export class AdvisoryManager {
     const avgVol5 = closedCandles.slice(-5).reduce((s, c) => s + (c.volume || 0), 0) / Math.max(1, Math.min(5, closedCandles.length));
     const isCandleVolumeConfirmed = avgVol5 > 0 ? ((lastClosedCandle?.volume || 0) >= avgVol5 * 1.15) : true;
 
-    // For CALL: last closed candle must have tested VWAP zone (<= 10 pts), closed GREEN (close > open), and spot holding above VWAP & its low!
+    // Dynamic ATR-based proximity to session VWAP (typically 16-22 pts for Nifty)
+    const vwapProximityTolerance = Math.max(16, 0.35 * atrValue);
+    const isNearVwapPullbackZone = Math.abs(spot - this.currentVwap) <= vwapProximityTolerance;
+
+    // For CALL: last closed candle must have tested VWAP zone (<= tolerance), closed GREEN (close > open), and spot holding above VWAP & its low!
     const isCallBounceConfirmed = !!(
       lastClosedCandle &&
-      (Math.abs(lastClosedCandle.low - this.currentVwap) <= 10 || Math.abs(Math.min(lastClosedCandle.open, lastClosedCandle.close) - this.currentVwap) <= 10) &&
+      (Math.abs(lastClosedCandle.low - this.currentVwap) <= vwapProximityTolerance || Math.abs(Math.min(lastClosedCandle.open, lastClosedCandle.close) - this.currentVwap) <= vwapProximityTolerance) &&
       (lastClosedCandle.close > lastClosedCandle.open) &&
       (spot >= lastClosedCandle.low && spot > this.currentVwap) &&
       isCandleVolumeConfirmed
     );
-    // For PUT: last closed candle must have tested VWAP zone (<= 10 pts), closed RED (close < open), and spot holding below VWAP & its high!
+    // For PUT: last closed candle must have tested VWAP zone (<= tolerance), closed RED (close < open), and spot holding below VWAP & its high!
     const isPutRejectionConfirmed = !!(
       lastClosedCandle &&
-      (Math.abs(lastClosedCandle.high - this.currentVwap) <= 10 || Math.abs(Math.max(lastClosedCandle.open, lastClosedCandle.close) - this.currentVwap) <= 10) &&
+      (Math.abs(lastClosedCandle.high - this.currentVwap) <= vwapProximityTolerance || Math.abs(Math.max(lastClosedCandle.open, lastClosedCandle.close) - this.currentVwap) <= vwapProximityTolerance) &&
       (lastClosedCandle.close < lastClosedCandle.open) &&
       (spot <= lastClosedCandle.high && spot < this.currentVwap) &&
       isCandleVolumeConfirmed
     );
 
-    // Phase 2A: 2-Candle Confirmation (Previous candle tested VWAP zone within 8 pts, and current closed candle confirms direction)
+    // Phase 2A: 2-Candle Confirmation (Previous candle tested VWAP zone within tolerance, and current closed candle confirms direction)
     const prevCandle = closedCandles.length > 1 ? closedCandles[closedCandles.length - 2] : undefined;
     const isCallDoubleConfirmed = !!(
       prevCandle && lastClosedCandle &&
-      Math.abs(Math.min(prevCandle.open, prevCandle.close) - this.currentVwap) <= 10 &&
+      Math.abs(Math.min(prevCandle.open, prevCandle.close) - this.currentVwap) <= vwapProximityTolerance &&
       lastClosedCandle.close > lastClosedCandle.open &&
       lastClosedCandle.close > prevCandle.high &&
       isCandleVolumeConfirmed
     );
     const isPutDoubleConfirmed = !!(
       prevCandle && lastClosedCandle &&
-      Math.abs(Math.max(prevCandle.open, prevCandle.close) - this.currentVwap) <= 10 &&
+      Math.abs(Math.max(prevCandle.open, prevCandle.close) - this.currentVwap) <= vwapProximityTolerance &&
       lastClosedCandle.close < lastClosedCandle.open &&
       lastClosedCandle.close < prevCandle.low &&
       isCandleVolumeConfirmed
     );
-
-    // Pullback zone tightened to <= 12 points of session VWAP (genuine institutional proximity)
-    const isNearVwapPullbackZone = Math.abs(spot - this.currentVwap) <= 12;
 
     // Classify regime to block VWAP Pullback in RANGE / LOW_VOLATILITY
     const currentRegime = QuantitativeEngine.classifyRegime(spot, this.cpr, this.indiaVixValue, this.indexCandles, atrValue);
@@ -1174,21 +1175,41 @@ export class AdvisoryManager {
     // -------------------------------------------------------------
     // SETUP 1: VWAP PULLBACK (Institutional High-Win Trend Retracement)
     // -------------------------------------------------------------
-    // Require ADX >= 22 for trend setups, 15m trend alignment, and confirmed bounce
-    const isAdxTrendStrong = currentAdx >= 22;
-    if (!isRangeOrConsolidation && isAdxTrendStrong && isAboveVwap && (isTrendBullish || spot > this.currentVwap + 2) && isNearVwapPullbackZone && (isCallDoubleConfirmed || isCallBounceConfirmed) && !trend15m.trendBearish && isVwapSlopeBullish && currentStDirection === "BULLISH" && isMacdBullish) {
+    // Require ADX >= 20 for trend setups, 15m trend alignment, and confirmed bounce
+    const isAdxTrendStrong = currentAdx >= 20;
+    const isVwapOverExtended = Math.abs(spot - this.currentVwap) > Math.max(60, 2.5 * atrValue);
+
+    if (!isRangeOrConsolidation && !isVwapOverExtended && isAdxTrendStrong && isAboveVwap && (isTrendBullish || spot > this.currentVwap + 2) && isNearVwapPullbackZone && (isCallDoubleConfirmed || isCallBounceConfirmed) && !trend15m.trendBearish && isVwapSlopeBullish && currentStDirection === "BULLISH" && isMacdBullish) {
       candidate = "CALL_BUY";
       setupType = "VWAP_PULLBACK";
-      reasoning = `🎯 [VWAP PULLBACK] Institutional Bull Trend Retracement: Confirmed bounce at Session VWAP (${this.currentVwap.toFixed(1)}) with 15m Trend Bullish, ADX (${currentAdx.toFixed(1)} >= 22) and MACD momentum.`;
-    } else if (!isRangeOrConsolidation && isAdxTrendStrong && !isAboveVwap && (isTrendBearish || spot < this.currentVwap - 2) && isNearVwapPullbackZone && (isPutDoubleConfirmed || isPutRejectionConfirmed) && !trend15m.trendBullish && isVwapSlopeBearish && currentStDirection === "BEARISH" && isMacdBearish) {
+      reasoning = `🎯 [VWAP PULLBACK] Institutional Bull Trend Retracement: Confirmed bounce at Session VWAP (${this.currentVwap.toFixed(1)}) with 15m Trend Bullish, ADX (${currentAdx.toFixed(1)} >= 20) and MACD momentum.`;
+    } else if (!isRangeOrConsolidation && !isVwapOverExtended && isAdxTrendStrong && !isAboveVwap && (isTrendBearish || spot < this.currentVwap - 2) && isNearVwapPullbackZone && (isPutDoubleConfirmed || isPutRejectionConfirmed) && !trend15m.trendBullish && isVwapSlopeBearish && currentStDirection === "BEARISH" && isMacdBearish) {
       candidate = "PUT_BUY";
       setupType = "VWAP_PULLBACK";
-      reasoning = `🎯 [VWAP PULLBACK] Institutional Bear Trend Retracement: Confirmed rejection at Session VWAP (${this.currentVwap.toFixed(1)}) with 15m Trend Bearish, ADX (${currentAdx.toFixed(1)} >= 22) and MACD momentum.`;
+      reasoning = `🎯 [VWAP PULLBACK] Institutional Bear Trend Retracement: Confirmed rejection at Session VWAP (${this.currentVwap.toFixed(1)}) with 15m Trend Bearish, ADX (${currentAdx.toFixed(1)} >= 20) and MACD momentum.`;
     }
     // -------------------------------------------------------------
-    // SETUP 2: TRAP REVERSAL (Fading Extreme False Breakouts with Rejection Wicks)
+    // SETUP 2: ORB TREND CONTINUATION (High-Conviction Directional Breakout after 10:00 AM)
     // -------------------------------------------------------------
-    else if (!isIntradayBearTrend && !isIntradayBullTrend) {
+    else if (!isRangeOrConsolidation && isAdxTrendStrong) {
+      const orbBuffer = Math.max(2, 0.05 * atrValue);
+      const isOrbBullBreakout = this.orbHigh > 0 && spot > this.orbHigh + orbBuffer && lastClosedCandle && lastClosedCandle.close > this.orbHigh;
+      const isOrbBearBreakout = this.orbLow > 0 && spot < this.orbLow - orbBuffer && lastClosedCandle && lastClosedCandle.close < this.orbLow;
+
+      if (isOrbBullBreakout && !trend15m.trendBearish && currentStDirection === "BULLISH" && isMacdBullish && isCandleVolumeConfirmed && isAboveVwap) {
+        candidate = "CALL_BUY";
+        setupType = "ORB_BREAKOUT";
+        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bullish Breakout above ORB High (${this.orbHigh.toFixed(1)}): 15m Trend Bullish, ADX (${currentAdx.toFixed(1)} >= 20), SuperTrend aligned with volume expansion.`;
+      } else if (isOrbBearBreakout && !trend15m.trendBullish && currentStDirection === "BEARISH" && isMacdBearish && isCandleVolumeConfirmed && !isAboveVwap) {
+        candidate = "PUT_BUY";
+        setupType = "ORB_BREAKOUT";
+        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bearish Breakdown below ORB Low (${this.orbLow.toFixed(1)}): 15m Trend Bearish, ADX (${currentAdx.toFixed(1)} >= 20), SuperTrend aligned with volume expansion.`;
+      }
+    }
+    // -------------------------------------------------------------
+    // SETUP 3: TRAP REVERSAL (Fading Extreme False Breakouts with Rejection Wicks)
+    // -------------------------------------------------------------
+    if (!candidate && !isIntradayBearTrend && !isIntradayBullTrend) {
       const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
       const isTestingDayLow = this.dayLow <= this.orbLow + 2;
 
