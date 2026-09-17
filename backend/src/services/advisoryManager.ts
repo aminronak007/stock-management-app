@@ -1032,14 +1032,8 @@ export class AdvisoryManager {
     const istH = parseInt(hStr, 10);
     const istM = parseInt(mStr, 10);
     const istTotalMinutes = istH * 60 + istM;
-    const isLunchHour = istTotalMinutes >= 705 && istTotalMinutes < 795; // 11:45 AM to 1:15 PM IST
-
-    // Thursday Weekly Expiry Guard (Phase 3/Category 4): Cut off new entries after 12:00 PM IST due to accelerated gamma/theta collapse
-    const istDayName = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Kolkata", weekday: "short" }).format(new Date(timestamp));
-    if (istDayName === "Thu" && istTotalMinutes >= 720) {
-      this.lastSignalBlockReason = "Thursday Expiry Day: New entries blocked after 12:00 PM IST due to accelerated gamma and theta collapse.";
-      return;
-    }
+    // Midday lunch hour (11:45 AM to 1:15 PM IST)
+    const isLunchHour = istTotalMinutes >= 705 && istTotalMinutes < 795;
 
     // Universal Daily Realized Rupee Loss Stop: Hard circuit breaker if daily loss reaches -₹5,000
     const todayRealizedPnl = DatabaseService.getTodayRealizedPnl(timestamp);
@@ -1191,19 +1185,20 @@ export class AdvisoryManager {
     // -------------------------------------------------------------
     // SETUP 2: ORB TREND CONTINUATION (High-Conviction Directional Breakout after 10:00 AM)
     // -------------------------------------------------------------
-    else if (!isRangeOrConsolidation && isAdxTrendStrong) {
+    else if (!isRangeOrConsolidation) {
+      const isAdxBreakoutStrong = currentAdx >= 14;
       const orbBuffer = Math.max(2, 0.05 * atrValue);
       const isOrbBullBreakout = this.orbHigh > 0 && spot > this.orbHigh + orbBuffer && lastClosedCandle && lastClosedCandle.close > this.orbHigh;
       const isOrbBearBreakout = this.orbLow > 0 && spot < this.orbLow - orbBuffer && lastClosedCandle && lastClosedCandle.close < this.orbLow;
 
-      if (isOrbBullBreakout && !trend15m.trendBearish && currentStDirection === "BULLISH" && isMacdBullish && isCandleVolumeConfirmed && isAboveVwap) {
+      if (isAdxBreakoutStrong && isOrbBullBreakout && !trend15m.trendBearish && currentStDirection === "BULLISH" && isMacdBullish && isCandleVolumeConfirmed && isAboveVwap) {
         candidate = "CALL_BUY";
         setupType = "ORB_BREAKOUT";
-        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bullish Breakout above ORB High (${this.orbHigh.toFixed(1)}): 15m Trend Bullish, ADX (${currentAdx.toFixed(1)} >= 20), SuperTrend aligned with volume expansion.`;
-      } else if (isOrbBearBreakout && !trend15m.trendBullish && currentStDirection === "BEARISH" && isMacdBearish && isCandleVolumeConfirmed && !isAboveVwap) {
+        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bullish Breakout above ORB High (${this.orbHigh.toFixed(1)}): 15m Trend Bullish, ADX (${currentAdx.toFixed(1)} >= 14), SuperTrend aligned with volume expansion.`;
+      } else if (isAdxBreakoutStrong && isOrbBearBreakout && !trend15m.trendBullish && currentStDirection === "BEARISH" && isMacdBearish && isCandleVolumeConfirmed && !isAboveVwap) {
         candidate = "PUT_BUY";
         setupType = "ORB_BREAKOUT";
-        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bearish Breakdown below ORB Low (${this.orbLow.toFixed(1)}): 15m Trend Bearish, ADX (${currentAdx.toFixed(1)} >= 20), SuperTrend aligned with volume expansion.`;
+        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bearish Breakdown below ORB Low (${this.orbLow.toFixed(1)}): 15m Trend Bearish, ADX (${currentAdx.toFixed(1)} >= 14), SuperTrend aligned with volume expansion.`;
       }
     }
     // -------------------------------------------------------------
@@ -1451,6 +1446,14 @@ export class AdvisoryManager {
 
       const expiryDateStr = atmChain?.expiryDate || chain[0]?.expiryDate;
       const expiryDays = getDaysToExpiry(expiryDateStr);
+
+      // 0 DTE Late Session Expiry Cutoff: Cut off new entries only after 14:15 (2:15 PM IST) when contract actually expires today
+      // On contracts with >0 DTE (e.g. today with 5 days to expiry), afternoon trading is fully open until 15:15 IST!
+      if (expiryDays <= 0.25 && istTotalMinutes >= 855) {
+        this.lastSignalBlockReason = "0 DTE Expiry Day: New entries paused after 2:15 PM IST due to accelerated gamma/theta collapse.";
+        console.warn(`[AdvisoryManager] 🛡️ ${this.lastSignalBlockReason}`);
+        return;
+      }
       let greeksResult = Greeks.calculateGreeks(spot, selectedStrike, expiryDays, this.indiaVixValue);
       let delta = triggerType === "CALL_BUY" ? greeksResult.call.delta : Math.abs(greeksResult.put.delta);
 
