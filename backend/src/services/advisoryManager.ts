@@ -1567,8 +1567,8 @@ export class AdvisoryManager {
         timestamp
       });
 
-      // Strict Institutional Gate: Require score >= 88 (High Conviction Only). Block weak marginal chop entries (< 88).
-      const baseMinScore = parseInt(process.env.MIN_SIGNAL_SCORE || "88", 10) || 88;
+      // Institutional Gate: Require score >= 80 (HIGH_QUALITY tier in QuantitativeEngine). Block weak marginal chop entries (< 80).
+      const baseMinScore = parseInt(process.env.MIN_SIGNAL_SCORE || "80", 10) || 80;
       const minScoreThreshold = baseMinScore + (this.selfTuningParams.minScoreAdjustment || 0);
       if (scoreCard.isFalseBreakout || scoreCard.totalScore < minScoreThreshold) {
         const moveName = triggerType === "CALL_BUY" ? "Breakout" : "Breakdown";

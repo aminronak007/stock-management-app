@@ -504,15 +504,9 @@ export class QuantitativeEngine {
       explanation.push(`⚠ PUT SUPPORT WALL PENALTY (-15 points): Spot approaching Max Put OI Support Wall at ${maxPutOiStrike}`);
     }
 
-    if (triggerType === "CALL_BUY" && deltaCallOi !== undefined && deltaCallOi > 30000) {
-      totalScore = Math.max(0, totalScore - 20);
-      explanation.push("⚠ INSTITUTIONAL CALL WRITING WALL (-20 points): Heavy call addition into breakout.");
-    }
-
-    if (triggerType === "PUT_BUY" && deltaPutOi !== undefined && deltaPutOi > 30000) {
-      totalScore = Math.max(0, totalScore - 20);
-      explanation.push("⚠ INSTITUTIONAL PUT WRITING WALL (-20 points): Heavy put addition into breakdown.");
-    }
+    // Strike-level OI walls are already protected by isNearCallWall & isNearPutWall above.
+    // Note: Global chain OI delta fluctuates by >30k contracts routinely; penalizing total OI addition
+    // falsely penalizes legitimate put-buying momentum on breakdowns and call-buying on breakouts.
 
     if (deltaVixPercent !== undefined && deltaVixPercent < -3.0) {
       totalScore = Math.max(0, totalScore - 10);
