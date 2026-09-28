@@ -104,11 +104,11 @@ export class QuantitativeEngine {
     const bankNiftyLtp = heavyweightsLtp["NSE:NIFTYBANK-INDEX"] || 0;
     const bankNiftyVwap = heavyweightsVwap["NSE:NIFTYBANK-INDEX"] || 0;
     if (bankNiftyLtp > 0 && bankNiftyVwap > 0) {
-      if (triggerType === "CALL_BUY" && bankNiftyLtp < bankNiftyVwap * 0.999) {
-        return true; // Bank Nifty is below VWAP while Nifty attempts Call Breakout -> Divergence Trap!
+      if (triggerType === "CALL_BUY" && bankNiftyLtp < bankNiftyVwap * 0.997) {
+        return true; // Bank Nifty is significantly below VWAP while Nifty attempts Call Breakout -> Divergence Trap!
       }
-      if (triggerType === "PUT_BUY" && bankNiftyLtp > bankNiftyVwap * 1.001) {
-        return true; // Bank Nifty is above VWAP while Nifty attempts Put Breakdown -> Divergence Trap!
+      if (triggerType === "PUT_BUY" && bankNiftyLtp > bankNiftyVwap * 1.003) {
+        return true; // Bank Nifty is significantly above VWAP while Nifty attempts Put Breakdown -> Divergence Trap!
       }
     }
 
@@ -520,8 +520,8 @@ export class QuantitativeEngine {
     }
 
     if (isChoppyAdx && (setupType === "ORB_BREAKOUT" || setupType === "VWAP_PULLBACK")) {
-      totalScore = Math.max(0, totalScore - 20);
-      explanation.push(`⚠ CHOPPY MARKET PENALTY (ADX=${currentAdx.toFixed(1)} < 22: -20 points applied)`);
+      totalScore = Math.max(0, totalScore - 10);
+      explanation.push(`⚠ CHOPPY MARKET PENALTY (ADX=${currentAdx.toFixed(1)} < 22: -10 points applied)`);
     }
 
     // BANK NIFTY & HEAVYWEIGHT INTRADAY VWAP CONSENSUS GATES:
@@ -541,17 +541,15 @@ export class QuantitativeEngine {
 
     // Hard Intraday Banking & Sector Divergence Vetoes:
     // If Bank Nifty is trading bullishly above its VWAP (> +0.08%) or HDFC Bank is strongly above VWAP (> +0.12%), PUT buying on Nifty is a guaranteed trap!
-    if (triggerType === "PUT_BUY" && (bnfVwapDev > 0.08 || (hdfcVwapDev > 0.12 && bnfVwapDev >= 0))) {
-      totalScore = 0;
-      isFalseBreakout = true;
-      explanation.push(`✕ BANKING INTRADAY DIVERGENCE VETO: Bank Nifty (${bnfVwapDev > 0 ? "+" : ""}${bnfVwapDev.toFixed(2)}% vs VWAP) or HDFC Bank (${hdfcVwapDev > 0 ? "+" : ""}${hdfcVwapDev.toFixed(2)}% vs VWAP) are bullish above VWAP. PUT trade strictly vetoed.`);
+    if (triggerType === "PUT_BUY" && (bnfVwapDev > 0.40 || (hdfcVwapDev > 0.40 && bnfVwapDev >= 0))) {
+      totalScore = Math.max(0, totalScore - 15);
+      explanation.push(`⚠ BANKING INTRADAY DIVERGENCE: Bank Nifty (${bnfVwapDev > 0 ? "+" : ""}${bnfVwapDev.toFixed(2)}% vs VWAP) or HDFC Bank (${hdfcVwapDev > 0 ? "+" : ""}${hdfcVwapDev.toFixed(2)}% vs VWAP) moderately bullish. PUT penalty applied (-15 pts).`);
     }
 
     // If Bank Nifty is trading bearishly below its VWAP (< -0.08%) or Reliance is strongly below VWAP (< -0.15%), CALL buying on Nifty is a guaranteed trap!
-    if (triggerType === "CALL_BUY" && (bnfVwapDev < -0.08 || (relVwapDev < -0.15 && bnfVwapDev <= 0))) {
-      totalScore = 0;
-      isFalseBreakout = true;
-      explanation.push(`✕ SECTOR INTRADAY DIVERGENCE VETO: Bank Nifty (${bnfVwapDev.toFixed(2)}% vs VWAP) or Reliance (${relVwapDev.toFixed(2)}% vs VWAP) are bearish below VWAP. CALL trade strictly vetoed.`);
+    if (triggerType === "CALL_BUY" && (bnfVwapDev < -0.40 || (relVwapDev < -0.40 && bnfVwapDev <= 0))) {
+      totalScore = Math.max(0, totalScore - 15);
+      explanation.push(`⚠ SECTOR INTRADAY DIVERGENCE: Bank Nifty (${bnfVwapDev.toFixed(2)}% vs VWAP) or Reliance (${relVwapDev.toFixed(2)}% vs VWAP) moderately bearish. CALL penalty applied (-15 pts).`);
     }
 
     // IT Index & Multi-Sector Tug-of-War Vetoes:
@@ -560,35 +558,31 @@ export class QuantitativeEngine {
     const itVwapDev = (itLtp > 0 && itVwap > 0) ? ((itLtp - itVwap) / itVwap) * 100 : 0;
 
     if (itLtp > 0 && itVwap > 0 && setupType !== "TRAP_REVERSAL") {
-      if (triggerType === "PUT_BUY" && itVwapDev > 0.15) {
-        totalScore = 0;
-        isFalseBreakout = true;
-        explanation.push(`✕ IT SECTOR INTRADAY DIVERGENCE VETO: Nifty IT (${itVwapDev > 0 ? "+" : ""}${itVwapDev.toFixed(2)}% vs VWAP) is strongly bullish above VWAP. PUT trade strictly vetoed.`);
-      } else if (triggerType === "CALL_BUY" && itVwapDev < -0.15) {
-        totalScore = 0;
-        isFalseBreakout = true;
-        explanation.push(`✕ IT SECTOR INTRADAY DIVERGENCE VETO: Nifty IT (${itVwapDev.toFixed(2)}% vs VWAP) is strongly bearish below VWAP. CALL trade strictly vetoed.`);
+      if (triggerType === "PUT_BUY" && itVwapDev > 0.50) {
+        totalScore = Math.max(0, totalScore - 12);
+        explanation.push(`⚠ IT SECTOR DIVERGENCE: Nifty IT (${itVwapDev > 0 ? "+" : ""}${itVwapDev.toFixed(2)}% vs VWAP) is bullish. PUT penalty applied (-12 pts).`);
+      } else if (triggerType === "CALL_BUY" && itVwapDev < -0.50) {
+        totalScore = Math.max(0, totalScore - 12);
+        explanation.push(`⚠ IT SECTOR DIVERGENCE: Nifty IT (${itVwapDev.toFixed(2)}% vs VWAP) is bearish. CALL penalty applied (-12 pts).`);
       }
 
       // Banking (33%) vs IT (15%) Severe Sector Divergence (Tug-of-War Conflict)
-      const isSectorTugOfWar = (bnfVwapDev > 0.10 && itVwapDev < -0.15) || (bnfVwapDev < -0.10 && itVwapDev > 0.15);
+      const isSectorTugOfWar = (bnfVwapDev > 0.50 && itVwapDev < -0.50) || (bnfVwapDev < -0.50 && itVwapDev > 0.50);
       if (isSectorTugOfWar) {
-        totalScore = 0;
-        isFalseBreakout = true;
-        explanation.push(`✕ BANKING VS IT TUG-OF-WAR: Bank Nifty (${bnfVwapDev > 0 ? "+" : ""}${bnfVwapDev.toFixed(2)}%) and Nifty IT (${itVwapDev > 0 ? "+" : ""}${itVwapDev.toFixed(2)}%) are pulling in opposite directions. Multi-sector conflict cancels breakout.`);
+        totalScore = Math.max(0, totalScore - 15);
+        explanation.push(`⚠ BANKING VS IT TUG-OF-WAR: Bank Nifty (${bnfVwapDev > 0 ? "+" : ""}${bnfVwapDev.toFixed(2)}%) and Nifty IT (${itVwapDev > 0 ? "+" : ""}${itVwapDev.toFixed(2)}%) are diverging. Penalty applied (-15 pts).`);
       }
     }
 
-    const isBankNiftyDiverging = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap * 0.999) ||
-                                 (triggerType === "PUT_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp > bnfVwap * 1.001);
+    const isBankNiftyDiverging = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap * 0.997) ||
+                                 (triggerType === "PUT_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp > bnfVwap * 1.003);
 
     const isBankNiftyAligned = (triggerType === "CALL_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp > bnfVwap * 1.001) ||
                                (triggerType === "PUT_BUY" && bnfLtp > 0 && bnfVwap > 0 && bnfLtp < bnfVwap * 0.999);
 
     if (isBankNiftyDiverging && setupType !== "TRAP_REVERSAL") {
-      totalScore = 0;
-      isFalseBreakout = true;
-      explanation.push("✕ BANK NIFTY MULTI-INDEX DIVERGENCE GATE: Bank Nifty strongly opposing Nifty breakout direction. False Breakout Trap!");
+      totalScore = Math.max(0, totalScore - 15);
+      explanation.push("⚠ BANK NIFTY DIVERGENCE PENALTY (-15 pts): Bank Nifty significantly opposing Nifty breakout direction.");
     } else if (isBankNiftyAligned) {
       explanation.push("🏛️ MULTI-INDEX CONSENSUS TAILWIND: Bank Nifty & Nifty 50 perfectly aligned in trend direction.");
     }
@@ -616,9 +610,8 @@ export class QuantitativeEngine {
     }
 
     if (opposingBig3Count >= 2 && setupType !== "TRAP_REVERSAL") {
-      totalScore = 0;
-      isFalseBreakout = true;
-      explanation.push(`✕ BIG-3 INSTITUTIONAL DIVERGENCE GATE: ${opposingBig3Count}/3 Heavyweights (${opposingNames.join(", ")}) opposing setup. 100% False Breakout Trap.`);
+      totalScore = Math.max(0, totalScore - 15);
+      explanation.push(`⚠ BIG-3 INSTITUTIONAL DIVERGENCE (-15 pts): ${opposingBig3Count}/3 Heavyweights (${opposingNames.join(", ")}) opposing setup.`);
     }
 
     // Tsunami Trend Gate: If Bank Nifty is plunging (>0.25% below VWAP) or surging (>0.25% above VWAP),
@@ -710,16 +703,13 @@ export class QuantitativeEngine {
         explanation.push("⚠ COUNTER-REGIME PENALTY (-20 points): CALL buy attempted in confirmed TREND_DOWN regime.");
       }
     } else if (regime === "RANGE" && setupType !== "TRAP_REVERSAL") {
-      totalScore = Math.max(0, totalScore - 15);
-      explanation.push("⚠ RANGE REGIME PENALTY (-15 points): Consolidating market regime penalty.");
+      totalScore = Math.max(0, totalScore - 8);
+      explanation.push("⚠ RANGE REGIME PENALTY (-8 points): Consolidating market regime penalty.");
     }
 
-    // Phase 2A & 4A: Hard Veto for VWAP_PULLBACK in RANGE or LOW_VOLATILITY
-    if (setupType === "VWAP_PULLBACK" && (regime === "RANGE" || regime === "LOW_VOLATILITY")) {
-      totalScore = 0;
-      isFalseBreakout = true;
-      explanation.push("✕ RANGE REGIME VETO: VWAP Pullback trend setups are strictly prohibited during RANGE / Low Volatility chop.");
-    }
+    // Phase 2A & 4A: Regime-based adjustment for VWAP_PULLBACK
+    // NOTE: Hard veto removed — regime penalties above already penalize RANGE setups.
+    // The advisoryManager's strategy routing handles regime filtering.
 
     // Bug H: Late-Session Theta Decay Penalty (after 14:00 IST)
     const evalTimestamp = timestamp || Date.now();

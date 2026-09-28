@@ -154,6 +154,7 @@ export class AdvisoryManager {
   private isSignalGeneratedToday: boolean = false;
   private lastBreakoutEvalAt: number = 0;
   private breakoutEvalInflight: boolean = false;
+  private _lastNoCandidateLogAt: number = 0;
   private lastSignalBlockReason: string = "";
   private lastTriggeredBreakoutLevel: {
     CALL_BUY: number;
@@ -933,8 +934,8 @@ export class AdvisoryManager {
         }
       }
 
-      // Phase 2B: Evaluate signals starting from 10:00 AM IST to 3:15 PM IST!
-      const canEvaluateSignals = (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15);
+      // Phase 2B: Evaluate signals starting from 09:30 AM IST to 3:15 PM IST!
+      const canEvaluateSignals = (hours === 9 && minutes >= 30) || (hours >= 10 && hours < 15) || (hours === 15 && minutes < 15);
       if (canEvaluateSignals) {
         // One evaluation at a time, at most once per second — never stampede Fyers on every tick
         if (!this.breakoutEvalInflight && timestamp - this.lastBreakoutEvalAt >= 1000) {
@@ -1121,8 +1122,12 @@ export class AdvisoryManager {
     }
 
     // 3. Phase 2C: Completed 5-Minute Candle Bounce Confirmation with Volume Expansion
+    // NOTE: Nifty index WebSocket ticks have volume=0 (indices don't carry traded volume).
+    // Historical candles from Fyers API have volume in millions. When live candles form with volume=0,
+    // comparing against historical average would always fail. Bypass volume gate when live volume is unavailable.
     const avgVol5 = closedCandles.slice(-5).reduce((s, c) => s + (c.volume || 0), 0) / Math.max(1, Math.min(5, closedCandles.length));
-    const isCandleVolumeConfirmed = avgVol5 > 0 ? ((lastClosedCandle?.volume || 0) >= avgVol5 * 1.15) : true;
+    const lastCandleVolume = lastClosedCandle?.volume || 0;
+    const isCandleVolumeConfirmed = (lastCandleVolume <= 0) ? true : (avgVol5 > 0 ? (lastCandleVolume >= avgVol5 * 1.15) : true);
 
     // Dynamic ATR-based proximity to session VWAP (typically 16-22 pts for Nifty)
     const vwapProximityTolerance = Math.max(16, 0.35 * atrValue);
@@ -1238,7 +1243,14 @@ export class AdvisoryManager {
     }
 
     if (!candidate) {
-      this.lastSignalBlockReason = "";
+      // Diagnostic: Log key indicator state every 5 minutes when no candidate is found
+      if (!this._lastNoCandidateLogAt || timestamp - this._lastNoCandidateLogAt >= 300000) {
+        this._lastNoCandidateLogAt = timestamp;
+        const vwapDist = Math.abs(spot - this.currentVwap).toFixed(1);
+        const orbStatus = spot > this.orbHigh ? 'ABOVE_ORB' : spot < this.orbLow ? 'BELOW_ORB' : 'INSIDE_ORB';
+        console.log(`[AdvisoryManager] 📊 [DIAGNOSTIC] No candidate generated. ADX=${currentAdx.toFixed(1)}, VWAPdist=${vwapDist}, ORB=${orbStatus}, Regime=${currentRegime}, SuperTrend=${currentStDirection}, MACD=${curHist > 0 ? 'Bull' : 'Bear'}, VIX=${this.indiaVixValue.toFixed(1)}, VolConf=${isCandleVolumeConfirmed}`);
+      }
+      this.lastSignalBlockReason = `No strategy setup matched. ADX=${currentAdx.toFixed(1)}, Regime=${currentRegime}, VWAP dist=${Math.abs(spot - this.currentVwap).toFixed(1)}pts.`;
       return;
     }
 
@@ -1562,7 +1574,9 @@ export class AdvisoryManager {
         const moveName = triggerType === "CALL_BUY" ? "Breakout" : "Breakdown";
         const primaryReason = scoreCard.explanation.find(e => e.includes("✕") || e.includes("⚠")) || `${moveName} is valid, but confluence is ${scoreCard.totalScore}/100 (need at least ${minScoreThreshold} for High Conviction)`;
         this.lastSignalBlockReason = `${moveName} printed, but blocked: ${primaryReason.replace(/^[✕⚠]\s*/, "")}`;
-        console.warn(`[AdvisoryManager] ${this.lastSignalBlockReason}`);
+        // SHADOW MODE: Log full score breakdown for every blocked candidate
+        const penalties = scoreCard.explanation.filter(e => e.includes("✕") || e.includes("⚠"));
+        console.warn(`[AdvisoryManager] 🔍 [SHADOW] ${triggerType} ${setupType} candidate BLOCKED. Score=${scoreCard.totalScore}/${minScoreThreshold}. FalseBreakout=${scoreCard.isFalseBreakout}. Regime=${scoreCard.regime}. Penalties: ${penalties.join(' | ') || 'NONE'}`);
         return;
       }
 
