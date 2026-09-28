@@ -540,13 +540,13 @@ export class QuantitativeEngine {
     const relVwapDev = (relLtp > 0 && relVwap > 0) ? ((relLtp - relVwap) / relVwap) * 100 : 0;
 
     // Hard Intraday Banking & Sector Divergence Vetoes:
-    // If Bank Nifty is trading bullishly above its VWAP (> +0.08%) or HDFC Bank is strongly above VWAP (> +0.12%), PUT buying on Nifty is a guaranteed trap!
+    // If Bank Nifty is trading strongly bullish above its VWAP (> +0.40%) or HDFC Bank is strongly above VWAP (> +0.40%), apply PUT penalty
     if (triggerType === "PUT_BUY" && (bnfVwapDev > 0.40 || (hdfcVwapDev > 0.40 && bnfVwapDev >= 0))) {
       totalScore = Math.max(0, totalScore - 15);
       explanation.push(`⚠ BANKING INTRADAY DIVERGENCE: Bank Nifty (${bnfVwapDev > 0 ? "+" : ""}${bnfVwapDev.toFixed(2)}% vs VWAP) or HDFC Bank (${hdfcVwapDev > 0 ? "+" : ""}${hdfcVwapDev.toFixed(2)}% vs VWAP) moderately bullish. PUT penalty applied (-15 pts).`);
     }
 
-    // If Bank Nifty is trading bearishly below its VWAP (< -0.08%) or Reliance is strongly below VWAP (< -0.15%), CALL buying on Nifty is a guaranteed trap!
+    // If Bank Nifty is trading strongly bearish below its VWAP (< -0.40%) or Reliance is strongly below VWAP (< -0.40%), apply CALL penalty
     if (triggerType === "CALL_BUY" && (bnfVwapDev < -0.40 || (relVwapDev < -0.40 && bnfVwapDev <= 0))) {
       totalScore = Math.max(0, totalScore - 15);
       explanation.push(`⚠ SECTOR INTRADAY DIVERGENCE: Bank Nifty (${bnfVwapDev.toFixed(2)}% vs VWAP) or Reliance (${relVwapDev.toFixed(2)}% vs VWAP) moderately bearish. CALL penalty applied (-15 pts).`);
