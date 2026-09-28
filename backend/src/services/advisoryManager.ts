@@ -1190,20 +1190,20 @@ export class AdvisoryManager {
     // -------------------------------------------------------------
     // SETUP 2: ORB TREND CONTINUATION (High-Conviction Directional Breakout)
     // -------------------------------------------------------------
-    else {
-      const isAdxBreakoutStrong = currentAdx >= 14;
-      const orbBuffer = Math.max(2, 0.05 * atrValue);
-      const isOrbBullBreakout = this.orbHigh > 0 && spot > this.orbHigh + orbBuffer && lastClosedCandle && lastClosedCandle.close > this.orbHigh;
-      const isOrbBearBreakout = this.orbLow > 0 && spot < this.orbLow - orbBuffer && lastClosedCandle && lastClosedCandle.close < this.orbLow;
+    const isAdxBreakoutStrong = currentAdx >= 14;
+    const orbBuffer = Math.max(2, 0.05 * atrValue);
+    const isOrbBullBreakout = this.orbHigh > 0 && spot > this.orbHigh + orbBuffer && lastClosedCandle && lastClosedCandle.close > this.orbHigh;
+    const isOrbBearBreakout = this.orbLow > 0 && spot < this.orbLow - orbBuffer && lastClosedCandle && lastClosedCandle.close < this.orbLow;
 
-      if (isAdxBreakoutStrong && isOrbBullBreakout && !trend15m.trendBearish && currentStDirection === "BULLISH" && isMacdBullish && isCandleVolumeConfirmed && isAboveVwap) {
+    if (!candidate) {
+      if (isAdxBreakoutStrong && isOrbBullBreakout && !trend15m.trendBearish && currentStDirection === "BULLISH" && isMacdBullish && isAboveVwap) {
         candidate = "CALL_BUY";
         setupType = "ORB_BREAKOUT";
-        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bullish Breakout above ORB High (${this.orbHigh.toFixed(1)}): 15m Trend Bullish, ADX (${currentAdx.toFixed(1)} >= 14), SuperTrend aligned with volume expansion.`;
-      } else if (isAdxBreakoutStrong && isOrbBearBreakout && !trend15m.trendBullish && currentStDirection === "BEARISH" && isMacdBearish && isCandleVolumeConfirmed && !isAboveVwap) {
+        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bullish Breakout above ORB High (${this.orbHigh.toFixed(1)}): 15m Trend Bullish, ADX (${currentAdx.toFixed(1)} >= 14), SuperTrend aligned with MACD momentum.`;
+      } else if (isAdxBreakoutStrong && isOrbBearBreakout && !trend15m.trendBullish && currentStDirection === "BEARISH" && isMacdBearish && !isAboveVwap) {
         candidate = "PUT_BUY";
         setupType = "ORB_BREAKOUT";
-        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bearish Breakdown below ORB Low (${this.orbLow.toFixed(1)}): 15m Trend Bearish, ADX (${currentAdx.toFixed(1)} >= 14), SuperTrend aligned with volume expansion.`;
+        reasoning = `🚀 [ORB BREAKOUT] High-Conviction Bearish Breakdown below ORB Low (${this.orbLow.toFixed(1)}): 15m Trend Bearish, ADX (${currentAdx.toFixed(1)} >= 14), SuperTrend aligned with MACD momentum.`;
       }
     }
     // -------------------------------------------------------------
@@ -1243,14 +1243,21 @@ export class AdvisoryManager {
     }
 
     if (!candidate) {
+      const orbPutFail = !isAdxBreakoutStrong ? `ADX too low (${currentAdx.toFixed(1)} < 14)`
+        : !isOrbBearBreakout ? `ORB Low (${this.orbLow.toFixed(1)}) not broken by closed candle`
+        : trend15m.trendBullish ? "15m Trend Bullish opposes PUT"
+        : currentStDirection !== "BEARISH" ? `SuperTrend is ${currentStDirection || "neutral"} (need BEARISH)`
+        : !isMacdBearish ? "MACD histogram rising (momentum pause)"
+        : isAboveVwap ? "Spot above VWAP" : "Setup conditions incomplete";
+
       // Diagnostic: Log key indicator state every 5 minutes when no candidate is found
       if (!this._lastNoCandidateLogAt || timestamp - this._lastNoCandidateLogAt >= 300000) {
         this._lastNoCandidateLogAt = timestamp;
         const vwapDist = Math.abs(spot - this.currentVwap).toFixed(1);
         const orbStatus = spot > this.orbHigh ? 'ABOVE_ORB' : spot < this.orbLow ? 'BELOW_ORB' : 'INSIDE_ORB';
-        console.log(`[AdvisoryManager] 📊 [DIAGNOSTIC] No candidate generated. ADX=${currentAdx.toFixed(1)}, VWAPdist=${vwapDist}, ORB=${orbStatus}, Regime=${currentRegime}, SuperTrend=${currentStDirection}, MACD=${curHist > 0 ? 'Bull' : 'Bear'}, VIX=${this.indiaVixValue.toFixed(1)}, VolConf=${isCandleVolumeConfirmed}`);
+        console.log(`[AdvisoryManager] 📊 [DIAGNOSTIC] No candidate generated (${orbPutFail}). ADX=${currentAdx.toFixed(1)}, VWAPdist=${vwapDist}, ORB=${orbStatus}, Regime=${currentRegime}, SuperTrend=${currentStDirection}, MACD=${curHist > 0 ? 'Bull' : 'Bear'}, VIX=${this.indiaVixValue.toFixed(1)}, VolConf=${isCandleVolumeConfirmed}`);
       }
-      this.lastSignalBlockReason = `No strategy setup matched. ADX=${currentAdx.toFixed(1)}, Regime=${currentRegime}, VWAP dist=${Math.abs(spot - this.currentVwap).toFixed(1)}pts.`;
+      this.lastSignalBlockReason = `No strategy candidate: ${orbPutFail}. (ADX=${currentAdx.toFixed(1)}, Regime=${currentRegime}, VWAP dist=${Math.abs(spot - this.currentVwap).toFixed(1)}pts)`;
       return;
     }
 

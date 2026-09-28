@@ -34,13 +34,13 @@ export class GeminiRiskOfficer {
    */
   public static evaluateLocalDeterministicRules(input: AIAuditInput, fallbackReason: string): AIAuditResult {
     // Rule 1: Minimum Institutional Confluence Score
-    if (input.confluenceScore < 82) {
+    if (input.confluenceScore < 80) {
       return {
         approved: false,
         aiConfidence: 30,
         verdict: "BLOCKED",
         trapDetected: true,
-        reasoning: `[Local Risk Engine] Confluence score (${input.confluenceScore}/100) is below high-conviction threshold (82). Blocked to protect capital.`
+        reasoning: `[Local Risk Engine] Confluence score (${input.confluenceScore}/100) is below high-conviction threshold (80). Blocked to protect capital.`
       };
     }
 
