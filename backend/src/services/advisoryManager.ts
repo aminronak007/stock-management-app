@@ -1088,9 +1088,9 @@ export class AdvisoryManager {
     // =============================================================
     // STRATEGY ROUTING ENGINE: INSTITUTIONAL PULLBACK-FIRST ARCHITECTURE
     // =============================================================
-    // 1. Phase 2B: Never trade before 10:00 AM IST: Let the morning structure fully form and eliminate 9:15-10:00 AM chop!
-    if (istTotalMinutes < 600) {
-      this.lastSignalBlockReason = "Building market structure (09:15-10:00 AM). High-conviction institutional setups activate after 10:00 AM IST.";
+    // 1. Phase 2B: Allow trades after 09:30 AM IST once the 15-minute ORB range is established and locked!
+    if (istTotalMinutes < 570) {
+      this.lastSignalBlockReason = "Building 15-minute market structure (09:15-09:30 AM). High-conviction setups activate after 09:30 AM IST.";
       return;
     }
 
@@ -1173,19 +1173,19 @@ export class AdvisoryManager {
     const isAdxTrendStrong = currentAdx >= 20;
     const isVwapOverExtended = Math.abs(spot - this.currentVwap) > Math.max(60, 2.5 * atrValue);
 
-    if (!isRangeOrConsolidation && !isVwapOverExtended && isAdxTrendStrong && isAboveVwap && (isTrendBullish || spot > this.currentVwap + 2) && isNearVwapPullbackZone && (isCallDoubleConfirmed || isCallBounceConfirmed) && !trend15m.trendBearish && isVwapSlopeBullish && currentStDirection === "BULLISH" && isMacdBullish) {
+    if (!isVwapOverExtended && isAdxTrendStrong && isAboveVwap && (isTrendBullish || spot > this.currentVwap + 2) && isNearVwapPullbackZone && (isCallDoubleConfirmed || isCallBounceConfirmed) && !trend15m.trendBearish && isVwapSlopeBullish && currentStDirection === "BULLISH" && isMacdBullish) {
       candidate = "CALL_BUY";
       setupType = "VWAP_PULLBACK";
       reasoning = `🎯 [VWAP PULLBACK] Institutional Bull Trend Retracement: Confirmed bounce at Session VWAP (${this.currentVwap.toFixed(1)}) with 15m Trend Bullish, ADX (${currentAdx.toFixed(1)} >= 20) and MACD momentum.`;
-    } else if (!isRangeOrConsolidation && !isVwapOverExtended && isAdxTrendStrong && !isAboveVwap && (isTrendBearish || spot < this.currentVwap - 2) && isNearVwapPullbackZone && (isPutDoubleConfirmed || isPutRejectionConfirmed) && !trend15m.trendBullish && isVwapSlopeBearish && currentStDirection === "BEARISH" && isMacdBearish) {
+    } else if (!isVwapOverExtended && isAdxTrendStrong && !isAboveVwap && (isTrendBearish || spot < this.currentVwap - 2) && isNearVwapPullbackZone && (isPutDoubleConfirmed || isPutRejectionConfirmed) && !trend15m.trendBullish && isVwapSlopeBearish && currentStDirection === "BEARISH" && isMacdBearish) {
       candidate = "PUT_BUY";
       setupType = "VWAP_PULLBACK";
       reasoning = `🎯 [VWAP PULLBACK] Institutional Bear Trend Retracement: Confirmed rejection at Session VWAP (${this.currentVwap.toFixed(1)}) with 15m Trend Bearish, ADX (${currentAdx.toFixed(1)} >= 20) and MACD momentum.`;
     }
     // -------------------------------------------------------------
-    // SETUP 2: ORB TREND CONTINUATION (High-Conviction Directional Breakout after 10:00 AM)
+    // SETUP 2: ORB TREND CONTINUATION (High-Conviction Directional Breakout)
     // -------------------------------------------------------------
-    else if (!isRangeOrConsolidation) {
+    else {
       const isAdxBreakoutStrong = currentAdx >= 14;
       const orbBuffer = Math.max(2, 0.05 * atrValue);
       const isOrbBullBreakout = this.orbHigh > 0 && spot > this.orbHigh + orbBuffer && lastClosedCandle && lastClosedCandle.close > this.orbHigh;
@@ -1204,7 +1204,9 @@ export class AdvisoryManager {
     // -------------------------------------------------------------
     // SETUP 3: TRAP REVERSAL (Fading Extreme False Breakouts with Rejection Wicks)
     // -------------------------------------------------------------
-    if (!candidate && !isIntradayBearTrend && !isIntradayBullTrend) {
+    // Only block if there is an extreme runaway parabolic trend (ADX >= 35 with 15m trend strongly aligned)
+    const isExtremeRunawayTrend = currentAdx >= 35 && (trend15m.trendBearish || trend15m.trendBullish);
+    if (!candidate && !isExtremeRunawayTrend) {
       const isTestingDayHigh = this.dayHigh >= this.orbHigh - 2;
       const isTestingDayLow = this.dayLow <= this.orbLow + 2;
 
@@ -1287,9 +1289,9 @@ export class AdvisoryManager {
 
       // Bullish candidate (CALL_BUY): Guard against severe drag from IT or Banking
       if (candidate === "CALL_BUY") {
-        const isBnfStronglyBearish = bnfDev < -0.12 && bnfNetChange < -0.25;
-        const isItStronglyBearish = itDev < -0.12 && itNetChange < -0.25;
-        const isSevereDivergence = (bnfDev > 0.10 && itDev < -0.15) || (itDev > 0.10 && bnfDev < -0.15);
+        const isBnfStronglyBearish = bnfDev < -0.35 && bnfNetChange < -0.60;
+        const isItStronglyBearish = itDev < -0.35 && itNetChange < -0.60;
+        const isSevereDivergence = (bnfDev > 0.35 && itDev < -0.45) || (itDev > 0.35 && bnfDev < -0.45);
 
         if (isSevereDivergence || isBnfStronglyBearish || isItStronglyBearish) {
           const reason = isSevereDivergence
@@ -1303,9 +1305,9 @@ export class AdvisoryManager {
 
       // Bearish candidate (PUT_BUY): Guard against severe drag from IT or Banking
       if (candidate === "PUT_BUY") {
-        const isBnfStronglyBullish = bnfDev > 0.12 && bnfNetChange > 0.25;
-        const isItStronglyBullish = itDev > 0.12 && itNetChange > 0.25;
-        const isSevereDivergence = (bnfDev < -0.10 && itDev > 0.15) || (itDev < -0.10 && bnfDev > 0.15);
+        const isBnfStronglyBullish = bnfDev > 0.35 && bnfNetChange > 0.60;
+        const isItStronglyBullish = itDev > 0.35 && itNetChange > 0.60;
+        const isSevereDivergence = (bnfDev < -0.35 && itDev > 0.45) || (itDev < -0.35 && bnfDev > 0.45);
 
         if (isSevereDivergence || isBnfStronglyBullish || isItStronglyBullish) {
           const reason = isSevereDivergence
@@ -1654,40 +1656,7 @@ export class AdvisoryManager {
         return;
       }
 
-      // Phase 2B: 50% Retracement Limit Entry Logic (Widen from 30% to 50% to buy at optimal pullback price)
-      const candleRange = Math.max(4, (lastClosedCandle?.high || spot) - (lastClosedCandle?.low || spot));
-      const limitRetracement = 0.50 * candleRange;
-      const limitSpot = triggerType === "CALL_BUY"
-        ? parseFloat(((lastClosedCandle?.close || spot) - limitRetracement).toFixed(2))
-        : parseFloat(((lastClosedCandle?.close || spot) + limitRetracement).toFixed(2));
-
-      const isAlreadyRetraced = triggerType === "CALL_BUY"
-        ? spot <= limitSpot
-        : spot >= limitSpot;
-
       const exactOptionSymbol = optionLeg?.symbol || this.formatFyersOptionSymbol(selectedStrike, triggerType, timestamp);
-
-      if (!isAlreadyRetraced) {
-        targetPos.pendingEntry = {
-          type: triggerType,
-          setupType,
-          strike: selectedStrike,
-          limitSpot,
-          signalSpot: spot,
-          optionLtpAtSignal: entryPrice,
-          reasoning,
-          expiresAt: timestamp + 15 * 60 * 1000, // Phase 2C: 15 minutes expiry (was 10)
-          scoreCard,
-          delta,
-          scaledStopLoss,
-          scaledTarget1,
-          scaledTarget2,
-          optionSymbol: exactOptionSymbol
-        };
-        this.lastSignalBlockReason = `🎯 Staged 50% Pullback Limit Entry: Waiting for spot to retrace to ${limitSpot.toFixed(1)} (current spot: ${spot.toFixed(1)}). Expiry: 15m.`;
-        console.log(`[AdvisoryManager] [${tier}] ${this.lastSignalBlockReason}`);
-        return;
-      }
 
       await this.executePositionEntry(
         tier,
